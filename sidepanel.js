@@ -5,12 +5,14 @@ import {
   logout,
   rememberAccount,
 } from './src/auth.js';
-import { countUnfiled, getLabel, GmailError, getUserInfo, listLabels } from './src/gmail.js';
+import { GmailError, getUserInfo, listLabels } from './src/gmail.js';
+import { formatBytes, formatTimeLeft } from './src/format.js';
 import { buildGroups } from './src/labels.js';
+import { collect } from './src/mailbox.js';
+import { clearSizes, flushSizes } from './src/sizes.js';
 
 const CACHE_KEY = 'snapshot';
 const IDENTITY_KEY = 'identity';
-const CONCURRENCY = 6;
 
 const el = {
   welcome: document.getElementById('screen-welcome'),
@@ -80,6 +82,10 @@ function setPhoto(url) {
 
 // ── Rendering ────────────────────────────────────────────────────
 
+function skeleton() {
+  return Object.assign(document.createElement('span'), { className: 'skeleton' });
+}
+
 function renderRow(item) {
   const row = document.createElement('div');
   row.className = 'row';
@@ -90,9 +96,18 @@ function renderRow(item) {
   name.className = 'row-name';
   name.textContent = item.name;
 
+  const num = document.createElement('span');
+  num.className = 'row-num';
+  num.append(skeleton());
+
+  // Filled separately and much later: the count comes from listing ids, the
+  // size from reading every one of those messages.
+  const size = document.createElement('span');
+  size.className = 'row-size';
+
   const count = document.createElement('span');
   count.className = 'row-count';
-  count.append(Object.assign(document.createElement('span'), { className: 'skeleton' }));
+  count.append(num, size);
 
   row.append(name, count);
   return row;
@@ -128,47 +143,182 @@ function renderSkeleton(groups) {
 }
 
 /**
- * @param {string} labelId
- * @param {{count: number, exact?: boolean, unread?: number, total?: number}} record
+ * Everything currently on screen, kept so a re-render can restore it. Rebuilding
+ * the rows for a refresh would otherwise drop numbers we already have back to
+ * placeholders for as long as the refresh takes.
  */
-function fillCount(labelId, record) {
+let painted = {};
+
+function paintRecords(records) {
+  for (const [labelId, incoming] of Object.entries(records)) {
+    const previous = painted[labelId];
+
+    // A fresh count arrives before its size has been recomputed. Where the
+    // count is unchanged the old size still describes the same messages, so
+    // keep showing it rather than flashing a spinner over a number we have.
+    const record =
+      incoming &&
+      incoming.bytes === undefined &&
+      previous?.bytes !== undefined &&
+      previous.count === incoming.count
+        ? { ...incoming, bytes: previous.bytes, pending: previous.pending, settled: previous.settled }
+        : incoming;
+
+    painted[labelId] = record;
+    paintRow(labelId, record);
+  }
+}
+
+/** Re-apply what was on screen after the rows have been rebuilt. */
+function repaint() {
+  for (const [labelId, record] of Object.entries(painted)) paintRow(labelId, record);
+}
+
+/** Shown beside a count while that row's messages are still being read. */
+function spinner() {
+  const el = document.createElement('span');
+  el.className = 'row-spinner';
+  el.setAttribute('aria-label', 'Measuring size');
+  return el;
+}
+
+/**
+ * @param {string} labelId
+ * @param {{count: number, total?: number, bytes?: number, pending?: number,
+ *   settled?: boolean} | null} record
+ */
+function paintRow(labelId, record) {
   const row = el.groups.querySelector(`[data-label-id="${CSS.escape(labelId)}"]`);
   if (!row) return;
 
   const cell = row.querySelector('.row-count');
+  const num = row.querySelector('.row-num');
+  const size = row.querySelector('.row-size');
 
   if (!record) {
-    cell.textContent = '—';
+    num.textContent = '—';
+    size.replaceChildren();
     row.title = 'Count unavailable.';
     return;
   }
 
-  const value = record.count.toLocaleString();
-  cell.textContent = record.exact === false ? `${value}+` : value;
+  const count = record.count.toLocaleString();
+  num.textContent = count;
   cell.classList.toggle('row-count--zero', record.count === 0);
 
-  if (record.total !== undefined) {
-    row.title = `${value} filed away · ${record.total.toLocaleString()} total`;
-  }
+  // A running total that creeps upward is noise, not information, so a row
+  // spins until its own messages have all been read and then shows one figure.
+  // "Settled" is the load reporting it has stopped, which is what separates
+  // still-waiting from could-not-be-measured.
+  const short = record.bytes === undefined || (record.pending ?? 0) > 0;
+  const measuring = short && !record.settled;
 
-  if (record.unread) {
-    const pill = document.createElement('span');
-    pill.className = 'unread';
-    pill.textContent = record.unread.toLocaleString();
-    pill.title = `${record.unread.toLocaleString()} unread`;
-    row.insertBefore(pill, cell);
+  if (record.count === 0) {
+    size.replaceChildren();
+  } else if (measuring) {
+    size.replaceChildren(spinner());
+  } else if (record.bytes === undefined) {
+    size.replaceChildren();
+  } else {
+    size.textContent = `(${formatBytes(record.bytes)})`;
   }
+  // Settled but short: a real figure, just known to be missing some messages.
+  size.classList.toggle('row-size--partial', short && !measuring);
+
+  const title = [];
+  if (record.total !== undefined) {
+    title.push(`${count} filed away`, `${record.total.toLocaleString()} in the label`);
+  }
+  if (record.count > 0) {
+    if (measuring) {
+      title.push('measuring size…');
+    } else if (record.bytes !== undefined) {
+      // Gmail reports a per-message estimate, so the total is an estimate too.
+      const bytes = formatBytes(record.bytes);
+      title.push(
+        record.pending
+          ? `at least ${bytes} · ${record.pending.toLocaleString()} unmeasured`
+          : `about ${bytes}`
+      );
+    }
+  }
+  row.title = title.join(' · ');
 }
 
-function setFooter(timestamp) {
+/** @type {number | null} when the numbers on screen were gathered */
+let lastLoaded = null;
+
+/** A load is running. Counts arrive in stages, and the footer must not claim
+ *  the numbers are current while later stages are still filling in. */
+let busy = false;
+
+/** @type {{done: number, total: number, startedAt: number} | null} */
+let progress = null;
+
+/** Keeps the estimate honest between batches — a stall should show up as time
+ *  remaining growing, not as a number frozen mid-run. */
+let ticker = null;
+
+/**
+ * Seconds left at the rate this run has actually achieved, or null while that
+ * is still guesswork. Measured rather than predicted: the quota ceiling puts a
+ * floor near 50 messages a second, but latency, retries and how much was
+ * already cached all move it.
+ */
+function secondsRemaining({ done, total, startedAt }) {
+  const elapsed = (Date.now() - startedAt) / 1000;
+  if (done < 200 || elapsed < 5) return null; // too early to be honest
+  const rate = done / elapsed;
+  return rate > 0 ? (total - done) / rate : null;
+}
+
+function setFooter(timestamp = lastLoaded) {
+  lastLoaded = timestamp;
+
+  if (progress) {
+    const { done, total } = progress;
+    const parts = [`Measuring sizes… ${done.toLocaleString()} of ${total.toLocaleString()}`];
+    const seconds = secondsRemaining(progress);
+    if (seconds !== null) parts.push(formatTimeLeft(seconds));
+    el.footer.textContent = parts.join(' · ');
+    return;
+  }
+
+  if (busy) {
+    el.footer.textContent = timestamp ? 'Updating…' : 'Loading…';
+    return;
+  }
+
   if (!timestamp) {
     el.footer.textContent = '';
     return;
   }
+
   const minutes = Math.round((Date.now() - timestamp) / 60000);
   const when =
     minutes < 1 ? 'just now' : minutes === 1 ? '1 minute ago' : `${minutes} minutes ago`;
   el.footer.textContent = `Updated ${when}`;
+}
+
+/**
+ * Sizes cost one Gmail read per message, so a first run over a large mailbox
+ * takes minutes. Saying how many and how long beats an unexplained wait.
+ */
+function setProgress(done, total) {
+  if (total > 0) {
+    // `total` is fixed for a run, so a matching one means the same run
+    // continuing and the clock it is timed against must not restart.
+    progress =
+      progress?.total === total
+        ? { ...progress, done }
+        : { done, total, startedAt: Date.now() };
+    ticker ??= setInterval(() => setFooter(), 1000);
+  } else {
+    progress = null;
+    clearInterval(ticker);
+    ticker = null;
+  }
+  setFooter();
 }
 
 // ── Error state ──────────────────────────────────────────────────
@@ -327,66 +477,42 @@ function renderErrorState(err) {
 
 // ── Loading ──────────────────────────────────────────────────────
 
-/** Runs `worker` over `items` with a bounded number in flight at once. */
-async function pool(items, limit, worker) {
-  let cursor = 0;
-  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const item = items[cursor++];
-      try {
-        await worker(item);
-      } catch (err) {
-        if (err instanceof AuthError) throw err;
-        console.warn('[MailBoy] count failed for', item?.id, err);
-        fillCount(item.id, null);
-      }
-    }
-  });
-  await Promise.all(runners);
-}
-
 async function load() {
   if (loading) return;
   loading = true;
+  busy = true;
+  setFooter();
 
   try {
     const labels = await listLabels();
     const groups = buildGroups(labels);
     renderSkeleton(groups);
-
-    /** @type {Record<string, object>} */
-    const counts = {};
-    const record = (id, value) => {
-      counts[id] = value;
-      fillCount(id, value);
-    };
-
-    // System labels and categories: labels.get already carries the totals.
-    await pool([...groups.mailboxes, ...groups.categories], CONCURRENCY, async (item) => {
-      const detail = await getLabel(item.id);
-      record(item.id, {
-        count: detail.messagesTotal ?? 0,
-        exact: true,
-        unread: item.id === 'INBOX' ? detail.messagesUnread ?? 0 : 0,
-      });
-    });
-
-    // User labels: the headline number is mail filed under the label and
-    // nowhere else, which needs a real search per label.
-    await pool(groups.user, CONCURRENCY, async (item) => {
-      const [detail, unfiled] = await Promise.all([
-        getLabel(item.id),
-        countUnfiled(item.id),
-      ]);
-      record(item.id, { ...unfiled, total: detail.messagesTotal ?? 0 });
-    });
+    // Rows were just rebuilt; put back whatever was already known so a refresh
+    // shows stale numbers rather than placeholders.
+    repaint();
 
     const generatedAt = Date.now();
+
+    const counts = await collect(groups, {
+      // Deliberately not stamping the timestamp here: counts land in stages,
+      // and "Updated just now" while later rows are still filling in is a lie.
+      onCounts: paintRecords,
+      onSizes: (records, done, total) => {
+        paintRecords(records);
+        setProgress(done, total);
+      },
+    });
+
+    paintRecords(counts);
+    setProgress(0, 0);
+    busy = false;
     setFooter(generatedAt);
+
     await chrome.storage.local.set({
       [CACHE_KEY]: { generatedAt, groups, counts },
     });
   } catch (err) {
+    setProgress(0, 0);
     console.error('[MailBoy] load failed:', err);
     if (err instanceof AuthError) {
       await chrome.storage.local.remove(CACHE_KEY);
@@ -396,6 +522,7 @@ async function load() {
     }
   } finally {
     loading = false;
+    busy = false;
   }
 }
 
@@ -435,9 +562,7 @@ async function paintCache() {
   if (!cached?.groups) return;
 
   renderSkeleton(cached.groups);
-  for (const [id, value] of Object.entries(cached.counts ?? {})) {
-    fillCount(id, value);
-  }
+  paintRecords(cached.counts ?? {});
   setFooter(cached.generatedAt);
 }
 
@@ -471,14 +596,26 @@ el.connect.addEventListener('click', async () => {
 async function handleLogout() {
   await logout();
   await chrome.storage.local.remove([CACHE_KEY, IDENTITY_KEY]);
+  // Sizes are mail data. Signing out should leave nothing behind, even though
+  // rebuilding the cache is the slowest thing the panel does.
+  await clearSizes();
+  painted = {};
   el.groups.replaceChildren();
-  el.footer.textContent = '';
+  setProgress(0, 0);
+  setFooter(null);
   setAccount(null);
   setPhoto(null);
   showWelcome(null);
 }
 
 el.logout.addEventListener('click', () => handleLogout());
+
+// Closing the side panel tears the page down mid-measurement. This is best
+// effort only — storage writes are async and may not finish — so the real
+// protection is the interval flush inside the size cache.
+addEventListener('pagehide', () => {
+  void flushSizes();
+});
 
 // ── Boot ─────────────────────────────────────────────────────────
 
@@ -493,6 +630,7 @@ el.logout.addEventListener('click', () => handleLogout());
 
   showMain();
   await Promise.all([paintIdentityCache(), paintCache()]);
-  await loadIdentity();
-  await load();
+  // Both already have a token, and the mailbox load should not queue behind a
+  // userinfo round trip just to fill in the header.
+  await Promise.all([loadIdentity(), load()]);
 })();
