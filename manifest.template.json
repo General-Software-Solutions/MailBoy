@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "MailBoy",
+  "version": "0.1.0",
+  "description": "A calm, clutter-free view of your Gmail labels and where your mail actually lives.",
+  "minimum_chrome_version": "114",
+  "permissions": ["identity", "storage", "sidePanel"],
+  "host_permissions": [
+    "https://gmail.googleapis.com/*",
+    "https://oauth2.googleapis.com/*",
+    "https://openidconnect.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open MailBoy"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
+}

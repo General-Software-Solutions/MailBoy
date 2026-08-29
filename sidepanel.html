@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MailBoy</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <!-- ── Welcome ─────────────────────────────────────────────── -->
+    <section id="screen-welcome" class="screen screen--center">
+      <div class="welcome">
+        <svg class="mark" viewBox="0 0 48 48" aria-hidden="true">
+          <rect x="4" y="10" width="40" height="28" rx="7" class="mark-body" />
+          <path d="M8 16.5l14.2 10.1a3 3 0 0 0 3.6 0L40 16.5" class="mark-fold" />
+        </svg>
+        <h1>MailBoy</h1>
+        <p class="tagline">See where your mail actually lives.</p>
+
+        <button id="btn-connect" class="btn btn--primary">Connect to Mailbox</button>
+
+        <p class="fineprint">
+          A Google sign-in window will open so you can choose an account.
+          MailBoy only ever gets read access, and talks to Gmail directly from
+          this browser — your mail is never sent to a server of ours.
+        </p>
+
+        <div id="welcome-error" class="notice notice--error" hidden></div>
+      </div>
+    </section>
+
+    <!-- ── Mailbox ─────────────────────────────────────────────── -->
+    <section id="screen-main" class="screen" hidden>
+      <header class="topbar">
+        <div class="identity">
+          <span id="avatar" class="avatar">
+            <img id="avatar-photo" alt="" hidden />
+            <svg id="avatar-fallback" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="9" r="3.1" />
+              <path d="M5.9 19.4a6.4 6.4 0 0 1 12.2 0" />
+            </svg>
+          </span>
+          <span class="identity-text">
+            <span class="wordmark">MailBoy</span>
+            <span id="account" class="account"></span>
+          </span>
+        </div>
+        <button id="btn-logout" class="btn btn--ghost btn--xs">
+          <span class="icon" aria-hidden="true">logout</span><span>Log out</span>
+        </button>
+      </header>
+
+      <main id="groups" class="groups"></main>
+
+      <footer id="footer" class="footer"></footer>
+    </section>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>
