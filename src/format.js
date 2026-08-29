@@ -21,6 +21,31 @@ export function formatBytes(bytes) {
   return `${value.toFixed(decimals)} ${UNITS[unit]}`;
 }
 
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+/**
+ * How long ago something happened: "just now", "9 minutes ago", "3 hours ago".
+ *
+ * Counts are only re-read once a day, so this routinely has to describe gaps of
+ * many hours — minutes alone would read as "847 minutes ago".
+ */
+export function formatAgo(elapsed) {
+  if (!Number.isFinite(elapsed) || elapsed < 45_000) return 'just now';
+
+  // Each unit is chosen from its own rounded value, so 59.7 minutes becomes
+  // "1 hour ago" rather than "60 minutes ago".
+  const minutes = Math.round(elapsed / MINUTE);
+  if (minutes < 60) return minutes === 1 ? '1 minute ago' : `${minutes} minutes ago`;
+
+  const hours = Math.round(elapsed / HOUR);
+  if (hours < 24) return hours === 1 ? '1 hour ago' : `${hours} hours ago`;
+
+  const days = Math.round(elapsed / DAY);
+  return days === 1 ? '1 day ago' : `${days} days ago`;
+}
+
 /**
  * How much longer something has to run: "about 6 minutes left".
  *

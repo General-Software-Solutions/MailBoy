@@ -228,19 +228,26 @@ const BATCH_CONCURRENCY = 3;
 const MAX_ATTEMPTS = 4;
 
 /**
- * `sizeEstimate` for each id, as a Map of id → bytes.
+ * Size and sender for each id, as a Map of id → `{bytes, from}`.
  *
  * This is the expensive thing MailBoy asks Gmail for, and there is no cheaper
- * route: size exists only per message, and labels.get does not carry it.
- * `format=minimal` keeps each response to a few dozen bytes — no headers, no
- * body, no attachment data — but the quota cost is 5 units either way, so the
- * caller is expected to ask only for ids it has not already cached.
+ * route: neither figure exists anywhere but on the individual message, and
+ * labels.get carries neither.
+ *
+ * `messages.get` costs 5 quota units whatever the format, so asking for the
+ * From header alongside the size is free — `format=metadata` with a single
+ * `metadataHeaders` costs exactly what `format=minimal` did. Only the response
+ * grows, from roughly 40 bytes to 150, which is nothing against a pass that is
+ * quota-bound rather than bandwidth-bound. No body and no attachment data is
+ * transferred either way.
+ *
+ * The caller is expected to ask only for ids it has not already cached.
  *
  * `onBatch(found)` fires with each batch's results as they land, so a long
  * first run can report progress instead of going quiet.
  */
-export async function fetchSizes(ids, onBatch) {
-  const sizes = new Map();
+export async function fetchMessageMeta(ids, onBatch) {
+  const meta = new Map();
   let pending = [...ids];
 
   for (let attempt = 0; pending.length && attempt < MAX_ATTEMPTS; attempt++) {
@@ -259,7 +266,7 @@ export async function fetchSizes(ids, onBatch) {
         while (cursor < chunks.length) {
           const chunk = chunks[cursor++];
           const found = await runBatch(chunk, retry);
-          for (const [id, bytes] of found) sizes.set(id, bytes);
+          for (const [id, entry] of found) meta.set(id, entry);
           if (found.size) onBatch?.(found);
         }
       })
@@ -268,7 +275,7 @@ export async function fetchSizes(ids, onBatch) {
     pending = retry;
   }
 
-  return sizes;
+  return meta;
 }
 
 /**
@@ -288,7 +295,8 @@ async function runBatch(ids, retry) {
           'Content-Type: application/http\r\n' +
           `Content-ID: <m${index}>\r\n\r\n` +
           `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}` +
-          '?format=minimal&fields=sizeEstimate&prettyPrint=false\r\n\r\n'
+          '?format=metadata&metadataHeaders=From' +
+          '&fields=sizeEstimate,payload/headers&prettyPrint=false\r\n\r\n'
       )
       .join('') + `--${boundary}--\r\n`;
 
@@ -374,8 +382,13 @@ function parseBatch(text, contentType, ids, retry) {
     if (!body) continue;
 
     try {
-      const bytes = JSON.parse(body)?.sizeEstimate;
-      if (Number.isFinite(bytes)) found.set(id, bytes);
+      const data = JSON.parse(body);
+      const bytes = data?.sizeEstimate;
+      // Header names are case-insensitive and Gmail's casing is not promised.
+      const from =
+        data?.payload?.headers?.find((header) => header.name?.toLowerCase() === 'from')?.value ??
+        '';
+      if (Number.isFinite(bytes)) found.set(id, { bytes, from });
     } catch {
       retry.push(id);
     }

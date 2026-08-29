@@ -4,14 +4,15 @@
   "version": "0.1.0",
   "description": "A calm, clutter-free view of your Gmail labels and where your mail actually lives.",
   "minimum_chrome_version": "114",
-  "permissions": ["identity", "storage", "unlimitedStorage", "sidePanel"],
+  "permissions": ["identity", "storage", "unlimitedStorage", "sidePanel", "alarms"],
   "host_permissions": [
     "https://gmail.googleapis.com/*",
     "https://oauth2.googleapis.com/*",
     "https://openidconnect.googleapis.com/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "action": {
     "default_title": "Open MailBoy"

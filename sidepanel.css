@@ -102,8 +102,10 @@ body {
   flex-direction: column;
 }
 
-.screen[hidden] {
-  display: none;
+/* Several things here set their own display, which would otherwise win over
+   the attribute. */
+[hidden] {
+  display: none !important;
 }
 
 .screen--center {
@@ -295,6 +297,125 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ── Loading state ───────────────────────────────────────────── */
+/* Reading every message takes minutes on a first run. A footer line is too
+   quiet for that, so the list is dimmed and the reason is spelled out. */
+.content {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Hover implies clickable, and during a load nothing is. */
+.groups--locked .row {
+  pointer-events: none;
+}
+
+.notice-card {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  margin: 10px var(--pad-x) 2px;
+  padding: 11px 12px 12px;
+  background: var(--accent-soft);
+  border-radius: 10px;
+}
+
+.notice-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.notice-spinner {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  /* Track painted in the page background so it reads against the card. */
+  border: 2px solid var(--bg);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.notice-title {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 620;
+  letter-spacing: -0.005em;
+  color: var(--text);
+}
+
+.notice-body {
+  margin: 7px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+/* Reads as one line with the bar: how far along on the left, how much longer
+   on the right. */
+.progress-stats {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 11px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.progress-left {
+  color: var(--faint);
+  text-align: right;
+}
+
+.progress {
+  margin-top: 5px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.progress-bar {
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+/* Counting labels comes before measuring, and has no ratio to report. The bar
+   paces rather than pretending to know how far along it is. */
+.progress--indeterminate .progress-bar {
+  width: 35%;
+  transition: none;
+  animation: slide 1.5s ease-in-out infinite;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notice-spinner {
+    animation-duration: 2.4s;
+  }
+  .progress--indeterminate .progress-bar {
+    animation-duration: 3.5s;
+  }
 }
 
 /* ── Groups & rows ───────────────────────────────────────────── */
@@ -535,10 +656,20 @@ body {
 }
 
 /* ── Footer ──────────────────────────────────────────────────── */
+/* Pinned below the scroll area: the list ends above the button, not under it. */
+.actions-bar {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  padding: 8px var(--pad-x) 6px;
+  border-top: 1px solid var(--border);
+}
+
+/* The bar above already separates this from the list, so no second rule. */
 .footer {
   flex: 0 0 auto;
-  padding: 8px var(--pad-x) 10px;
-  border-top: 1px solid var(--border);
+  padding: 0 var(--pad-x) 9px;
   font-size: 11px;
   color: var(--faint);
+  text-align: center;
 }

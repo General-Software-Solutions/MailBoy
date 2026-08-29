@@ -6,25 +6,40 @@ import {
   rememberAccount,
 } from './src/auth.js';
 import { GmailError, getUserInfo, listLabels } from './src/gmail.js';
-import { formatBytes, formatTimeLeft } from './src/format.js';
+import { formatAgo, formatBytes, formatTimeLeft } from './src/format.js';
 import { buildGroups } from './src/labels.js';
-import { collect } from './src/mailbox.js';
-import { clearSizes, flushSizes } from './src/sizes.js';
+import { collect, forgetMembership, restoreMembership } from './src/mailbox.js';
+import { clearMessages } from './src/messages.js';
 
 const CACHE_KEY = 'snapshot';
 const IDENTITY_KEY = 'identity';
+
+/**
+ * How stale the numbers may get before an open re-reads them.
+ *
+ * Enumeration costs a few seconds of listing every time, and a mailbox does not
+ * change enough between openings of a side panel to be worth paying that on
+ * each one. "Refresh current data" is there for when it does.
+ */
+const REFRESH_AFTER_MS = 24 * 60 * 60 * 1000;
 
 const el = {
   welcome: document.getElementById('screen-welcome'),
   main: document.getElementById('screen-main'),
   connect: document.getElementById('btn-connect'),
   logout: document.getElementById('btn-logout'),
+  refresh: document.getElementById('btn-refresh'),
   welcomeError: document.getElementById('welcome-error'),
   account: document.getElementById('account'),
   avatarPhoto: document.getElementById('avatar-photo'),
   avatarFallback: document.getElementById('avatar-fallback'),
   groups: document.getElementById('groups'),
   footer: document.getElementById('footer'),
+  notice: document.getElementById('notice'),
+  progress: document.getElementById('progress'),
+  progressBar: document.getElementById('progress-bar'),
+  progressDone: document.getElementById('progress-done'),
+  progressLeft: document.getElementById('progress-left'),
 };
 
 let loading = false;
@@ -252,12 +267,56 @@ let lastLoaded = null;
  *  the numbers are current while later stages are still filling in. */
 let busy = false;
 
-/** @type {{done: number, total: number, startedAt: number} | null} */
+/**
+ * @type {{phase: 'counting' | 'measuring', done: number, total: number,
+ *   startedAt: number, startDone: number} | null}
+ */
 let progress = null;
 
 /** Keeps the estimate honest between batches — a stall should show up as time
  *  remaining growing, not as a number frozen mid-run. */
 let ticker = null;
+
+function setBusy(running) {
+  busy = running;
+  el.refresh.disabled = running;
+  el.refresh.querySelector('.icon').classList.toggle('icon--spin', running);
+  paintProgress();
+  setFooter();
+}
+
+/**
+ * The card is up for the whole load. During enumeration it explains what is
+ * coming — nothing is openable then either, since the id sets a breakdown
+ * needs are still being rebuilt — and its bar paces until the size pass has a
+ * ratio to report. Counting keeps its own line in the footer; the two phases
+ * never overlap, because measuring works through a queue that is not built
+ * until every label has been listed.
+ */
+function paintProgress() {
+  const measuring = progress?.phase === 'measuring';
+
+  el.notice.hidden = !busy;
+  el.groups.classList.toggle('groups--locked', busy);
+  el.progress.classList.toggle('progress--indeterminate', !measuring);
+
+  if (!measuring) {
+    el.progressBar.style.width = '';
+    el.progress.removeAttribute('aria-valuenow');
+    el.progressDone.textContent = '';
+    el.progressLeft.textContent = '';
+    return;
+  }
+
+  const { done, total } = progress;
+  const percent = Math.round((done / total) * 100);
+  el.progressBar.style.width = `${percent}%`;
+  el.progress.setAttribute('aria-valuenow', String(percent));
+
+  el.progressDone.textContent = `${done.toLocaleString()} of ${total.toLocaleString()}`;
+  const seconds = secondsRemaining(progress);
+  el.progressLeft.textContent = seconds === null ? '' : formatTimeLeft(seconds);
+}
 
 /**
  * Seconds left at the rate this run has actually achieved, or null while that
@@ -265,59 +324,59 @@ let ticker = null;
  * floor near 50 messages a second, but latency, retries and how much was
  * already cached all move it.
  */
-function secondsRemaining({ done, total, startedAt }) {
+function secondsRemaining({ done, total, startedAt, startDone }) {
   const elapsed = (Date.now() - startedAt) / 1000;
-  if (done < 200 || elapsed < 5) return null; // too early to be honest
-  const rate = done / elapsed;
+  // Opening the panel ten minutes into a background pass hands us a large
+  // `done` we did not watch accumulate. Rate has to come from the window this
+  // panel has actually observed, or the estimate is wildly optimistic.
+  const watched = done - startDone;
+  if (watched < 200 || elapsed < 5) return null; // too early to be honest
+  const rate = watched / elapsed;
   return rate > 0 ? (total - done) / rate : null;
 }
 
 function setFooter(timestamp = lastLoaded) {
   lastLoaded = timestamp;
 
-  if (progress) {
-    const { done, total } = progress;
-    const parts = [`Measuring sizes… ${done.toLocaleString()} of ${total.toLocaleString()}`];
-    const seconds = secondsRemaining(progress);
-    if (seconds !== null) parts.push(formatTimeLeft(seconds));
-    el.footer.textContent = parts.join(' · ');
-    return;
-  }
-
-  if (busy) {
-    el.footer.textContent = timestamp ? 'Updating…' : 'Loading…';
+  // Counting, warm or cold. Once it is done the counts on screen are final,
+  // so the timestamp is honest even while sizes are still being read.
+  if (progress?.phase === 'counting') {
+    el.footer.textContent = `Counting labels… ${progress.done} of ${progress.total}`;
     return;
   }
 
   if (!timestamp) {
-    el.footer.textContent = '';
+    el.footer.textContent = busy ? 'Loading…' : '';
     return;
   }
 
-  const minutes = Math.round((Date.now() - timestamp) / 60000);
-  const when =
-    minutes < 1 ? 'just now' : minutes === 1 ? '1 minute ago' : `${minutes} minutes ago`;
-  el.footer.textContent = `Updated ${when}`;
+  el.footer.textContent = `Updated ${formatAgo(Date.now() - timestamp)}`;
 }
 
 /**
  * Sizes cost one Gmail read per message, so a first run over a large mailbox
  * takes minutes. Saying how many and how long beats an unexplained wait.
  */
-function setProgress(done, total) {
-  if (total > 0) {
-    // `total` is fixed for a run, so a matching one means the same run
+function tick() {
+  paintProgress();
+  setFooter();
+}
+
+function setProgress(phase, done, total) {
+  if (phase && total > 0) {
+    // `total` is fixed within a phase, so a matching one means the same run
     // continuing and the clock it is timed against must not restart.
     progress =
-      progress?.total === total
+      progress?.phase === phase && progress?.total === total
         ? { ...progress, done }
-        : { done, total, startedAt: Date.now() };
-    ticker ??= setInterval(() => setFooter(), 1000);
+        : { phase, done, total, startedAt: Date.now(), startDone: done };
+    ticker ??= setInterval(tick, 1000);
   } else {
     progress = null;
     clearInterval(ticker);
     ticker = null;
   }
+  paintProgress();
   setFooter();
 }
 
@@ -439,7 +498,7 @@ function renderErrorState(err) {
 
     // A repeat failure re-renders an identical state, so without a floor on
     // the pending state the click looks like it did nothing at all.
-    await Promise.all([load(), new Promise((done) => setTimeout(done, 450))]);
+    await Promise.all([load({ force: true }), new Promise((done) => setTimeout(done, 450))]);
 
     // On success this state is gone; on failure a fresh one replaced it.
     if (retry.el.isConnected) {
@@ -472,16 +531,78 @@ function renderErrorState(err) {
   state.append(icon, heading, text, actions, details);
 
   el.groups.replaceChildren(state);
-  el.footer.textContent = '';
+  // The numbers this timestamp described are gone from the screen with them.
+  setFooter(null);
+}
+
+// ── Measuring, in the service worker ─────────────────────────────
+
+/**
+ * Hand the queue to the worker and relay its progress.
+ *
+ * The work runs there so it survives the panel being closed — a first pass
+ * takes minutes and nobody should have to sit and watch it. The panel is only
+ * a viewer here: it can come and go, and the pass carries on.
+ */
+async function measureInWorker(order, onBatch) {
+  // A killed worker drops the port. It resumes on its own from the alarm, so
+  // reconnecting and asking again is all that is needed — and because the
+  // cache filters what it has already read, nothing is measured twice.
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const outcome = await new Promise((resolve, reject) => {
+      const port = chrome.runtime.connect({ name: 'measure' });
+
+      port.onMessage.addListener((message) => {
+        if (message?.type === 'progress') {
+          onBatch(new Map(Object.entries(message.sizes ?? {})), message.done, message.total);
+        } else if (message?.type === 'done') {
+          port.disconnect();
+          resolve('done');
+        } else if (message?.type === 'failed') {
+          port.disconnect();
+          reject(new Error(message.message || 'Measuring failed.'));
+        }
+      });
+
+      // Only fires when the other end goes away, never for our own disconnect.
+      port.onDisconnect.addListener(() => resolve('dropped'));
+
+      port.postMessage({ type: 'start', order });
+    });
+
+    if (outcome === 'done') return;
+    await new Promise((done) => setTimeout(done, 1000));
+  }
 }
 
 // ── Loading ──────────────────────────────────────────────────────
 
-async function load() {
+/** Whether the snapshot on screen is recent enough to stand on its own. */
+async function isFresh() {
+  try {
+    const { [CACHE_KEY]: cached } = await chrome.storage.local.get(CACHE_KEY);
+    return Boolean(cached?.counts) && Date.now() - cached.generatedAt < REFRESH_AFTER_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @param {{force?: boolean}} [options] `force` skips the freshness check —
+ *   what the refresh button and the error-state retry both want.
+ */
+async function load({ force = false } = {}) {
   if (loading) return;
+
+  if (!force && (await isFresh())) {
+    // Nothing to re-read. Put the last enumeration's ids back in memory,
+    // though, so a breakdown works without having listed anything.
+    void restoreMembership();
+    return;
+  }
+
   loading = true;
-  busy = true;
-  setFooter();
+  setBusy(true);
 
   try {
     const labels = await listLabels();
@@ -497,22 +618,27 @@ async function load() {
       // Deliberately not stamping the timestamp here: counts land in stages,
       // and "Updated just now" while later rows are still filling in is a lie.
       onCounts: paintRecords,
+      onCounting: (done, total) => setProgress('counting', done, total),
       onSizes: (records, done, total) => {
         paintRecords(records);
-        setProgress(done, total);
+        // Enumeration is finished by the time this first fires, so the counts
+        // are final and worth stamping — sizes carry on in the card.
+        setFooter(generatedAt);
+        setProgress('measuring', done, total);
       },
+      measure: measureInWorker,
     });
 
     paintRecords(counts);
-    setProgress(0, 0);
-    busy = false;
+    setProgress(null);
+    setBusy(false);
     setFooter(generatedAt);
 
     await chrome.storage.local.set({
       [CACHE_KEY]: { generatedAt, groups, counts },
     });
   } catch (err) {
-    setProgress(0, 0);
+    setProgress(null);
     console.error('[MailBoy] load failed:', err);
     if (err instanceof AuthError) {
       await chrome.storage.local.remove(CACHE_KEY);
@@ -522,7 +648,7 @@ async function load() {
     }
   } finally {
     loading = false;
-    busy = false;
+    setBusy(false);
   }
 }
 
@@ -598,10 +724,12 @@ async function handleLogout() {
   await chrome.storage.local.remove([CACHE_KEY, IDENTITY_KEY]);
   // Sizes are mail data. Signing out should leave nothing behind, even though
   // rebuilding the cache is the slowest thing the panel does.
-  await clearSizes();
+  await clearMessages();
+  await forgetMembership();
   painted = {};
   el.groups.replaceChildren();
-  setProgress(0, 0);
+  setProgress(null);
+  setBusy(false);
   setFooter(null);
   setAccount(null);
   setPhoto(null);
@@ -610,12 +738,7 @@ async function handleLogout() {
 
 el.logout.addEventListener('click', () => handleLogout());
 
-// Closing the side panel tears the page down mid-measurement. This is best
-// effort only — storage writes are async and may not finish — so the real
-// protection is the interval flush inside the size cache.
-addEventListener('pagehide', () => {
-  void flushSizes();
-});
+el.refresh.addEventListener('click', () => load({ force: true }));
 
 // ── Boot ─────────────────────────────────────────────────────────
 

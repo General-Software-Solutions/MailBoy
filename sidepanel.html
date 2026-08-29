@@ -50,7 +50,43 @@
         </button>
       </header>
 
-      <main id="groups" class="groups"></main>
+      <div class="content">
+        <section id="notice" class="notice-card" hidden>
+          <div class="notice-head">
+            <span class="notice-spinner" aria-hidden="true"></span>
+            <h2 class="notice-title">Getting your mailbox ready</h2>
+          </div>
+          <p class="notice-body">
+            MailBoy is going through your mailbox to work out how much room
+            each label takes up. This happens once — after that, opening
+            MailBoy is quick. Labels can't be opened for a breakdown until it
+            finishes.
+          </p>
+          <div class="progress-stats">
+            <span id="progress-done"></span>
+            <span id="progress-left" class="progress-left"></span>
+          </div>
+          <div
+            id="progress"
+            class="progress"
+            role="progressbar"
+            aria-label="Reading messages"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <div id="progress-bar" class="progress-bar"></div>
+          </div>
+        </section>
+
+        <main id="groups" class="groups"></main>
+      </div>
+
+      <div class="actions-bar">
+        <button id="btn-refresh" class="btn btn--ghost btn--xs">
+          <span class="icon" aria-hidden="true">refresh</span
+          ><span>Refresh current data</span>
+        </button>
+      </div>
 
       <footer id="footer" class="footer"></footer>
     </section>
