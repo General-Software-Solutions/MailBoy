@@ -9,22 +9,6 @@ import { AuthError, getLabel, listLabels, listMessageIds } from './gmail.js';
 import { buildGroups } from './labels.js';
 import { bySender, isMeasured, loadMessages, reloadMessages, sizeOf } from './messages.js';
 
-/**
- * A message matching none of these is filed away rather than still in the flow.
- *
- * This was briefly reimplemented as set subtraction over the flow labels'
- * message ids. That was exact, but it made every user label wait on Inbox —
- * the largest label in the mailbox — before it could show a number, because
- * the subtraction needs the whole flow enumerated first. Asking Gmail to do
- * the filtering costs the same 5 quota units a page and lets each label
- * resolve on its own, so the panel fills in as results arrive rather than all
- * at once at the end.
- *
- * The original reason for moving away from this query — a 10,000-message cap —
- * was our own page limit, not Gmail's, and is gone.
- */
-const UNFILED_QUERY = '-in:inbox -in:sent -in:trash -in:spam -is:draft -in:chats';
-
 /** Rows that count something narrower than their whole label. */
 const SCOPES = {
   inbox: 'in:inbox',
@@ -130,32 +114,33 @@ const rowsOf = (groups) => [...groups.defaults, ...groups.user];
  * other, so small labels appear almost immediately and only Inbox-sized ones
  * take their time.
  *
+ * A user folder counts every message carrying its label, full stop. An earlier
+ * rule excluded anything still in the flow — inbox, sent, drafts, spam, trash —
+ * so a row read as "filed away under this label" rather than "in this label".
+ * That is a distinction Gmail's own UI never makes, and it left a folder
+ * showing a smaller number than the same folder in Gmail with nothing on screen
+ * explaining the gap.
+ *
  * @returns {Promise<Map<string, string[]>>} row id → exactly the ids its number counts
  */
 async function enumerateRows(groups, onRow, stopped) {
   const rows = rowsOf(groups);
-  const isUser = new Set(groups.user.map((row) => row.id));
   const counted = new Map();
 
   await pool(rows, LIST_CONCURRENCY, async (row) => {
     if (stopped?.()) return;
-    const filed = isUser.has(row.id);
     try {
       // A row can carry its own scope — the categories are narrowed to the
       // inbox so they partition it rather than counting archived mail twice.
-      const ids = await listMessageIds(
-        row.id,
-        row.scope ? SCOPES[row.scope] : filed ? UNFILED_QUERY : undefined,
-        stopped
-      );
+      const ids = await listMessageIds(row.id, row.scope ? SCOPES[row.scope] : undefined, stopped);
       counted.set(row.id, ids);
-      onRow?.(row, ids, filed);
+      onRow?.(row, ids);
     } catch (err) {
       // Reconnecting fixes an auth problem and nothing else does, so that one
       // stops the load. A single label refusing to list should not.
       if (err instanceof AuthError) throw err;
       console.warn('[MailBoy] could not enumerate', row.id, err);
-      onRow?.(row, null, filed);
+      onRow?.(row, null);
     }
   });
 
@@ -224,18 +209,13 @@ export async function collect(groups, hooks = {}) {
   // its own wait once the listing is done.
   const cacheReady = loadMessages();
 
-  const isUser = new Set(groups.user.map((row) => row.id));
-
-  /** @type {Map<string, number>} user label id → messages in the label overall */
-  const totals = new Map();
-
   // ── Counts, the fast half ──────────────────────────────────────
   //
   // Enumerating every label takes seconds, and a panel of pulsing placeholders
   // for that long reads as broken. labels.get costs 1 quota unit and answers
-  // immediately: for a system row that total is exactly the number displayed,
-  // and for a user row it is the tooltip's "in the label" figure. Deliberately
-  // not awaited here — it runs alongside the listing rather than delaying it.
+  // immediately, and now that every unscoped row counts its whole label, it is
+  // exactly the number that row will settle on. Deliberately not awaited here —
+  // it runs alongside the listing rather than delaying it.
   const provisional = pool(rows, LIST_CONCURRENCY, async (row) => {
     if (stopped()) return;
     try {
@@ -244,17 +224,6 @@ export async function collect(groups, hooks = {}) {
       if (row.scope) return;
 
       const total = (await getLabel(row.id)).messagesTotal ?? 0;
-
-      if (isUser.has(row.id)) {
-        // Not the number a user row shows — filed-away is a subset — so this
-        // only ever fills in the tooltip.
-        totals.set(row.id, total);
-        if (records[row.id]) {
-          records[row.id] = { ...records[row.id], total };
-          emit();
-        }
-        return;
-      }
 
       if (records[row.id]) return; // enumeration got there first
       records[row.id] = { count: total };
@@ -275,15 +244,13 @@ export async function collect(groups, hooks = {}) {
 
   const counted = await enumerateRows(
     groups,
-    (row, ids, filed) => {
+    (row, ids) => {
       if (!ids) {
         // A label that would not enumerate may still have a provisional total,
         // and a real number beats a dash.
         records[row.id] = records[row.id] ?? null;
       } else {
-        records[row.id] = filed
-          ? { count: ids.length, total: totals.get(row.id) }
-          : { count: ids.length };
+        records[row.id] = { count: ids.length };
       }
 
       hooks.onCounting?.(++listed, rows.length);
@@ -302,12 +269,6 @@ export async function collect(groups, hooks = {}) {
   }
 
   await provisional;
-
-  // Totals that arrived after their row was already painted.
-  for (const [id, total] of totals) {
-    if (records[id] && records[id].total === undefined) records[id].total = total;
-  }
-
   emit();
 
   // ── Sizes ──────────────────────────────────────────────────────

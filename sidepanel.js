@@ -262,7 +262,7 @@ function spinner() {
 
 /**
  * @param {string} labelId
- * @param {{count: number, total?: number, bytes?: number, pending?: number,
+ * @param {{count: number, bytes?: number, pending?: number,
  *   settled?: boolean} | null} record
  */
 function paintRow(labelId, record) {
@@ -311,9 +311,6 @@ function paintRow(labelId, record) {
   size.classList.toggle('row-size--partial', figure && short);
 
   const title = [];
-  if (record.total !== undefined) {
-    title.push(`${count} filed away`, `${record.total.toLocaleString()} in the folder`);
-  }
   if (record.count > 0) {
     if (measuring) {
       title.push('measuring size…');
