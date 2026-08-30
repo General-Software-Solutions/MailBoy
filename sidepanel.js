@@ -24,6 +24,7 @@ const IDENTITY_KEY = 'identity';
 const REFRESH_AFTER_MS = 24 * 60 * 60 * 1000;
 
 const el = {
+  boot: document.getElementById('screen-boot'),
   welcome: document.getElementById('screen-welcome'),
   main: document.getElementById('screen-main'),
   connect: document.getElementById('btn-connect'),
@@ -51,6 +52,7 @@ let detailsOpen = false;
 // ── Screens ──────────────────────────────────────────────────────
 
 function showWelcome(message) {
+  el.boot.hidden = true;
   el.main.hidden = true;
   el.welcome.hidden = false;
   el.connect.disabled = false;
@@ -58,6 +60,7 @@ function showWelcome(message) {
 }
 
 function showMain() {
+  el.boot.hidden = true;
   el.welcome.hidden = true;
   el.main.hidden = false;
   setNotice(el.welcomeError, null);
@@ -743,16 +746,26 @@ el.refresh.addEventListener('click', () => load({ force: true }));
 // ── Boot ─────────────────────────────────────────────────────────
 
 (async function init() {
+  // Neither of these needs a token, so they run alongside the token check
+  // rather than after it. The boot screen is covering both screens meanwhile,
+  // so whichever one it lifts to is already drawn — no second stage where the
+  // mailbox is up but still blank.
+  const painting = Promise.all([paintIdentityCache(), paintCache()]).catch((err) => {
+    // Decoration, like loadIdentity: an emptier first frame, never a failure.
+    console.warn('[MailBoy] could not paint from cache:', err);
+  });
+
   try {
     // Silent only: opening a sign-in window unprompted would be hostile.
     await getToken({ interactive: false });
   } catch {
+    await painting;
     showWelcome(null);
     return;
   }
 
+  await painting;
   showMain();
-  await Promise.all([paintIdentityCache(), paintCache()]);
   // Both already have a token, and the mailbox load should not queue behind a
   // userinfo round trip just to fill in the header.
   await Promise.all([loadIdentity(), load()]);

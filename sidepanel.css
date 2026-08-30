@@ -113,6 +113,34 @@ body {
   padding: 24px var(--pad-x) 32px;
 }
 
+/* ── Boot ────────────────────────────────────────────────────── */
+/* Up until the silent token check says whether to show Welcome or the mailbox.
+   A cached token resolves that in milliseconds, so the contents are held at
+   zero opacity for longer than that before fading in — a blink of nothing
+   reads as a page loading, whereas a logo flashing in and straight back out
+   reads as a glitch. `both` is what applies the hidden state during the
+   delay. Only a genuinely slow renewal is ever seen. */
+.boot {
+  text-align: center;
+  margin: 0 auto;
+  animation: boot-in 0.28s ease 0.4s both;
+}
+
+.boot-text {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+@keyframes boot-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 /* ── Welcome ─────────────────────────────────────────────────── */
 .welcome {
   text-align: center;
@@ -402,6 +430,11 @@ body {
   }
   .progress--indeterminate .progress-bar {
     animation-duration: 3.5s;
+  }
+  /* The delay is doing real work here — it is what suppresses the flash — so
+     it stays; only the fade itself goes. */
+  .boot {
+    animation-duration: 0s;
   }
 }
 
