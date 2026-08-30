@@ -181,11 +181,18 @@ function renderGroup(title, items, emptyText) {
   return section;
 }
 
+/**
+ * A snapshot cached before the two groups were merged still carries the old
+ * three, so read either shape rather than rendering a blank panel once.
+ */
+function defaultsOf(groups) {
+  return groups.defaults ?? [...(groups.mailboxes ?? []), ...(groups.categories ?? [])];
+}
+
 function renderSkeleton(groups) {
   el.groups.replaceChildren(
-    renderGroup('Mailboxes', groups.mailboxes, 'None found.'),
-    renderGroup('Categories', groups.categories, 'Categories are turned off.'),
-    renderGroup('Your labels', groups.user, 'No labels of your own yet.')
+    renderGroup('Google Default Folders', defaultsOf(groups), 'None found.'),
+    renderGroup('Your Folders', groups.user ?? [], 'No folders of your own yet.')
   );
 }
 
@@ -287,7 +294,7 @@ function paintRow(labelId, record) {
 
   const title = [];
   if (record.total !== undefined) {
-    title.push(`${count} filed away`, `${record.total.toLocaleString()} in the label`);
+    title.push(`${count} filed away`, `${record.total.toLocaleString()} in the folder`);
   }
   if (record.count > 0) {
     if (measuring) {
@@ -389,7 +396,7 @@ function setFooter(timestamp = lastLoaded) {
   // Counting, warm or cold. Once it is done the counts on screen are final,
   // so the timestamp is honest even while sizes are still being read.
   if (progress?.phase === 'counting') {
-    el.footer.textContent = `Counting labels… ${progress.done} of ${progress.total}`;
+    el.footer.textContent = `Counting folders… ${progress.done} of ${progress.total}`;
     return;
   }
 
@@ -738,7 +745,7 @@ function describeError(err) {
   if (!navigator.onLine) {
     return {
       title: "You're offline",
-      body: 'MailBoy needs a connection to read your labels from Gmail.',
+      body: 'MailBoy needs a connection to read your folders from Gmail.',
     };
   }
 
@@ -763,7 +770,7 @@ function describeError(err) {
     }
     return {
       title: 'Gmail turned down the request',
-      body: 'MailBoy asked Gmail for your labels and was refused.',
+      body: 'MailBoy asked Gmail for your folders and was refused.',
     };
   }
 
@@ -777,7 +784,7 @@ function describeError(err) {
 
   return {
     title: 'Something went wrong',
-    body: "MailBoy couldn't load your labels.",
+    body: "MailBoy couldn't load your folders.",
   };
 }
 

@@ -25,6 +25,11 @@ import { bySender, isMeasured, loadMessages, reloadMessages, sizeOf } from './me
  */
 const UNFILED_QUERY = '-in:inbox -in:sent -in:trash -in:spam -is:draft -in:chats';
 
+/** Rows that count something narrower than their whole label. */
+const SCOPES = {
+  inbox: 'in:inbox',
+};
+
 /** Listing is paced by the quota reserver, so concurrency only hides latency. */
 const LIST_CONCURRENCY = 8;
 
@@ -118,7 +123,7 @@ async function pool(items, limit, worker) {
   );
 }
 
-const rowsOf = (groups) => [...groups.mailboxes, ...groups.categories, ...groups.user];
+const rowsOf = (groups) => [...groups.defaults, ...groups.user];
 
 /**
  * One listing per row, each reported the moment it lands. No row waits on any
@@ -135,7 +140,12 @@ async function enumerateRows(groups, onRow) {
   await pool(rows, LIST_CONCURRENCY, async (row) => {
     const filed = isUser.has(row.id);
     try {
-      const ids = await listMessageIds(row.id, filed ? UNFILED_QUERY : undefined);
+      // A row can carry its own scope — the categories are narrowed to the
+      // inbox so they partition it rather than counting archived mail twice.
+      const ids = await listMessageIds(
+        row.id,
+        row.scope ? SCOPES[row.scope] : filed ? UNFILED_QUERY : undefined
+      );
       counted.set(row.id, ids);
       onRow?.(row, ids, filed);
     } catch (err) {
@@ -188,7 +198,7 @@ export async function buildQueue() {
 }
 
 /**
- * @param {{mailboxes: object[], categories: object[], user: object[]}} groups
+ * @param {{defaults: object[], user: object[]}} groups
  * @param {{onCounts?: Function, onSizes?: Function, measure: Function}} hooks
  *   `measure(order, onBatch)` does the expensive half. The panel delegates it
  *   to the service worker so it outlives the panel being closed.
@@ -225,6 +235,10 @@ export async function collect(groups, hooks = {}) {
   // not awaited here — it runs alongside the listing rather than delaying it.
   const provisional = pool(rows, LIST_CONCURRENCY, async (row) => {
     try {
+      // Google's precomputed total counts the whole label. For a scoped row
+      // that is a different number entirely, so it is no head start at all.
+      if (row.scope) return;
+
       const total = (await getLabel(row.id)).messagesTotal ?? 0;
 
       if (isUser.has(row.id)) {

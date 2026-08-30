@@ -140,7 +140,7 @@ async function authorize(interactive) {
   const granted = (params.get('scope') ?? '').split(' ');
   const missing = SCOPES.filter((scope) => !granted.includes(scope));
   if (missing.length) {
-    throw new AuthError('MailBoy needs permission to read your mail to show label counts.');
+    throw new AuthError('MailBoy needs permission to read your mail to show folder counts.');
   }
 
   const expiresAt = Date.now() + Number(params.get('expires_in') || 3600) * 1000;

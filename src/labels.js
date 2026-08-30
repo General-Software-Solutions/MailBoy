@@ -1,6 +1,10 @@
 // Turning Gmail's flat, SHOUTY label list into something worth looking at.
 
-/** Mailboxes worth surfacing, in reading order. Others are deliberately dropped. */
+// Everything is a folder here. Gmail's own distinction between a "system
+// label" and a "category" is an implementation detail of theirs; both are
+// folders Google made, and they read as one group.
+
+/** Google's own folders worth surfacing, in reading order. Others are dropped. */
 const MAILBOX_ORDER = [
   'INBOX',
   'UNREAD',
@@ -77,13 +81,35 @@ function asTree(labels) {
   });
 }
 
+/**
+ * Google's folders, with the categories nested under Inbox as the breakdown
+ * they are.
+ *
+ * **Category rows are scoped to the inbox.** A category label stays on a
+ * message forever — Gmail assigns it at delivery and keeps it after archiving,
+ * which is why `category:promotions` finds archived mail. Unscoped, Promotions
+ * could out-count Inbox and the five would not add up to anything. Narrowed to
+ * `in:inbox` they partition Inbox exactly, which is what lets them sit under it.
+ */
+function googleFolders(system) {
+  const rows = byOrder(system, MAILBOX_ORDER);
+  const categories = byOrder(system, CATEGORY_ORDER).map((row) => ({
+    ...row,
+    depth: 1,
+    scope: 'inbox',
+  }));
+
+  const at = rows.findIndex((row) => row.id === 'INBOX');
+  if (at === -1) return [...rows, ...categories];
+  return [...rows.slice(0, at + 1), ...categories, ...rows.slice(at + 1)];
+}
+
 export function buildGroups(labels) {
   const system = labels.filter((label) => label.type === 'system');
   const user = labels.filter((label) => label.type === 'user');
 
   return {
-    mailboxes: byOrder(system, MAILBOX_ORDER),
-    categories: byOrder(system, CATEGORY_ORDER),
+    defaults: googleFolders(system),
     user: asTree(user),
   };
 }
