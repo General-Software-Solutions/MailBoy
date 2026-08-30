@@ -1044,6 +1044,20 @@ body {
   white-space: nowrap;
 }
 
+/* How many senders are listed, not how many messages — a lighter weight than
+   .col-label so "Sender" stays the thing actually being read. Shrinks with
+   the label rather than the arrow: it is the first thing to go, since the
+   count is the ornament here and the word is still the point. */
+.col-count {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  color: var(--faint);
+}
+
 /* Drawn pointing down, which is what descending means; ascending turns it
    over. Held in the layout even when inactive so the labels do not shift as
    the sort moves between columns.

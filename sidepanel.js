@@ -93,6 +93,7 @@ const el = {
   periodMenu: document.getElementById('period-menu'),
   senders: document.getElementById('senders'),
   senderHead: document.getElementById('sender-head'),
+  senderCount: document.getElementById('sender-count'),
   senderRows: document.getElementById('sender-rows'),
   toolsFilters: document.getElementById('tools-filters'),
   toolsActions: document.getElementById('tools-actions'),
@@ -901,6 +902,7 @@ function renderBreakdown() {
 
   if (!senders.length) {
     el.senderHead.hidden = true;
+    el.senderCount.textContent = '';
     listedSenders = [];
     paintSelection();
     const note = emptyNote(
@@ -915,6 +917,7 @@ function renderBreakdown() {
   }
 
   el.senderHead.hidden = false;
+  el.senderCount.textContent = `(${senders.length.toLocaleString()})`;
 
   const sorted = [...senders].sort(comparator(sortKey, sortDir));
   // Before the rows are built: `renderSender` reads the tick state, and
