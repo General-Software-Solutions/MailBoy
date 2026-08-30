@@ -47,6 +47,36 @@ export function formatAgo(elapsed) {
 }
 
 /**
+ * How often something arrives, across a span: "3/week", "12/month".
+ *
+ * The rate is over the gaps between messages, not the messages themselves —
+ * two messages ten days apart is one every ten days, not two. So `count - 1`
+ * gaps over the span.
+ *
+ * @param {number} count messages whose date is known
+ * @param {number} days between the first and the last of them
+ */
+export function formatRate(count, days) {
+  if (!Number.isFinite(count) || count < 2) return '';
+
+  // Everything on one day still describes a real rate; treat it as a day.
+  const perDay = (count - 1) / Math.max(days, 1);
+
+  const [rate, unit] =
+    perDay >= 1
+      ? [perDay, 'day']
+      : perDay * 7 >= 1
+        ? [perDay * 7, 'week']
+        : perDay * 30.44 >= 1
+          ? [perDay * 30.44, 'month']
+          : [perDay * 365.25, 'year'];
+
+  // A decimal only where it carries information, as with byte counts.
+  const shown = rate >= 10 ? Math.round(rate) : Number(rate.toFixed(1));
+  return `${shown}/${unit}`;
+}
+
+/**
  * How much longer something has to run: "about 6 minutes left".
  *
  * Rounded deliberately coarsely — this is an estimate from an observed rate,

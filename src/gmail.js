@@ -228,15 +228,15 @@ const BATCH_CONCURRENCY = 3;
 const MAX_ATTEMPTS = 4;
 
 /**
- * Size and sender for each id, as a Map of id → `{bytes, from}`.
+ * Size, sender and date for each id, as a Map of id → `{bytes, from, date}`.
  *
  * This is the expensive thing MailBoy asks Gmail for, and there is no cheaper
  * route: neither figure exists anywhere but on the individual message, and
  * labels.get carries neither.
  *
  * `messages.get` costs 5 quota units whatever the format, so asking for the
- * From header alongside the size is free — `format=metadata` with a single
- * `metadataHeaders` costs exactly what `format=minimal` did. Only the response
+ * From header and the date alongside the size is free — `format=metadata` with
+ * one `metadataHeaders` costs exactly what `format=minimal` did. Only the response
  * grows, from roughly 40 bytes to 150, which is nothing against a pass that is
  * quota-bound rather than bandwidth-bound. No body and no attachment data is
  * transferred either way.
@@ -296,7 +296,7 @@ async function runBatch(ids, retry) {
           `Content-ID: <m${index}>\r\n\r\n` +
           `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}` +
           '?format=metadata&metadataHeaders=From' +
-          '&fields=sizeEstimate,payload/headers&prettyPrint=false\r\n\r\n'
+          '&fields=sizeEstimate,internalDate,payload/headers&prettyPrint=false\r\n\r\n'
       )
       .join('') + `--${boundary}--\r\n`;
 
@@ -388,7 +388,9 @@ function parseBatch(text, contentType, ids, retry) {
       const from =
         data?.payload?.headers?.find((header) => header.name?.toLowerCase() === 'from')?.value ??
         '';
-      if (Number.isFinite(bytes)) found.set(id, { bytes, from });
+      // internalDate is epoch milliseconds, delivered as a string.
+      const date = Number(data?.internalDate ?? 0);
+      if (Number.isFinite(bytes)) found.set(id, { bytes, from, date });
     } catch {
       retry.push(id);
     }

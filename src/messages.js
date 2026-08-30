@@ -30,8 +30,22 @@ const LEGACY_KEYS = Array.from({ length: 16 }, (_, n) => `sizes:${n}`);
 /** Past this the cache is pruned down to whatever the last load actually saw. */
 const MAX_ENTRIES = 400_000;
 
-/** @type {Map<string, [bytes: number, sender: number]> | null} */
+/**
+ * Dates are kept as whole days since the epoch rather than milliseconds: a
+ * frequency over a span of months needs nothing finer, and the shorter number
+ * costs far less across hundreds of thousands of entries.
+ */
+const DAY_MS = 86_400_000;
+
+/** @type {Map<string, [bytes: number, sender: number, day: number]> | null} */
 let messages = null;
+
+/**
+ * An entry written before dates were captured has only two fields. It is not
+ * wrong — its size and sender are still good — but it cannot answer how often
+ * a sender writes, so it is queued for re-reading.
+ */
+const complete = (entry) => Array.isArray(entry) && entry.length >= 3;
 
 /**
  * Senders interned to an index, because the same address recurs across
@@ -130,14 +144,27 @@ export function sizeOf(id) {
   return messages?.get(id)?.[0];
 }
 
+/** @returns {number} whole days since the epoch, or 0 when not yet known */
+export function dayOf(id) {
+  return messages?.get(id)?.[2] ?? 0;
+}
+
 /** @returns {{address: string, name: string} | undefined} */
 export function senderOf(id) {
   const entry = messages?.get(id);
   return entry ? senders[entry[1]] : undefined;
 }
 
-export function hasMessage(id) {
-  return messages?.has(id) ?? false;
+/**
+ * Everything known about this message, dates included.
+ *
+ * Deliberately not "is it in the cache": an entry written before dates were
+ * captured is present but incomplete, and the gate that decides whether a
+ * measuring pass is worth starting has to agree with `ensureMeta` about what
+ * still needs reading. Disagree, and a backfill silently never runs.
+ */
+export function isMeasured(id) {
+  return complete(messages?.get(id));
 }
 
 /**
@@ -146,7 +173,9 @@ export function hasMessage(id) {
  * Entirely local — the ids come from a live label enumeration and everything
  * else is already cached, so a drill-down costs no Gmail calls at all.
  *
- * @returns {{address: string, name: string, count: number, bytes: number}[]}
+ * @returns {{address: string, name: string, count: number, bytes: number,
+ *   dated: number, first: number, last: number}[]} `first`/`last` are whole
+ *   days since the epoch, and `dated` says how many messages backed them.
  */
 export function bySender(ids) {
   const totals = new Map();
@@ -155,14 +184,29 @@ export function bySender(ids) {
     const entry = messages?.get(id);
     if (!entry) continue; // not measured yet
 
-    const [bytes, index] = entry;
+    const [bytes, index, day] = entry;
     let row = totals.get(index);
     if (!row) {
-      row = { ...(senders[index] ?? { address: '', name: '' }), count: 0, bytes: 0 };
+      row = {
+        ...(senders[index] ?? { address: '', name: '' }),
+        count: 0,
+        bytes: 0,
+        dated: 0,
+        first: 0,
+        last: 0,
+      };
       totals.set(index, row);
     }
     row.count++;
     row.bytes += bytes;
+
+    // Span comes only from messages whose date is known, so a partly
+    // backfilled cache reports a rate over what it can actually see.
+    if (day) {
+      row.dated++;
+      if (!row.first || day < row.first) row.first = day;
+      if (day > row.last) row.last = day;
+    }
   }
 
   return [...totals.values()].sort((a, b) => b.bytes - a.bytes);
@@ -186,7 +230,9 @@ const FLUSH_AFTER_MS = 60_000;
 export async function ensureMeta(ids, onBatch) {
   await loadMessages();
 
-  const missing = ids.filter((id) => !messages.has(id));
+  // Includes entries that predate dates: same 5 quota units, and re-reading is
+  // the only way to fill them in.
+  const missing = ids.filter((id) => !complete(messages.get(id)));
   if (!missing.length) return;
 
   let done = 0;
@@ -195,16 +241,26 @@ export async function ensureMeta(ids, onBatch) {
 
   await fetchMessageMeta(missing, (found) => {
     const fresh = new Map();
-    for (const [id, { bytes, from }] of found) {
-      if (messages.has(id)) continue; // a retry that arrived twice
-      messages.set(id, [bytes, intern(from)]);
-      dirty.add(shardOf(id));
-      fresh.set(id, bytes);
-    }
-    if (!fresh.size) return;
+    let written = 0;
 
-    done += fresh.size;
-    sinceFlush += fresh.size;
+    for (const [id, { bytes, from, date }] of found) {
+      const before = messages.get(id);
+      if (complete(before)) continue; // a retry that arrived twice
+
+      const day = date > 0 ? Math.round(date / DAY_MS) : 0;
+      messages.set(id, [bytes, intern(from), day]);
+      dirty.add(shardOf(id));
+      written++;
+
+      // Only a size the caller has never seen moves its running totals. A
+      // backfill re-reads sizes that were already counted, and handing those
+      // back would double them.
+      if (!before) fresh.set(id, bytes);
+    }
+    if (!written) return;
+
+    done += written;
+    sinceFlush += written;
     onBatch?.(fresh, done, missing.length);
 
     if (sinceFlush >= FLUSH_EVERY || Date.now() - lastFlush > FLUSH_AFTER_MS) {

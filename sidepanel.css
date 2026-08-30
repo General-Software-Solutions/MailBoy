@@ -56,6 +56,14 @@
   --skeleton: #ecedf1;
 
   --row-h: 34px;
+
+  /* Sender table columns. These add up to the narrowest panel the table reads
+     well in; below that it scrolls rather than squashing. */
+  --col-name: 110px;
+  --col-count: 48px;
+  --col-size: 62px;
+  --col-rate: 68px;
+  --col-gap: 8px;
   --pad-x: 14px;
   --avatar: 32px;
 }
@@ -750,18 +758,74 @@ body {
   visibility: visible;
 }
 
-/* ── Sender rows ─────────────────────────────────────────────── */
+/* ── Sender table ────────────────────────────────────────────── */
+/* Four aligned columns with a floor under each. Chrome gives no way to set the
+   side panel's width, so the sums below are chosen to fit the narrow default;
+   drag it narrower still and the table scrolls sideways rather than crushing
+   the numbers. */
 .senders {
   flex: 1 1 auto;
-  overflow-y: auto;
-  padding: 4px 0 12px;
+  overflow: auto;
+}
+
+.sender-head,
+.sender {
+  display: grid;
+  grid-template-columns:
+    minmax(var(--col-name), 1fr)
+    var(--col-count)
+    var(--col-size)
+    var(--col-rate);
+  gap: var(--col-gap);
+  align-items: center;
+  padding: 0 var(--pad-x);
+  min-width: calc(
+    var(--col-name) + var(--col-count) + var(--col-size) + var(--col-rate) +
+      3 * var(--col-gap) + 2 * var(--pad-x)
+  );
+}
+
+/* Stays put while the rows scroll under it, and travels with them sideways. */
+.sender-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.col-head {
+  padding: 7px 0;
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: left;
+  color: var(--faint);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-head:hover {
+  color: var(--muted);
+}
+
+.col-head[aria-sort] {
+  color: var(--accent);
+}
+
+.col-num {
+  text-align: right;
 }
 
 .sender {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 7px var(--pad-x);
+  padding-top: 6px;
+  padding-bottom: 6px;
 }
 
 .sender:hover {
@@ -769,7 +833,6 @@ body {
 }
 
 .sender-who {
-  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -791,25 +854,14 @@ body {
   color: var(--faint);
 }
 
-.sender-figs {
-  flex: 0 0 auto;
-  text-align: right;
+.sender-figure {
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
-}
-
-.sender-count,
-.sender-size {
-  display: block;
-}
-
-.sender-count {
-  font-size: 12.5px;
   color: var(--muted);
-}
-
-.sender-size {
-  font-size: 11px;
-  color: var(--faint);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Notices ─────────────────────────────────────────────────── */

@@ -125,10 +125,10 @@
               <h2 class="notice-title">Getting your mailbox ready</h2>
             </div>
             <p class="notice-body">
-              MailBoy is going through your mailbox to work out how much room
-              each label takes up. This happens once — after that, opening
-              MailBoy is quick. Labels can't be opened for a breakdown until it
-              finishes.
+              MailBoy is fetching the latest data. Please wait till the refresh
+              completes to organize your mail.
+              MailBoy fetches only the size, sender and date from your mails;
+              not the full mail content or attachments.
             </p>
             <div class="progress-stats">
               <span id="progress-done"></span>
@@ -203,7 +203,13 @@
                 </svg>
                 <span>Size</span>
               </button>
-              <button class="sort-option" role="menuitemradio" data-sort="address">
+              <button class="sort-option" role="menuitemradio" data-sort="rate">
+              <svg class="sort-tick" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M3.5 8.5l3 3 6-7" />
+              </svg>
+              <span>How often</span>
+            </button>
+            <button class="sort-option" role="menuitemradio" data-sort="address">
                 <svg class="sort-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
@@ -213,7 +219,15 @@
           </div>
         </div>
 
-        <main id="senders" class="senders"></main>
+        <main id="senders" class="senders">
+          <div id="sender-head" class="sender-head">
+            <button class="col-head" data-sort="address">Email address</button>
+            <button class="col-head col-num" data-sort="count">Count</button>
+            <button class="col-head col-num" data-sort="bytes">Size</button>
+            <button class="col-head col-num" data-sort="rate">Frequency</button>
+          </div>
+          <div id="sender-rows"></div>
+        </main>
       </section>
     </div>
 

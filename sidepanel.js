@@ -6,7 +6,7 @@ import {
   rememberAccount,
 } from './src/auth.js';
 import { GmailError, getUserInfo, listLabels } from './src/gmail.js';
-import { formatAgo, formatBytes, formatTimeLeft } from './src/format.js';
+import { formatAgo, formatBytes, formatRate, formatTimeLeft } from './src/format.js';
 import { buildGroups } from './src/labels.js';
 import {
   breakdownOf,
@@ -55,6 +55,8 @@ const el = {
   sortLabel: document.getElementById('sort-label'),
   sortMenu: document.getElementById('sort-menu'),
   senders: document.getElementById('senders'),
+  senderHead: document.getElementById('sender-head'),
+  senderRows: document.getElementById('sender-rows'),
 };
 
 let loading = false;
@@ -408,9 +410,16 @@ function setProgress(phase, done, total) {
 
 // ── Breakdown ────────────────────────────────────────────────────
 
+/** Messages a day, across the span this sender is actually known over. */
+function perDay(sender) {
+  if (sender.dated < 2) return 0;
+  return (sender.dated - 1) / Math.max(sender.last - sender.first, 1);
+}
+
 const SORTS = {
   count: { label: 'Email count', compare: (a, b) => b.count - a.count },
   bytes: { label: 'Size', compare: (a, b) => b.bytes - a.bytes },
+  rate: { label: 'How often', compare: (a, b) => perDay(b) - perDay(a) },
   address: {
     label: 'Email address',
     compare: (a, b) =>
@@ -429,6 +438,13 @@ let sortKey = 'count';
  */
 let membershipReady = Promise.resolve();
 
+function figure(text) {
+  const cell = document.createElement('span');
+  cell.className = 'sender-figure';
+  cell.textContent = text;
+  return cell;
+}
+
 function renderSender(sender) {
   const row = document.createElement('div');
   row.className = 'sender';
@@ -443,28 +459,30 @@ function renderSender(sender) {
   address.textContent = sender.address || 'Unknown sender';
   who.append(address);
 
-  if (sender.name) {
+  // The display name and how often they write share the second line; either
+  // can be missing, and a sender with one message has no rate at all.
+  const rate = formatRate(sender.dated, sender.last - sender.first);
+  const secondary = [sender.name, rate].filter(Boolean).join(' · ');
+
+  if (secondary) {
     const display = document.createElement('span');
     display.className = 'sender-display';
-    display.textContent = sender.name;
+    display.textContent = secondary;
     who.append(display);
   }
 
-  const figs = document.createElement('span');
-  figs.className = 'sender-figs';
-
-  const count = document.createElement('span');
-  count.className = 'sender-count';
-  count.textContent = sender.count.toLocaleString();
-
-  const size = document.createElement('span');
-  size.className = 'sender-size';
-  size.textContent = formatBytes(sender.bytes);
-
-  figs.append(count, size);
-  row.append(who, figs);
-  const who_ = sender.name ? `${sender.name} · ${sender.address}` : sender.address;
-  row.title = `${who_ || 'Unknown sender'} · ${sender.count.toLocaleString()} messages · ${formatBytes(sender.bytes)}`;
+  row.append(
+    who,
+    figure(sender.count.toLocaleString()),
+    figure(formatBytes(sender.bytes)),
+    // An em dash rather than a blank: the column has a value, it is just not
+    // knowable from one message.
+    figure(rate || '—')
+  );
+  const parts = [sender.name, sender.address].filter(Boolean);
+  parts.push(`${sender.count.toLocaleString()} messages`, formatBytes(sender.bytes));
+  if (rate) parts.push(rate);
+  row.title = parts.join(' · ') || 'Unknown sender';
   return row;
 }
 
@@ -490,7 +508,8 @@ function renderBreakdown() {
       : `${total.toLocaleString()} · ${formatBytes(bytes)}`;
 
   if (!senders.length) {
-    el.senders.replaceChildren(
+    el.senderHead.hidden = true;
+    el.senderRows.replaceChildren(
       emptyNote(
         total
           ? 'None of these messages have been read yet. They are measured in the background — check back shortly.'
@@ -499,6 +518,8 @@ function renderBreakdown() {
     );
     return;
   }
+
+  el.senderHead.hidden = false;
 
   const sorted = [...senders].sort(SORTS[sortKey].compare);
   const nodes = sorted.map(renderSender);
@@ -517,7 +538,7 @@ function renderBreakdown() {
     );
   }
 
-  el.senders.replaceChildren(...nodes);
+  el.senderRows.replaceChildren(...nodes);
   el.senders.scrollTop = scroll;
 }
 
@@ -526,7 +547,8 @@ async function openBreakdown(labelId, labelName) {
 
   el.detailName.textContent = labelName;
   el.detailTotal.textContent = '';
-  el.senders.replaceChildren(emptyNote('Working it out…'));
+  el.senderHead.hidden = true;
+  el.senderRows.replaceChildren(emptyNote('Working it out…'));
 
   el.main.hidden = true;
   el.detail.hidden = false;
@@ -550,9 +572,21 @@ function closeBreakdown() {
 function setSort(key) {
   sortKey = key;
   el.sortLabel.textContent = SORTS[key].label;
+
   for (const option of el.sortMenu.querySelectorAll('.sort-option')) {
     option.setAttribute('aria-checked', String(option.dataset.sort === key));
   }
+
+  // The column heads and the menu are two ways into the same setting, so both
+  // have to show it.
+  for (const head of el.senderHead.querySelectorAll('.col-head')) {
+    if (head.dataset.sort === key) {
+      head.setAttribute('aria-sort', key === 'address' ? 'ascending' : 'descending');
+    } else {
+      head.removeAttribute('aria-sort');
+    }
+  }
+
   renderBreakdown();
 }
 
@@ -910,7 +944,7 @@ async function handleLogout() {
   await clearMessages();
   await forgetMembership();
   openLabel = null;
-  el.senders.replaceChildren();
+  el.senderRows.replaceChildren();
   painted = {};
   el.groups.replaceChildren();
   setProgress(null);
@@ -940,6 +974,11 @@ el.groups.addEventListener('keydown', (event) => {
 });
 
 el.back.addEventListener('click', closeBreakdown);
+
+el.senderHead.addEventListener('click', (event) => {
+  const head = event.target.closest('.col-head');
+  if (head) setSort(head.dataset.sort);
+});
 
 el.sortTrigger.addEventListener('click', (event) => {
   event.stopPropagation(); // Otherwise the document handler closes it again.

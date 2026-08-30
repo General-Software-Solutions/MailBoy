@@ -7,7 +7,7 @@
 
 import { AuthError, getLabel, listLabels, listMessageIds } from './gmail.js';
 import { buildGroups } from './labels.js';
-import { bySender, hasMessage, loadMessages, reloadMessages, sizeOf } from './messages.js';
+import { bySender, isMeasured, loadMessages, reloadMessages, sizeOf } from './messages.js';
 
 /**
  * A message matching none of these is filed away rather than still in the flow.
@@ -306,7 +306,7 @@ export async function collect(groups, hooks = {}) {
 
   tally(counted, records);
 
-  const outstanding = order.filter((id) => !hasMessage(id)).length;
+  const outstanding = order.filter((id) => !isMeasured(id)).length;
   hooks.onSizes?.(snapshot(records), 0, outstanding);
 
   if (outstanding && hooks.measure) {
