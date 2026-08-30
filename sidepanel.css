@@ -57,12 +57,13 @@
 
   --row-h: 34px;
 
-  /* Sender table columns. These add up to the narrowest panel the table reads
-     well in; below that it scrolls rather than squashing. */
-  --col-name: 110px;
-  --col-count: 48px;
-  --col-size: 62px;
-  --col-rate: 68px;
+  /* Sender table columns, as shares rather than widths. Fractions always add
+     up to whatever the panel is, so the table can never be wider than it —
+     see the note on .sender-head. */
+  --col-name: 36fr;
+  --col-count: 19fr;
+  --col-size: 17fr;
+  --col-rate: 28fr;
   --col-gap: 8px;
   --pad-x: 14px;
   --avatar: 32px;
@@ -96,6 +97,7 @@ body {
 
 body {
   margin: 0;
+  overflow-x: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -769,30 +771,31 @@ body {
 }
 
 /* ── Sender table ────────────────────────────────────────────── */
-/* Four aligned columns with a floor under each. Chrome gives no way to set the
-   side panel's width, so the sums below are chosen to fit the narrow default;
-   drag it narrower still and the table scrolls sideways rather than crushing
-   the numbers. */
+/* Four aligned columns that always fit.
+   Chrome gives no way to set the side panel's width, and fixed columns with a
+   floor under them meant the table could be wider than the panel — which then
+   scrolled sideways the moment anything near the right edge took focus, since
+   the browser scrolls a focused control into view. Fractional tracks cannot
+   overflow: they divide whatever width there is. `minmax(0, …)` is what lets
+   them shrink past their contents; a bare `Nfr` is `minmax(auto, Nfr)` and
+   would push back out again. */
 .senders {
   flex: 1 1 auto;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .sender-head,
 .sender {
   display: grid;
   grid-template-columns:
-    minmax(var(--col-name), 1fr)
-    var(--col-count)
-    var(--col-size)
-    var(--col-rate);
+    minmax(0, var(--col-name))
+    minmax(0, var(--col-count))
+    minmax(0, var(--col-size))
+    minmax(0, var(--col-rate));
   gap: var(--col-gap);
   align-items: center;
   padding: 0 var(--pad-x);
-  min-width: calc(
-    var(--col-name) + var(--col-count) + var(--col-size) + var(--col-rate) +
-      3 * var(--col-gap) + 2 * var(--pad-x)
-  );
 }
 
 /* Stays put while the rows scroll under it, and travels with them sideways. */
@@ -805,20 +808,21 @@ body {
 }
 
 .col-head {
+  display: flex;
+  align-items: center;
+  gap: 3px;
   padding: 7px 0;
   font: inherit;
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
   text-transform: uppercase;
   text-align: left;
   color: var(--faint);
   background: transparent;
   border: 0;
   cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
 }
 
 .col-head:hover {
@@ -829,8 +833,50 @@ body {
   color: var(--accent);
 }
 
+.col-label {
+  /* Shrinks least, and only once the spacer and the arrow have gone. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Drawn pointing down, which is what descending means; ascending turns it
+   over. Held in the layout even when inactive so the labels do not shift as
+   the sort moves between columns.
+
+   The columns are sized to fit it at full width; it stays shrinkable only as
+   the last thing to give before the heading itself. */
+.col-arrow {
+  /* Shrinkable, and the only shrinkable thing in the row: a column too narrow
+     for both loses the arrow, never the word. */
+  flex: 0 6 auto;
+  min-width: 0;
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  visibility: hidden;
+}
+
+.col-head[aria-sort] .col-arrow {
+  visibility: visible;
+}
+
+.col-head[aria-sort='ascending'] .col-arrow {
+  transform: rotate(180deg);
+}
+
+/* The word and its arrow centre as a pair, which leaves the word itself about
+   half an arrow left of true centre. A balancing spacer opposite would fix
+   that, but it costs 14px in a column that has barely enough for the word —
+   and a truncated heading is a worse fault than a slightly off-centre one. */
 .col-num {
-  text-align: right;
+  justify-content: center;
 }
 
 .sender {
@@ -879,7 +925,7 @@ body {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--muted);
-  text-align: right;
+  text-align: center;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

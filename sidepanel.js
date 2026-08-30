@@ -436,16 +436,31 @@ function perDay(sender) {
   return (sender.dated - 1) / Math.max(sender.last - sender.first, 1);
 }
 
+/**
+ * Each column knows how to read itself and which way round it is useful to
+ * start: biggest-first for the figures, A-Z for the address.
+ */
 const SORTS = {
-  count: { label: 'Email count', compare: (a, b) => b.count - a.count },
-  bytes: { label: 'Size', compare: (a, b) => b.bytes - a.bytes },
-  rate: { label: 'How often', compare: (a, b) => perDay(b) - perDay(a) },
-  address: {
-    label: 'Email address',
-    compare: (a, b) =>
-      (a.address || '').localeCompare(b.address || '', undefined, { sensitivity: 'base' }),
-  },
+  count: { label: 'Email count', dir: 'desc', of: (s) => s.count },
+  bytes: { label: 'Size', dir: 'desc', of: (s) => s.bytes },
+  rate: { label: 'How often', dir: 'desc', of: (s) => perDay(s) },
+  address: { label: 'Email address', dir: 'asc', of: (s) => s.address || '' },
 };
+
+function comparator(key, direction) {
+  const { of } = SORTS[key];
+  const sign = direction === 'asc' ? 1 : -1;
+
+  return (a, b) => {
+    const left = of(a);
+    const right = of(b);
+    const order =
+      typeof left === 'string'
+        ? left.localeCompare(right, undefined, { sensitivity: 'base' })
+        : left - right;
+    return sign * order;
+  };
+}
 
 const DAY_MS = 86_400_000;
 
@@ -464,6 +479,7 @@ const PERIODS = {
 /** Which label is open, how its senders are ordered, and over what span. */
 let openLabel = null;
 let sortKey = 'count';
+let sortDir = SORTS.count.dir;
 let periodKey = 'all';
 
 /** @returns {number} the first day in scope, or 0 for everything */
@@ -500,15 +516,12 @@ function renderSender(sender) {
   address.textContent = sender.address || 'Unknown sender';
   who.append(address);
 
-  // The display name and how often they write share the second line; either
-  // can be missing, and a sender with one message has no rate at all.
   const rate = formatRate(sender.dated, sender.last - sender.first);
-  const secondary = [sender.name, rate].filter(Boolean).join(' · ');
 
-  if (secondary) {
+  if (sender.name) {
     const display = document.createElement('span');
     display.className = 'sender-display';
-    display.textContent = secondary;
+    display.textContent = sender.name;
     who.append(display);
   }
 
@@ -574,7 +587,7 @@ function renderBreakdown() {
 
   el.senderHead.hidden = false;
 
-  const sorted = [...senders].sort(SORTS[sortKey].compare);
+  const sorted = [...senders].sort(comparator(sortKey, sortDir));
   const nodes = sorted.map(renderSender);
 
   // Sizes land every second or so while measuring, and rebuilding the list
@@ -637,8 +650,14 @@ function closeBreakdown() {
   if (row) row.focus();
 }
 
-function setSort(key) {
+/**
+ * @param {string} key which column to order by
+ * @param {'asc' | 'desc'} [direction] defaults to whichever way round that
+ *   column is useful to start
+ */
+function setSort(key, direction = SORTS[key].dir) {
   sortKey = key;
+  sortDir = direction;
   el.sortLabel.textContent = SORTS[key].label;
 
   for (const option of el.sortMenu.querySelectorAll('.picker-option')) {
@@ -646,10 +665,10 @@ function setSort(key) {
   }
 
   // The column heads and the menu are two ways into the same setting, so both
-  // have to show it.
+  // have to show it. aria-sort doubles as the hook the arrow is drawn from.
   for (const head of el.senderHead.querySelectorAll('.col-head')) {
     if (head.dataset.sort === key) {
-      head.setAttribute('aria-sort', key === 'address' ? 'ascending' : 'descending');
+      head.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
     } else {
       head.removeAttribute('aria-sort');
     }
@@ -1090,7 +1109,12 @@ el.back.addEventListener('click', closeBreakdown);
 
 el.senderHead.addEventListener('click', (event) => {
   const head = event.target.closest('.col-head');
-  if (head) setSort(head.dataset.sort);
+  if (!head) return;
+
+  // Clicking the column already in use turns it round; clicking another moves
+  // to it the way round that column starts.
+  const key = head.dataset.sort;
+  setSort(key, key === sortKey ? (sortDir === 'asc' ? 'desc' : 'asc') : undefined);
 });
 
 wirePicker(el.sortTrigger, el.sortMenu, 'sort', setSort);
