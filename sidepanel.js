@@ -484,7 +484,7 @@ const SORTS = {
   count: { label: 'Email count', dir: 'desc', of: (s) => s.count },
   bytes: { label: 'Size', dir: 'desc', of: (s) => s.bytes },
   rate: { label: 'How often', dir: 'desc', of: (s) => perDay(s) },
-  address: { label: 'Email address', dir: 'asc', of: (s) => s.address || '' },
+  address: { label: 'Sender', dir: 'asc', of: (s) => s.address || '' },
 };
 
 function comparator(key, direction) {
