@@ -47,20 +47,17 @@ const MEMBERSHIP_KEY = 'membership';
  * Entirely local — the ids come from the last enumeration and every size and
  * sender is already cached, so this costs no Gmail calls at all.
  *
- * `measured` is below `total` when some of the label's messages have not been
+ * `cached` is below `total` when some of the label's messages have not been
  * read yet; the caller should say so rather than present a short total as
  * complete.
  *
- * @returns {{senders: object[], total: number, measured: number}}
+ * @param {number} [sinceDay] whole days since the epoch, or 0 for everything
+ * @returns {{senders: object[], total: number, cached: number, matched: number,
+ *   undated: number, bytes: number}}
  */
-export function breakdownOf(labelId) {
+export function breakdownOf(labelId, sinceDay = 0) {
   const ids = counts.get(labelId) ?? [];
-  const senders = bySender(ids);
-
-  let measured = 0;
-  for (const sender of senders) measured += sender.count;
-
-  return { senders, total: ids.length, measured };
+  return { ...bySender(ids, sinceDay), total: ids.length };
 }
 
 /**

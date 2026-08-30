@@ -49,11 +49,14 @@ const el = {
   progressLeft: document.getElementById('progress-left'),
   detail: document.getElementById('screen-detail'),
   back: document.getElementById('btn-back'),
-  detailName: document.getElementById('detail-name'),
+  detailLabel: document.getElementById('detail-label'),
   detailTotal: document.getElementById('detail-total'),
   sortTrigger: document.getElementById('btn-sort'),
   sortLabel: document.getElementById('sort-label'),
   sortMenu: document.getElementById('sort-menu'),
+  periodTrigger: document.getElementById('btn-period'),
+  periodLabel: document.getElementById('period-label'),
+  periodMenu: document.getElementById('period-menu'),
   senders: document.getElementById('senders'),
   senderHead: document.getElementById('sender-head'),
   senderRows: document.getElementById('sender-rows'),
@@ -427,9 +430,30 @@ const SORTS = {
   },
 };
 
-/** Which label is open, and how its senders are ordered. */
+const DAY_MS = 86_400_000;
+
+/**
+ * How far back to look. Kept as a span rather than a fixed cutoff so a panel
+ * left open overnight still means "the last month" tomorrow.
+ */
+const PERIODS = {
+  all: { label: 'All time', days: 0 },
+  y1: { label: 'Last 1 year', days: 365 },
+  m6: { label: 'Last 6 months', days: 183 },
+  m3: { label: 'Last 3 months', days: 91 },
+  m1: { label: 'Last 1 month', days: 30 },
+};
+
+/** Which label is open, how its senders are ordered, and over what span. */
 let openLabel = null;
 let sortKey = 'count';
+let periodKey = 'all';
+
+/** @returns {number} the first day in scope, or 0 for everything */
+function sinceDay() {
+  const { days } = PERIODS[periodKey];
+  return days ? Math.round(Date.now() / DAY_MS) - days : 0;
+}
 
 /**
  * Resolves once the ids behind each row are in memory. An open that skipped
@@ -496,24 +520,26 @@ function emptyNote(text) {
 function renderBreakdown() {
   if (!openLabel) return;
 
-  const { senders, total, measured } = breakdownOf(openLabel.id);
+  const filtered = periodKey !== 'all';
+  const { senders, total, cached, matched, undated, bytes } = breakdownOf(
+    openLabel.id,
+    sinceDay()
+  );
 
-  let bytes = 0;
-  for (const sender of senders) bytes += sender.bytes;
-
-  el.detailTotal.textContent = !total
-    ? ''
-    : measured < total
-      ? `${measured.toLocaleString()} of ${total.toLocaleString()} read`
-      : `${total.toLocaleString()} · ${formatBytes(bytes)}`;
+  // Unfiltered, the label's own count is the truth and matches the row behind
+  // this screen. Filtered, only the messages actually in scope can be counted.
+  const shown = filtered ? matched : total;
+  el.detailTotal.textContent = total ? `(${shown.toLocaleString()} · ${formatBytes(bytes)})` : '';
 
   if (!senders.length) {
     el.senderHead.hidden = true;
     el.senderRows.replaceChildren(
       emptyNote(
-        total
-          ? 'None of these messages have been read yet. They are measured in the background — check back shortly.'
-          : "Nothing here yet. If MailBoy is still going through your mailbox, this fills in once it's done."
+        !total
+          ? "Nothing here yet. If MailBoy is still going through your mailbox, this fills in once it's done."
+          : !cached
+            ? 'None of these messages have been read yet. They are measured in the background — check back shortly.'
+            : 'Nothing in this period.'
       )
     );
     return;
@@ -530,10 +556,23 @@ function renderBreakdown() {
   const scroll = el.senders.scrollTop;
 
   // A short breakdown is not a wrong one, but it should say so.
-  if (measured < total) {
+  if (cached < total) {
     nodes.push(
       emptyNote(
-        `${(total - measured).toLocaleString()} more not measured yet, so these totals will grow.`
+        `${(total - cached).toLocaleString()} more not measured yet, so these totals will grow.`
+      )
+    );
+  }
+
+  // Every message has a date; these are the ones still carrying cache entries
+  // written before dates were captured. Purely a migration artifact, and it
+  // reaches zero once the backfill has been through — but until then, leaving
+  // them out silently would make a period look emptier than it is.
+  if (undated) {
+    nodes.push(
+      emptyNote(
+        `${undated.toLocaleString()} not dated yet, so they are left out of this period. ` +
+          'They join it once the current pass reaches them.'
       )
     );
   }
@@ -545,7 +584,7 @@ function renderBreakdown() {
 async function openBreakdown(labelId, labelName) {
   openLabel = { id: labelId, name: labelName };
 
-  el.detailName.textContent = labelName;
+  el.detailLabel.textContent = labelName;
   el.detailTotal.textContent = '';
   el.senderHead.hidden = true;
   el.senderRows.replaceChildren(emptyNote('Working it out…'));
@@ -562,7 +601,7 @@ async function openBreakdown(labelId, labelName) {
 function closeBreakdown() {
   const previous = openLabel?.id;
   openLabel = null;
-  closeSortMenu();
+  closeMenus();
   showMain();
 
   const row = previous && el.groups.querySelector(`[data-label-id="${CSS.escape(previous)}"]`);
@@ -573,7 +612,7 @@ function setSort(key) {
   sortKey = key;
   el.sortLabel.textContent = SORTS[key].label;
 
-  for (const option of el.sortMenu.querySelectorAll('.sort-option')) {
+  for (const option of el.sortMenu.querySelectorAll('.picker-option')) {
     option.setAttribute('aria-checked', String(option.dataset.sort === key));
   }
 
@@ -590,9 +629,48 @@ function setSort(key) {
   renderBreakdown();
 }
 
-function closeSortMenu() {
-  el.sortMenu.hidden = true;
-  el.sortTrigger.setAttribute('aria-expanded', 'false');
+function setPeriod(key) {
+  periodKey = key;
+  el.periodLabel.textContent = PERIODS[key].label;
+  for (const option of el.periodMenu.querySelectorAll('.picker-option')) {
+    option.setAttribute('aria-checked', String(option.dataset.period === key));
+  }
+  renderBreakdown();
+}
+
+/** Both pickers behave identically, so they are wired the same way. */
+function closeMenus(except) {
+  for (const [trigger, menu] of [
+    [el.sortTrigger, el.sortMenu],
+    [el.periodTrigger, el.periodMenu],
+  ]) {
+    if (menu === except) continue;
+    menu.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function wirePicker(trigger, menu, attribute, choose) {
+  trigger.addEventListener('click', (event) => {
+    event.stopPropagation(); // Otherwise the document handler shuts it again.
+    const opening = menu.hidden;
+    // Only one at a time, or they overlap each other.
+    closeMenus();
+    menu.hidden = !opening;
+    trigger.setAttribute('aria-expanded', String(opening));
+  });
+
+  menu.addEventListener('click', (event) => {
+    const option = event.target.closest('.picker-option');
+    if (!option) return;
+    choose(option.dataset[attribute]);
+    closeMenus();
+    trigger.focus();
+  });
+}
+
+function anyMenuOpen() {
+  return !el.sortMenu.hidden || !el.periodMenu.hidden;
 }
 
 // ── Error state ──────────────────────────────────────────────────
@@ -980,33 +1058,21 @@ el.senderHead.addEventListener('click', (event) => {
   if (head) setSort(head.dataset.sort);
 });
 
-el.sortTrigger.addEventListener('click', (event) => {
-  event.stopPropagation(); // Otherwise the document handler closes it again.
-  const open = el.sortMenu.hidden;
-  el.sortMenu.hidden = !open;
-  el.sortTrigger.setAttribute('aria-expanded', String(open));
-});
-
-el.sortMenu.addEventListener('click', (event) => {
-  const option = event.target.closest('.sort-option');
-  if (!option) return;
-  setSort(option.dataset.sort);
-  closeSortMenu();
-  el.sortTrigger.focus();
-});
+wirePicker(el.sortTrigger, el.sortMenu, 'sort', setSort);
+wirePicker(el.periodTrigger, el.periodMenu, 'period', setPeriod);
 
 document.addEventListener('click', (event) => {
-  if (!el.sortMenu.hidden && !event.target.closest('.sort')) closeSortMenu();
+  if (anyMenuOpen() && !event.target.closest('.picker')) closeMenus();
 });
 
-// Puts the default on the trigger and the tick beside it.
+// Puts the defaults on the triggers and the ticks beside them.
 setSort(sortKey);
+setPeriod(periodKey);
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  if (!el.sortMenu.hidden) {
-    closeSortMenu();
-    el.sortTrigger.focus();
+  if (anyMenuOpen()) {
+    closeMenus();
   } else if (!el.detail.hidden) {
     closeBreakdown();
   }

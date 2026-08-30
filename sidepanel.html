@@ -170,51 +170,100 @@
               <path d="M9.5 3.5L5 8l4.5 4.5" />
             </svg>
           </button>
-          <h1 id="detail-name" class="detail-name"></h1>
+          <h1 class="detail-name">
+            <span id="detail-label"></span>
+            <span id="detail-total" class="detail-total"></span>
+          </h1>
         </header>
 
         <div class="detail-tools">
-          <span id="detail-total" class="detail-total"></span>
-
-          <div class="sort">
+          <div class="picker">
             <button
-              id="btn-sort"
-              class="sort-trigger"
+              id="btn-period"
+              class="picker-trigger"
               aria-haspopup="true"
               aria-expanded="false"
             >
-              <svg class="sort-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <svg class="picker-icon" viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="8" cy="8" r="5.75" />
+                <path d="M8 4.75V8l2.25 1.5" />
+              </svg>
+              <span id="period-label">All time</span>
+            </button>
+
+            <div id="period-menu" class="picker-menu" role="menu" hidden>
+                <button class="picker-option" role="menuitemradio" data-period="all">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 8.5l3 3 6-7" />
+                </svg>
+                  <span>All time</span>
+                </button>
+                <button class="picker-option" role="menuitemradio" data-period="y1">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 8.5l3 3 6-7" />
+                </svg>
+                  <span>Last 1 year</span>
+                </button>
+                <button class="picker-option" role="menuitemradio" data-period="m6">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 8.5l3 3 6-7" />
+                </svg>
+                  <span>Last 6 months</span>
+                </button>
+                <button class="picker-option" role="menuitemradio" data-period="m3">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 8.5l3 3 6-7" />
+                </svg>
+                  <span>Last 3 months</span>
+                </button>
+                <button class="picker-option" role="menuitemradio" data-period="m1">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 8.5l3 3 6-7" />
+                </svg>
+                  <span>Last 1 month</span>
+                </button>
+            </div>
+          </div>
+
+          <div class="picker">
+            <button
+              id="btn-sort"
+              class="picker-trigger"
+              aria-haspopup="true"
+              aria-expanded="false"
+            >
+              <svg class="picker-icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M2.5 4h11M4 8h8M6 12h4" />
               </svg>
-              <span class="sort-prefix">Sort by:</span>
+              <span class="picker-prefix">Sort by:</span>
               <span id="sort-label">Email count</span>
             </button>
 
-            <div id="sort-menu" class="sort-menu" role="menu" hidden>
-              <button class="sort-option" role="menuitemradio" data-sort="count">
-                <svg class="sort-tick" viewBox="0 0 16 16" aria-hidden="true">
+            <div id="sort-menu" class="picker-menu picker-menu--right" role="menu" hidden>
+                <button class="picker-option" role="menuitemradio" data-sort="count">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                <span>Email count</span>
-              </button>
-              <button class="sort-option" role="menuitemradio" data-sort="bytes">
-                <svg class="sort-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <span>Email count</span>
+                </button>
+                <button class="picker-option" role="menuitemradio" data-sort="bytes">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                <span>Size</span>
-              </button>
-              <button class="sort-option" role="menuitemradio" data-sort="rate">
-              <svg class="sort-tick" viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M3.5 8.5l3 3 6-7" />
-              </svg>
-              <span>How often</span>
-            </button>
-            <button class="sort-option" role="menuitemradio" data-sort="address">
-                <svg class="sort-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <span>Size</span>
+                </button>
+                <button class="picker-option" role="menuitemradio" data-sort="rate">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                <span>Email address</span>
-              </button>
+                  <span>How often</span>
+                </button>
+                <button class="picker-option" role="menuitemradio" data-sort="address">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 8.5l3 3 6-7" />
+                </svg>
+                  <span>Email address</span>
+                </button>
             </div>
           </div>
         </div>

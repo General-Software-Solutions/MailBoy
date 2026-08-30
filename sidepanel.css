@@ -635,6 +635,7 @@ body {
 
 .detail-name {
   flex: 1 1 auto;
+  min-width: 0;
   margin: 0;
   font-size: 14px;
   font-weight: 620;
@@ -652,23 +653,25 @@ body {
   gap: 10px;
   /* The trigger carries its own right padding, so the row gives back exactly
      that much — otherwise the control reads as inset from the edge. */
-  padding: 7px calc(var(--pad-x) - 8px) 7px var(--pad-x);
+  flex-wrap: wrap;
+  padding: 7px calc(var(--pad-x) - 6px) 7px calc(var(--pad-x) - 6px);
   border-bottom: 1px solid var(--border);
 }
 
 .detail-total {
   font-size: 11.5px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   color: var(--faint);
   white-space: nowrap;
 }
 
-/* ── Sort menu ───────────────────────────────────────────────── */
-.sort {
+/* ── Pickers ─────────────────────────────────────────────────── */
+.picker {
   position: relative;
 }
 
-.sort-trigger {
+.picker-trigger {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -682,13 +685,13 @@ body {
   cursor: pointer;
 }
 
-.sort-trigger:hover,
-.sort-trigger[aria-expanded='true'] {
+.picker-trigger:hover,
+.picker-trigger[aria-expanded='true'] {
   background: var(--surface);
   color: var(--text);
 }
 
-.sort-prefix {
+.picker-prefix {
   color: var(--faint);
 }
 
@@ -696,22 +699,23 @@ body {
   color: var(--text);
 }
 
-.sort-icon {
+.picker-icon {
   width: 14px;
   height: 14px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
   stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* Anchored to the trigger rather than the panel, so it stays under the control
    whatever the panel width — right-aligned, since the trigger sits at the
    right edge and a left-aligned menu would overflow. */
-.sort-menu {
+.picker-menu {
   position: absolute;
   top: calc(100% + 4px);
-  right: 0;
+  left: 0;
   z-index: 5;
   min-width: 150px;
   padding: 4px;
@@ -721,7 +725,14 @@ body {
   box-shadow: 0 6px 18px rgb(0 0 0 / 12%);
 }
 
-.sort-option {
+/* Anchored to the right edge for a trigger that sits there, so the menu does
+   not run off the panel. */
+.picker-menu--right {
+  left: auto;
+  right: 0;
+}
+
+.picker-option {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -737,11 +748,11 @@ body {
   cursor: pointer;
 }
 
-.sort-option:hover {
+.picker-option:hover {
   background: var(--surface);
 }
 
-.sort-tick {
+.picker-tick {
   flex: 0 0 auto;
   width: 13px;
   height: 13px;
@@ -754,7 +765,7 @@ body {
   visibility: hidden;
 }
 
-.sort-option[aria-checked='true'] .sort-tick {
+.picker-option[aria-checked='true'] .picker-tick {
   visibility: visible;
 }
 

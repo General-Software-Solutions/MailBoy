@@ -173,18 +173,44 @@ export function isMeasured(id) {
  * Entirely local — the ids come from a live label enumeration and everything
  * else is already cached, so a drill-down costs no Gmail calls at all.
  *
- * @returns {{address: string, name: string, count: number, bytes: number,
- *   dated: number, first: number, last: number}[]} `first`/`last` are whole
- *   days since the epoch, and `dated` says how many messages backed them.
+ * `sinceDay` narrows it to messages from that day onward.
+ *
+ * `undated` is not "mail without a date" — every message has one. It counts
+ * entries written before dates were captured, which have a size and a sender
+ * but an empty date slot until the backfill re-reads them. They cannot be
+ * placed in time, so a filtered view excludes them and reports the number;
+ * including them would be wrong, and dropping them silently would make the
+ * period look emptier than it is. It reaches zero once the backfill finishes.
+ *
+ * @returns {{senders: object[], cached: number, matched: number,
+ *   undated: number, bytes: number}} each sender carries `count`, `bytes` and
+ *   `dated`/`first`/`last` in whole days since the epoch.
  */
-export function bySender(ids) {
+export function bySender(ids, sinceDay = 0) {
   const totals = new Map();
+  let cached = 0;
+  let matched = 0;
+  let undated = 0;
+  let bytesTotal = 0;
 
   for (const id of ids) {
     const entry = messages?.get(id);
     if (!entry) continue; // not measured yet
+    cached++;
 
     const [bytes, index, day] = entry;
+
+    if (sinceDay) {
+      if (!day) {
+        undated++;
+        continue;
+      }
+      if (day < sinceDay) continue;
+    }
+
+    matched++;
+    bytesTotal += bytes;
+
     let row = totals.get(index);
     if (!row) {
       row = {
@@ -209,7 +235,13 @@ export function bySender(ids) {
     }
   }
 
-  return [...totals.values()].sort((a, b) => b.bytes - a.bytes);
+  return {
+    senders: [...totals.values()].sort((a, b) => b.bytes - a.bytes),
+    cached,
+    matched,
+    undated,
+    bytes: bytesTotal,
+  };
 }
 
 /**
