@@ -51,6 +51,7 @@ const el = {
   back: document.getElementById('btn-back'),
   detailLabel: document.getElementById('detail-label'),
   detailTotal: document.getElementById('detail-total'),
+  detailSpinner: document.getElementById('detail-spinner'),
   sortTrigger: document.getElementById('btn-sort'),
   sortLabel: document.getElementById('sort-label'),
   sortMenu: document.getElementById('sort-menu'),
@@ -195,6 +196,15 @@ function renderSkeleton(groups) {
  */
 let painted = {};
 
+/**
+ * Rows whose size has been worked out at least once.
+ *
+ * The spinner means "no figure has ever existed for this row", not "a pass is
+ * running" — a refresh over known numbers should refine them in place rather
+ * than blanking the panel back to placeholders.
+ */
+const sized = new Set();
+
 function paintRecords(records) {
   for (const [labelId, incoming] of Object.entries(records)) {
     const previous = painted[labelId];
@@ -203,12 +213,15 @@ function paintRecords(records) {
     // count is unchanged the old size still describes the same messages, so
     // keep showing it rather than flashing a spinner over a number we have.
     const record =
-      incoming &&
-      incoming.bytes === undefined &&
-      previous?.bytes !== undefined &&
-      previous.count === incoming.count
-        ? { ...incoming, bytes: previous.bytes, pending: previous.pending, settled: previous.settled }
+      incoming && incoming.bytes === undefined && previous?.bytes !== undefined
+        ? { ...incoming, bytes: previous.bytes }
         : incoming;
+
+    // Once a row has been fully worked out, it never goes back to a spinner: a
+    // later pass has a real number to show while it refines it.
+    if (record && record.bytes !== undefined && ((record.pending ?? 0) === 0 || record.settled)) {
+      sized.add(labelId);
+    }
 
     painted[labelId] = record;
     paintRow(labelId, record);
@@ -256,20 +269,21 @@ function paintRow(labelId, record) {
   // spins until its own messages have all been read and then shows one figure.
   // "Settled" is the load reporting it has stopped, which is what separates
   // still-waiting from could-not-be-measured.
-  const short = record.bytes === undefined || (record.pending ?? 0) > 0;
+  const short = (record.pending ?? 0) > 0;
   const measuring = short && !record.settled;
+  const figure = record.bytes !== undefined;
 
   if (record.count === 0) {
     size.replaceChildren();
-  } else if (measuring) {
-    size.replaceChildren(spinner());
-  } else if (record.bytes === undefined) {
-    size.replaceChildren();
-  } else {
+  } else if (figure && (sized.has(labelId) || !measuring)) {
     size.textContent = `(${formatBytes(record.bytes)})`;
+  } else if (measuring || !record.settled) {
+    // Only ever the first time: after this the row keeps its number.
+    size.replaceChildren(spinner());
+  } else {
+    size.replaceChildren();
   }
-  // Settled but short: a real figure, just known to be missing some messages.
-  size.classList.toggle('row-size--partial', short && !measuring);
+  size.classList.toggle('row-size--partial', figure && short);
 
   const title = [];
   if (record.total !== undefined) {
@@ -312,8 +326,12 @@ function setBusy(running) {
   busy = running;
   el.refresh.disabled = running;
   el.refresh.querySelector('.icon').classList.toggle('icon--spin', running);
+  el.detailSpinner.hidden = !running;
   paintProgress();
   setFooter();
+  // The breakdown grows a trailing spinner while a pass runs, and loses it
+  // when one ends.
+  if (openLabel) renderBreakdown();
 }
 
 /**
@@ -328,7 +346,6 @@ function paintProgress() {
   const measuring = progress?.phase === 'measuring';
 
   el.notice.hidden = !busy;
-  el.groups.classList.toggle('groups--locked', busy);
   el.progress.classList.toggle('progress--indeterminate', !measuring);
 
   if (!measuring) {
@@ -510,6 +527,15 @@ function renderSender(sender) {
   return row;
 }
 
+function stillReading() {
+  const row = document.createElement('div');
+  row.className = 'sender-more';
+  row.append(spinner(), Object.assign(document.createElement('span'), {
+    textContent: 'Still reading — this list will grow.',
+  }));
+  return row;
+}
+
 function emptyNote(text) {
   const note = document.createElement('p');
   note.className = 'empty';
@@ -542,6 +568,7 @@ function renderBreakdown() {
             : 'Nothing in this period.'
       )
     );
+    if (busy) el.senderRows.append(stillReading());
     return;
   }
 
@@ -576,6 +603,8 @@ function renderBreakdown() {
       )
     );
   }
+
+  if (busy) nodes.push(stillReading());
 
   el.senderRows.replaceChildren(...nodes);
   el.senders.scrollTop = scroll;
@@ -894,6 +923,11 @@ async function load({ force = false } = {}) {
     return;
   }
 
+  // The previous enumeration's ids, so a breakdown opened during this pass has
+  // something to aggregate rather than an empty list. `collect` replaces them
+  // when its own enumeration lands.
+  membershipReady = restoreMembership();
+
   loading = true;
   setBusy(true);
 
@@ -1021,6 +1055,7 @@ async function handleLogout() {
   // rebuilding the cache is the slowest thing the panel does.
   await clearMessages();
   await forgetMembership();
+  sized.clear();
   openLabel = null;
   el.senderRows.replaceChildren();
   painted = {};

@@ -333,11 +333,6 @@ body {
   min-height: 0;
 }
 
-/* Hover implies clickable, and during a load nothing is. */
-.groups--locked .row {
-  pointer-events: none;
-}
-
 .notice-card {
   position: relative;
   z-index: 2;
@@ -658,6 +653,10 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+#detail-spinner {
+  margin-left: 3px;
+}
+
 .detail-total {
   font-size: 11.5px;
   font-weight: 500;
@@ -862,6 +861,17 @@ body {
 
 .sender-display {
   font-size: 11px;
+  color: var(--faint);
+}
+
+/* Sits at the end of the list while more is still arriving, in place of the
+   card the mailbox screen uses. */
+.sender-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px var(--pad-x);
+  font-size: 11.5px;
   color: var(--faint);
 }
 

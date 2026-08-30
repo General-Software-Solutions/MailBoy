@@ -125,8 +125,8 @@
               <h2 class="notice-title">Getting your mailbox ready</h2>
             </div>
             <p class="notice-body">
-              MailBoy is fetching the latest data. Please wait till the refresh
-              completes to organize your mail.
+              MailBoy is fetching the latest data. Everything stays usable
+              meanwhile — numbers fill in as they arrive.
               MailBoy fetches only the size, sender and date from your mails;
               not the full mail content or attachments.
             </p>
@@ -149,14 +149,6 @@
           <main id="groups" class="groups"></main>
         </div>
 
-        <div class="actions-bar">
-          <button id="btn-refresh" class="btn btn--ghost btn--xs">
-            <span class="icon" aria-hidden="true">refresh</span
-            ><span>Refresh current data</span>
-          </button>
-        </div>
-
-        <footer id="footer" class="footer"></footer>
       </section>
 
       <!-- ── Breakdown ───────────────────────────────────────────── -->
@@ -173,6 +165,7 @@
           <h1 class="detail-name">
             <span id="detail-label"></span>
             <span id="detail-total" class="detail-total"></span>
+            <span id="detail-spinner" class="row-spinner" hidden></span>
           </h1>
         </header>
 
@@ -278,6 +271,15 @@
           <div id="sender-rows"></div>
         </main>
       </section>
+
+      <div class="actions-bar">
+        <button id="btn-refresh" class="btn btn--ghost btn--xs">
+          <span class="icon" aria-hidden="true">refresh</span
+          ><span>Refresh current data</span>
+        </button>
+      </div>
+
+      <footer id="footer" class="footer"></footer>
     </div>
 
     <script type="module" src="sidepanel.js"></script>
