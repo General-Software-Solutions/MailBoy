@@ -313,6 +313,48 @@ export function bySender(ids, sinceDay = 0) {
 }
 
 /**
+ * The ids among `ids` written by any of `keys`, within the same period scope
+ * `bySender` uses.
+ *
+ * This is what turns a tick beside a sender into the messages an action acts
+ * on, and **the two filters have to stay identical** — the row says "412
+ * emails" and the action has to touch exactly those 412. Any divergence shows
+ * up as a confirmation dialog quoting one number and a job doing something
+ * else.
+ *
+ * A message with no cache entry has no sender to have been grouped under, so it
+ * is not in any row's count and is not selectable. That is why the breakdown
+ * says how many are still unmeasured.
+ *
+ * @param {string[]} ids
+ * @param {Iterable<string>} keys grouping keys, as `bySender` produced them —
+ *   the lowercased address, or the display name where there is no address
+ * @param {number} [sinceDay] whole days since the epoch, or 0 for everything
+ * @returns {string[]}
+ */
+export function idsForSenders(ids, keys, sinceDay = 0) {
+  const wanted = keys instanceof Set ? keys : new Set(keys);
+  const picked = [];
+
+  for (const id of ids) {
+    const entry = messages?.get(id);
+    if (!entry) continue;
+
+    const [, index, day] = entry;
+    // Undated entries predate dates being captured and cannot be placed in
+    // time, so a filtered view leaves them out — exactly as `bySender` does.
+    if (sinceDay && (!day || day < sinceDay)) continue;
+
+    // The same fallback `bySender` uses for an index with nothing behind it, so
+    // the two agree on every entry rather than on most of them.
+    const sender = senders[index] ?? { address: '', name: '' };
+    if (wanted.has(keyOf(sender))) picked.push(id);
+  }
+
+  return picked;
+}
+
+/**
  * How much measured work to risk. A first run over a large mailbox takes
  * minutes, and the panel can be closed at any point in it, so the cache is
  * written out along the way rather than only at the end.

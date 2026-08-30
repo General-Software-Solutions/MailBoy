@@ -8,7 +8,14 @@
 import { activeAccount, keyFor } from './account.js';
 import { AuthError, getLabel, listLabels, listMessageIds } from './gmail.js';
 import { buildGroups } from './labels.js';
-import { bySender, isMeasured, loadMessages, reloadMessages, sizeOf } from './messages.js';
+import {
+  bySender,
+  idsForSenders,
+  isMeasured,
+  loadMessages,
+  reloadMessages,
+  sizeOf,
+} from './messages.js';
 
 /** Rows that count something narrower than their whole label. */
 const SCOPES = {
@@ -55,6 +62,22 @@ export const membershipKey = (id) => keyFor(id, MEMBERSHIP_NAME);
 export function breakdownOf(labelId, sinceDay = 0) {
   const ids = counts.get(labelId) ?? [];
   return { ...bySender(ids, sinceDay), total: ids.length };
+}
+
+/**
+ * The messages behind a set of ticked senders in one row's breakdown.
+ *
+ * Also local, and deliberately the same two filters `breakdownOf` applies — the
+ * figure a confirmation dialog quotes and the mail a job acts on have to be the
+ * same set, or one of the two is lying.
+ *
+ * @param {string} labelId
+ * @param {Iterable<string>} senderKeys
+ * @param {number} [sinceDay]
+ * @returns {string[]}
+ */
+export function idsForSelection(labelId, senderKeys, sinceDay = 0) {
+  return idsForSenders(counts.get(labelId) ?? [], senderKeys, sinceDay);
 }
 
 /**

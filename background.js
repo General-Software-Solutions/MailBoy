@@ -1,27 +1,30 @@
 // MailBoy service worker.
 //
-// Three jobs: open the side panel from the toolbar, own the slow half of the
-// data pass — reading every message for its size and sender — and empty a
-// folder that is being deleted.
+// Four jobs: open the side panel from the toolbar, own the slow half of the
+// data pass — reading every message for its size and sender — empty a folder
+// that is being deleted, and carry out an action on a selection of senders.
 //
-// Both of the long ones live here rather than in the panel because they take
-// minutes, and requiring someone to sit with the panel open for that is not a
-// reasonable thing to ask.
+// All three of the long ones live here rather than in the panel because they
+// take minutes, and requiring someone to sit with the panel open for that is
+// not a reasonable thing to ask.
 //
-// Neither keeps a cursor. The measuring queue is rebuilt from scratch on every
+// None keeps a cursor. The measuring queue is rebuilt from scratch on every
 // wake and the message cache filters out whatever is already known; a delete
 // re-lists its labels, and mail it has already moved no longer comes back in
-// that listing. So "start" and "resume" are one code path in both, which is
-// what makes a termination at any instant harmless — Chrome ends a worker after
-// roughly 30 seconds of inactivity, and while a batch every couple of seconds
-// keeps it alive, that is a happy accident and never something to depend on.
+// that listing. So "start" and "resume" are one code path, which is what makes
+// a termination at any instant harmless — Chrome ends a worker after roughly 30
+// seconds of inactivity, and while a batch every couple of seconds keeps it
+// alive, that is a happy accident and never something to depend on.
 //
 // A delete carries one small record all the same — which folders, and what to
 // do with their mail. That is intent, not progress: nothing in the mailbox can
-// tell the worker whether the user asked for Trash or for the inbox.
+// tell the worker whether the user asked for Trash or for the inbox. A
+// selection job carries a much larger one, because the ids themselves cannot be
+// re-derived from anything Gmail holds; see src/bulk.js.
 
 import { activeAccount } from './src/account.js';
 import { AuthError } from './src/auth.js';
+import { clearBulkJob, readBulkJob, runBulkJob, saveBulkJob } from './src/bulk.js';
 import { clearDeleteJob, readDeleteJob, runDeleteJob, saveDeleteJob } from './src/folders.js';
 import { buildQueue } from './src/mailbox.js';
 import { ensureMeta, flushMessages } from './src/messages.js';
@@ -31,6 +34,7 @@ const ALARM = 'measure';
 
 const FOLDER_PORT = 'folders';
 const DELETE_ALARM = 'folder-delete';
+const BULK_ALARM = 'bulk-job';
 
 /** Safety net: if the worker is killed mid-pass, this starts it again. */
 const RESUME_MINUTES = 1;
@@ -47,9 +51,10 @@ function openOnClick() {
 chrome.runtime.onInstalled.addListener(openOnClick);
 chrome.runtime.onStartup.addListener(openOnClick);
 
-// A browser restart takes the alarms with it, so a delete interrupted by one
-// would otherwise sit half-done until somebody opened the panel and noticed.
+// A browser restart takes the alarms with it, so a job interrupted by one would
+// otherwise sit half-done until somebody opened the panel and noticed.
 chrome.runtime.onStartup.addListener(() => void resumeDelete());
+chrome.runtime.onStartup.addListener(() => void resumeBulk());
 
 // ── Talking to the panel ─────────────────────────────────────────
 
@@ -65,6 +70,9 @@ let progress = null;
 /** The same, for a delete: `{done, total, name}`. */
 let deleteProgress = null;
 
+/** And for a selection job: `{done, total, action, target}`. */
+let bulkProgress = null;
+
 let running = false;
 
 /** Set by a stop from the panel; cleared when a fresh pass begins. */
@@ -72,6 +80,9 @@ let stopping = false;
 
 let deleting = false;
 let stoppingDelete = false;
+
+let bulking = false;
+let stoppingBulk = false;
 
 function broadcast(message, to = ports) {
   for (const port of to) {
@@ -90,14 +101,17 @@ chrome.runtime.onConnect.addListener((port) => {
     port.onDisconnect.addListener(() => folderPorts.delete(port));
 
     if (deleteProgress) port.postMessage({ type: 'delete-progress', ...deleteProgress });
+    if (bulkProgress) port.postMessage({ type: 'bulk-progress', ...bulkProgress });
 
     // Opening the panel is a recovery path in its own right. A job whose alarm
     // was lost — cleared by a logout, or gone with a browser restart — would
     // otherwise sit there with its folders half emptied and nothing to wake it.
     if (!deleting) void resumeDelete();
+    if (!bulking) void resumeBulk();
 
     port.onMessage.addListener((message) => {
       if (message?.type === 'delete') void startDelete(message.job);
+      if (message?.type === 'bulk') void startBulk(message.job);
     });
     return;
   }
@@ -140,11 +154,17 @@ chrome.runtime.onMessage.addListener((message) => {
     stoppingDelete = true;
     void chrome.alarms.clear(DELETE_ALARM);
   }
+
+  if (!message.job || message.job === 'bulk') {
+    stoppingBulk = true;
+    void chrome.alarms.clear(BULK_ALARM);
+  }
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) void measure();
   if (alarm.name === DELETE_ALARM) void resumeDelete();
+  if (alarm.name === BULK_ALARM) void resumeBulk();
 });
 
 /**
@@ -290,5 +310,85 @@ async function runDelete(job) {
     }
   } finally {
     deleting = false;
+  }
+}
+
+// ── Acting on a sender selection ─────────────────────────────────
+//
+// Same shape as the delete above, and for the same two reasons: trashing is 5
+// quota units a message, so a large selection is minutes, and a worker can be
+// ended at any moment. The difference is that this job's record carries the
+// message ids themselves — a sender selection is a choice made in the panel and
+// nothing in the mailbox records it, so there is nothing to re-derive it from.
+// See src/bulk.js.
+
+async function startBulk(job) {
+  if (bulking) return;
+  const stamped = { ...job, startedAt: Date.now() };
+  await saveBulkJob(stamped);
+  await runBulk(stamped);
+}
+
+/** What the alarm and a browser restart both come back to. */
+async function resumeBulk() {
+  if (bulking) return;
+  const job = await readBulkJob();
+  if (job) await runBulk(job);
+}
+
+async function runBulk(job) {
+  if (bulking) return;
+  bulking = true;
+  stoppingBulk = false;
+
+  try {
+    // Signed out there is no token to spend and no mailbox to act on. The
+    // record is namespaced to the account, so it waits rather than being lost.
+    if (!(await activeAccount())) {
+      await chrome.alarms.clear(BULK_ALARM);
+      return;
+    }
+
+    // Before the first await that can be interrupted, same as the other two.
+    chrome.alarms.create(BULK_ALARM, { periodInMinutes: RESUME_MINUTES });
+
+    const shape = { action: job.action, target: job.target ?? '', total: job.ids.length };
+    bulkProgress = { done: 0, ...shape };
+    broadcast({ type: 'bulk-progress', ...bulkProgress }, folderPorts);
+
+    const outcome = await runBulkJob(job, {
+      onProgress: (done) => {
+        bulkProgress = { done, ...shape };
+        broadcast({ type: 'bulk-progress', ...bulkProgress }, folderPorts);
+      },
+      stopped: () => stoppingBulk,
+    });
+
+    bulkProgress = null;
+    await chrome.alarms.clear(BULK_ALARM);
+
+    if (!outcome.complete) {
+      // Stopped, not finished. The record stays and the alarm is gone, so
+      // nothing resumes until the panel asks again — which is what a stop means.
+      broadcast({ type: 'bulk-stopped', ...outcome, ...shape }, folderPorts);
+      return;
+    }
+
+    await clearBulkJob();
+    broadcast({ type: 'bulk-done', ...outcome, ...shape }, folderPorts);
+  } catch (err) {
+    console.error('[MailBoy] selection job failed:', err);
+    bulkProgress = null;
+    broadcast(
+      { type: 'bulk-failed', action: job.action, message: err?.message ?? String(err) },
+      folderPorts
+    );
+
+    await chrome.alarms.clear(BULK_ALARM);
+    if (!(err instanceof AuthError)) {
+      chrome.alarms.create(BULK_ALARM, { delayInMinutes: RETRY_MINUTES });
+    }
+  } finally {
+    bulking = false;
   }
 }

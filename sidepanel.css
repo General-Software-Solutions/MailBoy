@@ -60,11 +60,17 @@
   /* Sender table columns, as shares rather than widths. Fractions always add
      up to whatever the panel is, so the table can never be wider than it —
      see the note on .sender-head. */
-  --col-name: 36fr;
+  --col-name: 32fr;
   --col-count: 19fr;
   --col-size: 17fr;
-  --col-rate: 28fr;
+  --col-rate: 32fr;
   --col-gap: 8px;
+  /* The tick column is the one fixed track, because a checkbox has a size
+     rather than a share. The fractions divide whatever is left, so the table
+     still cannot be wider than the panel — but there is 26px less of it to
+     divide, which is why the name column gave 4 shares back to Frequency: the
+     headings have to fit whole, and an address has ellipsis and a tooltip. */
+  --col-tick: 18px;
   --pad-x: 14px;
   --avatar: 32px;
 }
@@ -795,6 +801,61 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+/* Only one of the two is ever up, and whichever it is owns the whole row. Both
+   carry the same floor so swapping between them cannot nudge the list below. */
+.tools-filters,
+.tools-actions {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  min-height: 27px;
+}
+
+/* What the buttons beside it will act on, in the scope the hidden period picker
+   set — the filter is off screen while a selection is live, so the number has
+   to say which messages it counted. */
+.selection-summary {
+  min-width: 0;
+  padding-left: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tools-buttons {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+}
+
+/* Inline SVG rather than a Material Symbols glyph: the icon font is bundled as
+   a subset, so a new glyph means rebuilding it. */
+.btn-glyph {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.btn--danger {
+  color: var(--danger);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 #detail-spinner {
   margin-left: 3px;
 }
@@ -929,6 +990,7 @@ body {
 .sender {
   display: grid;
   grid-template-columns:
+    var(--col-tick)
     minmax(0, var(--col-name))
     minmax(0, var(--col-count))
     minmax(0, var(--col-size))
@@ -1014,7 +1076,12 @@ body {
 /* The word and its arrow centre as a pair, which leaves the word itself about
    half an arrow left of true centre. A balancing spacer opposite would fix
    that, but it costs 14px in a column that has barely enough for the word —
-   and a truncated heading is a worse fault than a slightly off-centre one. */
+   and a truncated heading is a worse fault than a slightly off-centre one.
+
+   The tick column and its gap take 26px off the pool the shares divide, so the
+   arithmetic to redo before changing a heading's text or type is: panel width,
+   less 2 × --pad-x, less 4 × --col-gap, less --col-tick, apportioned by the
+   --col-* shares. Frequency is the tightest and sets the floor. */
 .col-num {
   justify-content: center;
 }
@@ -1022,10 +1089,38 @@ body {
 .sender {
   padding-top: 6px;
   padding-bottom: 6px;
+  cursor: pointer;
 }
 
 .sender:hover {
   background: var(--surface);
+}
+
+.sender--picked {
+  background: var(--accent-soft);
+}
+
+/* The whole row toggles, so the box is a target rather than the target — 15px
+   is a small thing to hit in a list this dense. The label stretches over the
+   track to widen it a little further. */
+.sender-tick {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.sender-tick--head {
+  align-self: stretch;
+}
+
+.sender-tick input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .sender-who {
@@ -1192,6 +1287,31 @@ body {
   color: var(--faint);
   font-size: 11.5px;
   line-height: 1.5;
+}
+
+/* The destination list, built from the same .group / .row markup the mailbox
+   screen uses so the inline folder editor drops straight in. --pad-x is
+   narrowed for it: the list already sits inside the dialog's own padding, and
+   the mailbox figure would push every folder name a second inset in. */
+.move-list {
+  --pad-x: 8px;
+  max-height: 46vh;
+  margin: 0 0 14px;
+  padding: 4px 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+/* A destination, not a folder being inspected: no count, and the + is the only
+   control. */
+.move-list .row-name {
+  font-size: 12.5px;
+}
+
+.move-list .group + .group {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
 }
 
 /* ── Error state ─────────────────────────────────────────────── */

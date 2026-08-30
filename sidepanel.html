@@ -177,6 +177,43 @@
         </form>
       </dialog>
 
+      <!-- ── Acting on a sender selection ────────────────────────── -->
+      <!-- One dialog for both of the actions that have no target to pick —
+           trashing and restoring. Each is a single sentence with a count in the
+           middle of it, so the parts are named rather than the whole thing
+           rewritten, and the count keeps its weight either way. -->
+      <dialog id="confirm-dialog" class="dialog">
+        <form method="dialog">
+          <h2 class="dialog-title">
+            <span id="confirm-verb"></span>
+            <strong id="confirm-count"></strong>
+            <span id="confirm-where"></span>?
+          </h2>
+          <p class="dialog-text" id="confirm-text"></p>
+          <div class="dialog-actions">
+            <button value="go" id="confirm-ok" class="btn btn--primary btn--sm"></button>
+            <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- Picking a destination is the confirmation, so there is no second step
+           and no method="dialog" — one tap on a folder starts the move. The +
+           buttons are the same ones the mailbox screen carries, wired to the
+           same inline editor, so a folder that does not exist yet can be made
+           without leaving the dialog. No bins: this is a place to choose a
+           destination, not to manage folders. -->
+      <dialog id="move-dialog" class="dialog">
+        <h2 class="dialog-title">Move <strong id="move-count">these emails</strong> to…</h2>
+        <p class="dialog-text" id="move-text"></p>
+        <div id="move-list" class="move-list"></div>
+        <div class="dialog-actions">
+          <button type="button" id="btn-move-cancel" class="btn btn--ghost btn--sm">
+            Cancel
+          </button>
+        </div>
+      </dialog>
+
       <!-- ── Mailbox ───────────────────────────────────────────── -->
       <section id="screen-main" class="screen" hidden>
         <div class="content">
@@ -231,6 +268,11 @@
         </header>
 
         <div class="detail-tools">
+          <!-- The two halves of one row. Ticking a sender swaps the filters out
+               for what can be done with the selection: there is nothing useful
+               about re-sorting a list you are in the middle of acting on, and a
+               side panel has no width to carry both. -->
+          <div id="tools-filters" class="tools-filters">
           <div class="picker">
             <button
               id="btn-period"
@@ -320,10 +362,48 @@
                 </button>
             </div>
           </div>
+          </div>
+
+          <div id="tools-actions" class="tools-actions" hidden>
+            <span id="selection-summary" class="selection-summary"></span>
+            <!-- Trash gets one button and it is Restore. There is nowhere to
+                 move mail that is already deleted, and "delete" would have to
+                 mean permanent — which needs the widest scope Google publishes
+                 and is not something MailBoy will ever ask for. -->
+            <div class="tools-buttons">
+              <button id="btn-restore" class="btn btn--ghost btn--xs" hidden>
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" />
+                  <path d="M2.6 2.6v2.6h2.6" />
+                </svg>
+                <span>Restore</span>
+              </button>
+              <button id="btn-move" class="btn btn--ghost btn--xs">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M2 12.6V3.9h3.7l1.2 1.6h7.1v7.1z" />
+                  <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
+                </svg>
+                <span>Move</span>
+              </button>
+              <button id="btn-trash" class="btn btn--ghost btn--xs btn--danger">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
+                  />
+                </svg>
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
         </div>
 
         <main id="senders" class="senders">
           <div id="sender-head" class="sender-head">
+            <!-- Not a .col-head: it is a control, not a sort order, and it must
+                 not take the click that turns a column round. -->
+            <label class="sender-tick sender-tick--head">
+              <input type="checkbox" id="select-all" aria-label="Select every sender listed" />
+            </label>
             <button class="col-head" data-sort="address">
               <span class="col-label">Sender</span>
               <svg class="col-arrow" viewBox="0 0 16 16" aria-hidden="true">

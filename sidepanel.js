@@ -14,6 +14,7 @@ import {
   logout,
   rememberAccount,
 } from './src/auth.js';
+import { bulkJobKey, readBulkJob } from './src/bulk.js';
 import {
   MAX_NAME,
   createFolder,
@@ -28,6 +29,7 @@ import {
   breakdownOf,
   collect,
   forgetMembership,
+  idsForSelection,
   patchMembership,
   resetMembership,
   restoreMembership,
@@ -92,6 +94,24 @@ const el = {
   senders: document.getElementById('senders'),
   senderHead: document.getElementById('sender-head'),
   senderRows: document.getElementById('sender-rows'),
+  toolsFilters: document.getElementById('tools-filters'),
+  toolsActions: document.getElementById('tools-actions'),
+  selectionSummary: document.getElementById('selection-summary'),
+  selectAll: document.getElementById('select-all'),
+  move: document.getElementById('btn-move'),
+  trash: document.getElementById('btn-trash'),
+  restore: document.getElementById('btn-restore'),
+  confirmDialog: document.getElementById('confirm-dialog'),
+  confirmVerb: document.getElementById('confirm-verb'),
+  confirmCount: document.getElementById('confirm-count'),
+  confirmWhere: document.getElementById('confirm-where'),
+  confirmText: document.getElementById('confirm-text'),
+  confirmOk: document.getElementById('confirm-ok'),
+  moveDialog: document.getElementById('move-dialog'),
+  moveCount: document.getElementById('move-count'),
+  moveText: document.getElementById('move-text'),
+  moveList: document.getElementById('move-list'),
+  moveCancel: document.getElementById('btn-move-cancel'),
 };
 
 let loading = false;
@@ -188,12 +208,18 @@ function actionButton(action, path, label, { danger = false } = {}) {
 }
 
 /**
- * @param {{editable?: boolean}} [options] whether this row can be nested into
- *   and removed. True only for Your Folders: Gmail's user labels are a flat
- *   namespace that system labels are not part of, so there is nothing to create
- *   under Inbox and nothing to delete about Sent.
+ * @param {{editable?: boolean, counted?: boolean, removable?: boolean}}
+ *   [options] `editable` is whether this row can be nested into and removed,
+ *   true only for Your Folders: Gmail's user labels are a flat namespace that
+ *   system labels are not part of, so there is nothing to create under Inbox
+ *   and nothing to delete about Sent.
+ *
+ *   The other two are for the move picker, which shows the same folders as
+ *   destinations: no figures, because a destination's own contents are beside
+ *   the point, and no bin, because that dialog is for choosing somewhere to put
+ *   mail rather than for managing folders.
  */
-function renderRow(item, { editable = false } = {}) {
+function renderRow(item, { editable = false, counted = true, removable = true } = {}) {
   const row = document.createElement('div');
   row.className = 'row';
   row.dataset.labelId = item.id;
@@ -224,7 +250,8 @@ function renderRow(item, { editable = false } = {}) {
   count.className = 'row-count';
   count.append(num, size);
 
-  row.append(name, count);
+  row.append(name);
+  if (counted) row.append(count);
 
   if (editable) {
     // The path, not the leaf: it is what a child's name has to be built from,
@@ -233,17 +260,18 @@ function renderRow(item, { editable = false } = {}) {
 
     const actions = document.createElement('span');
     actions.className = 'row-actions';
-    actions.append(
-      actionButton('add', ICON_ADD, `New folder inside ${item.name}`),
-      actionButton('delete', ICON_BIN, `Delete ${item.name}`, { danger: true })
-    );
+    actions.append(actionButton('add', ICON_ADD, `New folder inside ${item.name}`));
+    if (removable) {
+      actions.append(actionButton('delete', ICON_BIN, `Delete ${item.name}`, { danger: true }));
+    }
     row.append(actions);
   }
 
   return row;
 }
 
-function renderGroup(title, items, emptyText, { editable = false } = {}) {
+function renderGroup(title, items, emptyText, options = {}) {
+  const { editable = false } = options;
   const section = document.createElement('section');
   section.className = 'group';
 
@@ -268,7 +296,7 @@ function renderGroup(title, items, emptyText, { editable = false } = {}) {
     return section;
   }
 
-  for (const item of items) section.append(renderRow(item, { editable }));
+  for (const item of items) section.append(renderRow(item, options));
   return section;
 }
 
@@ -677,6 +705,109 @@ function sinceDay() {
  */
 let membershipReady = Promise.resolve();
 
+// ── Picking senders ──────────────────────────────────────────────
+//
+// A tick is a promise about a set of messages, and the whole of it rests on one
+// thing: `selected` holds the same grouping keys `bySender` bucketed on, so the
+// number a row shows, the number the summary adds up, and the ids an action
+// resolves to are all the same set. `keyOf` in messages.js is the other half of
+// that — the two must not drift.
+
+/** Matches `keyOf` in src/messages.js. */
+const senderKey = (sender) => sender.address || sender.name || '';
+
+/** Grouping keys ticked in the open breakdown. */
+let selected = new Set();
+
+/**
+ * The senders the last render actually put on screen.
+ *
+ * Select-all covers exactly these, and so does the summary — a tick on a sender
+ * the current period no longer lists cannot be acted on, so it must not be
+ * counted either.
+ *
+ * @type {object[]}
+ */
+let listedSenders = [];
+
+function clearSelection() {
+  selected = new Set();
+  paintSelection();
+}
+
+/**
+ * What is ticked, as the list currently on screen sees it. Everything a dialog
+ * quotes and everything a job acts on comes from here, so there is one answer
+ * rather than three that can disagree.
+ */
+function selectionFacts() {
+  const rows = listedSenders.filter((sender) => selected.has(senderKey(sender)));
+  return {
+    keys: rows.map(senderKey),
+    senders: rows.length,
+    messages: rows.reduce((sum, sender) => sum + sender.count, 0),
+    bytes: rows.reduce((sum, sender) => sum + sender.bytes, 0),
+  };
+}
+
+/**
+ * Swap the tools row over, and say what the buttons beside it would act on.
+ *
+ * The period picker is off screen while a selection is live, so the summary
+ * carries the period instead — the actions are scoped by it, and a figure that
+ * did not say so would be quoting a number nobody can see the basis for.
+ */
+function paintSelection() {
+  const { senders, messages } = selectionFacts();
+  const picked = senders > 0;
+
+  el.toolsFilters.hidden = picked;
+  el.toolsActions.hidden = !picked;
+
+  el.selectAll.checked = picked && senders === listedSenders.length;
+  el.selectAll.indeterminate = picked && senders < listedSenders.length;
+
+  if (!picked) return;
+
+  // Trash offers one thing, and it is the way back. There is nowhere to move
+  // mail that is already deleted, and a "delete" there could only mean
+  // permanently — which needs `https://mail.google.com/`, the widest scope
+  // Google publishes, and is not something MailBoy will ever ask for.
+  const inTrash = openLabel?.id === 'TRASH';
+  el.restore.hidden = !inTrash;
+  el.move.hidden = inTrash;
+  el.trash.hidden = inTrash;
+
+  // A picker left open goes off screen with its trigger, and would come back
+  // still open when the ticks are cleared.
+  closeMenus();
+
+  const scope = periodKey === 'all' ? '' : ` · ${PERIODS[periodKey].label}`;
+  el.selectionSummary.textContent = `${emails(messages)}${scope}`;
+  el.selectionSummary.title = `${senders.toLocaleString()} selected · ${emails(messages)}${scope}`;
+}
+
+/**
+ * Paint the ticks from `selected` rather than trusting the boxes to have kept
+ * their own state: a measuring pass rebuilds these rows every second or so.
+ */
+function syncSelection() {
+  for (const row of el.senderRows.querySelectorAll('.sender')) {
+    const on = selected.has(row.dataset.sender);
+    row.classList.toggle('sender--picked', on);
+    const box = row.querySelector('input[type="checkbox"]');
+    if (box && box.checked !== on) box.checked = on;
+  }
+  paintSelection();
+}
+
+function toggleSender(key, on) {
+  if (key === undefined) return;
+  if (on) selected.add(key);
+  else selected.delete(key);
+  syncSelection();
+}
+
 function figure(text) {
   const cell = document.createElement('span');
   cell.className = 'sender-figure';
@@ -687,6 +818,21 @@ function figure(text) {
 function renderSender(sender) {
   const row = document.createElement('div');
   row.className = 'sender';
+
+  const key = senderKey(sender);
+  const picked = selected.has(key);
+  row.dataset.sender = key;
+  row.classList.toggle('sender--picked', picked);
+
+  // The label is what makes the 15px box a slightly larger target; the row
+  // itself is the real one, wired below.
+  const tick = document.createElement('label');
+  tick.className = 'sender-tick';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = picked;
+  box.setAttribute('aria-label', `Select ${sender.address || sender.name || 'unknown sender'}`);
+  tick.append(box);
 
   const who = document.createElement('span');
   who.className = 'sender-who';
@@ -708,6 +854,7 @@ function renderSender(sender) {
   }
 
   row.append(
+    tick,
     who,
     figure(sender.count.toLocaleString()),
     figure(formatBytes(sender.bytes)),
@@ -754,6 +901,8 @@ function renderBreakdown() {
 
   if (!senders.length) {
     el.senderHead.hidden = true;
+    listedSenders = [];
+    paintSelection();
     const note = emptyNote(
       !total
         ? "Nothing here yet. If MailBoy is still going through your mailbox, this fills in once it's done."
@@ -768,7 +917,11 @@ function renderBreakdown() {
   el.senderHead.hidden = false;
 
   const sorted = [...senders].sort(comparator(sortKey, sortDir));
+  // Before the rows are built: `renderSender` reads the tick state, and
+  // `paintSelection` needs to know what is on screen to add it up.
+  listedSenders = sorted;
   const nodes = sorted.map(renderSender);
+  paintSelection();
 
   // Sizes land every second or so while measuring, and rebuilding the list
   // resets its scroll — which would yank the page out from under anyone
@@ -812,6 +965,10 @@ async function openBreakdown(labelId, labelName) {
   el.detailLabel.textContent = labelName;
   el.detailTotal.textContent = '';
   el.senderHead.hidden = true;
+  // Ticks belong to the folder they were made in — they name senders, but what
+  // they stand for is that folder's messages.
+  listedSenders = [];
+  clearSelection();
   el.senderRows.replaceChildren(emptyNote('Working it out…'));
 
   el.main.hidden = true;
@@ -826,6 +983,8 @@ async function openBreakdown(labelId, labelName) {
 function closeBreakdown() {
   const previous = openLabel?.id;
   openLabel = null;
+  listedSenders = [];
+  clearSelection();
   closeMenus();
   showMain();
 
@@ -862,6 +1021,10 @@ function setSort(key, direction = SORTS[key].dir) {
 
 function setPeriod(key) {
   periodKey = key;
+  // Everything a selection stands for is scoped by the period, so a tick made
+  // under one cannot silently carry into another — the same senders would mean
+  // a different set of messages.
+  clearSelection();
   el.periodLabel.textContent = PERIODS[key].label;
   for (const option of el.periodMenu.querySelectorAll('.picker-option')) {
     option.setAttribute('aria-checked', String(option.dataset.period === key));
@@ -1125,6 +1288,15 @@ function addFolder(label) {
   patchMembership({ added: [label.id] });
   void saveSnapshot();
 
+  // The move dialog is a second view of the same list, and a folder made from
+  // inside it is almost certainly where the mail is about to go — so it is
+  // rebuilt too, and it is the copy that takes focus.
+  if (el.moveDialog.open) {
+    renderMoveList();
+    moveRowFor(label.id)?.focus();
+    return;
+  }
+
   rowFor(label.id)?.focus();
 }
 
@@ -1203,8 +1375,8 @@ function askDelete(target, children, messages) {
 }
 
 async function confirmDelete(labelId) {
-  if (deleteState) {
-    flash('MailBoy is still removing the last folder.');
+  if (jobRunning()) {
+    flash('MailBoy is still finishing the last job.');
     return;
   }
 
@@ -1281,6 +1453,367 @@ function summariseDelete(message, name) {
   return parts.join(' ');
 }
 
+// ── Acting on a sender selection ─────────────────────────────────
+//
+// Two actions on the messages behind the ticked senders, and both are handed to
+// the service worker for the same reason the folder delete is: trashing costs 5
+// quota units a message, so a large selection is minutes, and nobody should
+// have to hold a side panel open through it.
+//
+// Everything either one touches comes from `idsForSelection`, which applies the
+// same two filters the breakdown rows do. That is what keeps the figure in the
+// dialog and the mail that moves the same set.
+
+/** The selection job in flight, if any. @type {{action: string, total: number,
+ *  target: string} | null} */
+let bulkState = null;
+
+/** One long job at a time: they share a status line and a quota budget. */
+const jobRunning = () => Boolean(deleteState || bulkState);
+
+/**
+ * What a move takes the mail out of: **everywhere except where it is going.**
+ *
+ * A move here is definitive. Gmail's own model is additive — a message wears as
+ * many labels as you care to put on it, and "moving" it usually means adding
+ * one more — but that is the model this whole product exists to get away from.
+ * A folder in MailBoy is a place a message *is*, so after a move the answer to
+ * "where is this" has to be one folder and not a list.
+ *
+ * The set is every row MailBoy shows, minus the destination, because that is
+ * exactly the universe of places it claims a message can sit. Removing a label
+ * a message does not carry is a no-op, so one list serves every message in the
+ * batch.
+ *
+ * Two things are deliberately *not* in it, and both matter:
+ *
+ * - **`SENT` and `DRAFT`.** `defaultsOf` drops them, which is what we want
+ *   twice over: Gmail refuses to remove either through `modify` and would fail
+ *   the whole batch, and mail you wrote is not something this product files.
+ * - **`UNREAD`, `STARRED` and `IMPORTANT`.** They never reach `buildGroups` at
+ *   all (see labels.js), and that is the right answer here for the same reason
+ *   it was there: they are states a message carries, not places it sits. A move
+ *   must not silently mark things read or drop your stars.
+ */
+function shedding(targetId) {
+  const rows = [...defaultsOf(currentGroups ?? {}), ...folderRows()];
+  return rows.map((row) => row.id).filter((id) => id !== targetId);
+}
+
+/** How the dialogs name where the mail is coming from. */
+function departing() {
+  if (!openLabel) return 'this folder';
+  return openLabel.id.startsWith('CATEGORY_') ? 'your inbox' : `“${openLabel.name}”`;
+}
+
+/** The scope both dialogs have to state: the period picker is off screen. */
+function scopeLine({ senders }) {
+  const who = senders === 1 ? 'one sender' : `${senders.toLocaleString()} senders`;
+  const when = periodKey === 'all' ? '' : `, ${PERIODS[periodKey].label.toLowerCase()}`;
+  return `From ${who} in ${departing()}${when}.`;
+}
+
+/**
+ * Resolve the ticks to messages and hand the job over.
+ *
+ * The selection is cleared at the hand-over rather than at the end: the action
+ * is under way, the ticks no longer describe anything outstanding, and leaving
+ * them up invites a second press of the same button.
+ */
+function dispatchBulk(job, { total, action, target, status }) {
+  bulkState = { action, total, target };
+  setAction(status);
+  clearSelection();
+  renderBreakdown();
+  folderChannel().postMessage({ type: 'bulk', job });
+}
+
+/**
+ * The one dialog both target-less actions use. Each is a single sentence with
+ * the count in the middle, so only the parts around it change.
+ *
+ * @returns {Promise<boolean>} whether it was confirmed
+ */
+function askConfirm({ verb, count, where, text, button, destructive = false }) {
+  // showModal throws on an already-open dialog, which a second click would be.
+  if (el.confirmDialog.open) return Promise.resolve(false);
+
+  el.confirmVerb.textContent = verb;
+  el.confirmCount.textContent = emails(count);
+  el.confirmWhere.textContent = where;
+  el.confirmText.textContent = text;
+  el.confirmOk.textContent = button;
+  el.confirmOk.classList.toggle('dialog-destructive', destructive);
+
+  // Escape leaves the previous choice in place, so a second open would read as
+  // a confirmation of the first.
+  el.confirmDialog.returnValue = '';
+
+  return new Promise((resolve) => {
+    el.confirmDialog.addEventListener(
+      'close',
+      () => resolve(el.confirmDialog.returnValue === 'go'),
+      { once: true }
+    );
+    el.confirmDialog.showModal();
+  });
+}
+
+/**
+ * Resolve the ticks to ids and check nothing has moved out from under them.
+ *
+ * Always called *before* a dialog opens, and it is the returned array that
+ * travels with the job: the number someone is shown has to be the mail that
+ * actually moves, not a figure taken from the rows and then re-derived at the
+ * click from a cache a measuring pass has moved on since.
+ *
+ * @returns {{facts: object, ids: string[]} | null}
+ */
+function resolveSelection() {
+  if (!openLabel) return null;
+  if (jobRunning()) {
+    flash('MailBoy is still finishing the last job.');
+    return null;
+  }
+
+  const facts = selectionFacts();
+  if (!facts.messages) return null;
+
+  const ids = idsForSelection(openLabel.id, facts.keys, sinceDay());
+  if (!ids.length) {
+    flash('Those emails are no longer in this folder.');
+    clearSelection();
+    return null;
+  }
+
+  return { facts, ids };
+}
+
+async function startTrash() {
+  const picked = resolveSelection();
+  if (!picked) return;
+  const { facts, ids } = picked;
+
+  const confirmed = await askConfirm({
+    verb: 'Move',
+    count: ids.length,
+    where: 'to Trash',
+    text:
+      `${scopeLine(facts)} Gmail keeps trashed mail for 30 days, so you can still get it ` +
+      'back from Trash. On a large selection this takes a while — MailBoy carries on in ' +
+      'the background, so you can close the panel.',
+    button: 'Move to Trash',
+    destructive: true,
+  });
+  if (!confirmed) return;
+
+  dispatchBulk(
+    { action: 'trash', ids, target: 'Trash', source: openLabel.name },
+    {
+      total: ids.length,
+      action: 'trash',
+      target: 'Trash',
+      status: `Moving ${emails(ids.length)} to Trash…`,
+    }
+  );
+}
+
+/**
+ * Out of Trash and back to the inbox.
+ *
+ * Deliberately *not* a definitive move: this is the undo of a delete, so
+ * whatever folders the mail was in stay on it. `messages.trash` strips `INBOX`
+ * on the way in, which is why `INBOX` has to be put back — without it a
+ * restored message with no folders of its own would come back into All Mail and
+ * nowhere MailBoy shows, which reads as the restore having done nothing.
+ */
+async function startRestore() {
+  const picked = resolveSelection();
+  if (!picked) return;
+  const { facts, ids } = picked;
+
+  const confirmed = await askConfirm({
+    verb: 'Restore',
+    count: ids.length,
+    where: 'to your inbox',
+    text: `${scopeLine(facts)} They keep any folders they were in when they were deleted.`,
+    button: 'Restore to inbox',
+  });
+  if (!confirmed) return;
+
+  dispatchBulk(
+    { action: 'restore', ids, add: ['INBOX'], remove: ['TRASH'], target: 'Inbox' },
+    {
+      total: ids.length,
+      action: 'restore',
+      target: 'Inbox',
+      status: `Restoring ${emails(ids.length)} to your inbox…`,
+    }
+  );
+}
+
+// ── Choosing where a move goes ───────────────────────────────────
+
+/**
+ * The folders worth offering as destinations.
+ *
+ * Your Folders, minus the one being looked at, plus Inbox — the one Google
+ * folder that is a place to put mail rather than a state, and the same one the
+ * folder delete already offers as the way back. Spam and Trash have their own
+ * actions, and a category is Gmail's to assign. Inbox drops off the list when
+ * the mail is already there, which is what a category row means too.
+ */
+function moveTargets() {
+  const source = openLabel?.id ?? '';
+  const inInbox = source === 'INBOX' || source.startsWith('CATEGORY_');
+
+  return {
+    defaults: inInbox ? [] : [{ id: 'INBOX', name: 'Inbox', depth: 0 }],
+    user: folderRows().filter((row) => row.id !== source),
+  };
+}
+
+const moveRowFor = (labelId) =>
+  el.moveList.querySelector(`[data-label-id="${CSS.escape(labelId)}"]`);
+
+/**
+ * The same `.group` / `.row` markup the mailbox screen uses, so the + buttons
+ * and the inline editor drop in unchanged — just without the counts, which a
+ * destination does not need, and without the bins.
+ */
+function renderMoveList() {
+  const { defaults, user } = moveTargets();
+  const sections = [];
+
+  if (defaults.length) {
+    sections.push(renderGroup('Google Default Folders', defaults, '', { counted: false }));
+  }
+  sections.push(
+    renderGroup('Your Folders', user, 'No folders of your own yet — use + to make one.', {
+      editable: true,
+      counted: false,
+      removable: false,
+    })
+  );
+
+  el.moveList.replaceChildren(...sections);
+}
+
+/**
+ * The messages the open move dialog is about, resolved when it opened.
+ *
+ * Held rather than re-derived on the click for the same reason the trash dialog
+ * resolves early: the dialog's heading names a number, and picking a folder has
+ * to move that mail and no other. The dialog can be open for a while — long
+ * enough to create a folder to put the mail in — and a measuring pass runs the
+ * whole time.
+ *
+ * @type {string[] | null}
+ */
+let moveIds = null;
+
+function closeMoveDialog() {
+  moveIds = null;
+  // The editor lives inside the dialog; leaving it open would strand a field
+  // nobody can see, still holding a half-typed name.
+  closeEditor();
+  if (el.moveDialog.open) el.moveDialog.close();
+}
+
+function startMove() {
+  if (el.moveDialog.open) return;
+
+  // The removal set is built from the folder list, so a move cannot be started
+  // before that list exists — a half-built one would shed only some folders and
+  // leave the mail in two places, which is the one outcome this must not have.
+  if (!currentGroups) {
+    flash('MailBoy is still reading your folders.');
+    return;
+  }
+
+  const picked = resolveSelection();
+  if (!picked) return;
+  const { facts, ids } = picked;
+
+  moveIds = ids;
+  el.moveCount.textContent = emails(ids.length);
+  el.moveText.textContent =
+    `${scopeLine(facts)} They move out of every folder they are in now — your inbox ` +
+    'included — and into the one you pick.';
+
+  renderMoveList();
+  el.moveDialog.showModal();
+}
+
+/** Picking a folder is the confirmation — there is no second step. */
+function chooseMoveTarget(labelId, name) {
+  const ids = moveIds;
+  if (!openLabel || !labelId || !ids?.length) return;
+
+  closeMoveDialog();
+
+  dispatchBulk(
+    {
+      action: 'move',
+      ids,
+      add: [labelId],
+      remove: shedding(labelId),
+      target: name,
+      source: openLabel.name,
+    },
+    {
+      total: ids.length,
+      action: 'move',
+      target: name,
+      status: `Moving ${emails(ids.length)} to “${name}”…`,
+    }
+  );
+}
+
+// ── Reporting a selection job ────────────────────────────────────
+
+function bulkStatus(done, total) {
+  const action = bulkState?.action;
+  const lead =
+    action === 'trash'
+      ? 'Moving to Trash'
+      : action === 'restore'
+        ? 'Restoring to your inbox'
+        : `Moving to “${bulkState?.target ?? ''}”`;
+
+  // `done` is capped: a move reports its whole chunk at once and the totals are
+  // built from different sums, so overshooting by a few is possible.
+  const ratio = total
+    ? ` ${Math.min(done, total).toLocaleString()} of ${total.toLocaleString()}`
+    : '';
+  return `${lead}…${ratio}`;
+}
+
+function summariseBulk(message, action, target) {
+  if (action === 'trash') {
+    const parts = [`${emails(message.trashed ?? 0)} moved to Trash.`];
+    if (message.failed?.length) {
+      parts.push(`${message.failed.length.toLocaleString()} could not be moved.`);
+    }
+    return parts.join(' ');
+  }
+  if (action === 'restore') return `${emails(message.moved ?? 0)} restored to your inbox.`;
+  return `${emails(message.moved ?? 0)} moved to “${target}”.`;
+}
+
+/**
+ * Adopt a selection job still running from a previous open, or one the worker
+ * was killed partway through — the same reasoning as `adoptPendingDelete`.
+ */
+async function adoptPendingBulk() {
+  const job = await readBulkJob();
+  if (!job || bulkState) return;
+
+  bulkState = { action: job.action, total: job.ids.length, target: job.target ?? '' };
+  setAction(bulkStatus(0, job.ids.length));
+  folderChannel();
+}
+
 // ── Talking to the worker about deletes ──────────────────────────
 
 /** @type {chrome.runtime.Port | null} */
@@ -1297,9 +1830,9 @@ function folderChannel() {
     folderPort = null;
     // The worker was killed mid-job. It comes back from its own alarm, and
     // reconnecting is also what prompts it to pick a stranded record back up.
-    if (deleteState) {
+    if (jobRunning()) {
       setTimeout(() => {
-        if (deleteState) folderChannel();
+        if (jobRunning()) folderChannel();
       }, 1000);
     }
   });
@@ -1353,6 +1886,41 @@ function onFolderMessage(message) {
     markWorkingRows();
     setAction(null);
     flash(`Couldn't finish deleting “${name}”.`);
+    return;
+  }
+
+  // A panel opened mid-job is told what is running before it knows itself, so
+  // the worker's word stands in where there is no local state.
+  if (message?.type === 'bulk-progress') {
+    bulkState ??= { action: message.action, total: message.total, target: message.target ?? '' };
+    setAction(bulkStatus(message.done, message.total));
+    return;
+  }
+
+  if (message?.type === 'bulk-done' || message?.type === 'bulk-stopped') {
+    const action = bulkState?.action ?? message.action;
+    const target = bulkState?.target ?? message.target ?? '';
+    const stopped = message.type === 'bulk-stopped';
+    bulkState = null;
+    setAction(null);
+
+    flash(
+      stopped
+        ? `Stopped. ${summariseBulk(message, action, target)}`
+        : summariseBulk(message, action, target)
+    );
+
+    // Mail that has moved changes what every other folder holds, so the numbers
+    // still on screen for those are now wrong.
+    if (message.trashed || message.moved) void load({ force: true });
+    return;
+  }
+
+  if (message?.type === 'bulk-failed') {
+    console.error('[MailBoy] selection job failed:', message.message);
+    bulkState = null;
+    setAction(null);
+    flash("Couldn't finish moving those emails.");
   }
 }
 
@@ -1364,9 +1932,12 @@ function onFolderMessage(message) {
  * from under it, and the rows involved would invite a second delete.
  */
 /** Housekeeping at boot, so a failure here costs the dimming, never the panel. */
-function watchPendingDelete() {
+function watchPendingJobs() {
   adoptPendingDelete().catch((err) => {
     console.warn('[MailBoy] could not pick up the pending delete:', err);
+  });
+  adoptPendingBulk().catch((err) => {
+    console.warn('[MailBoy] could not pick up the pending selection job:', err);
   });
 }
 
@@ -1745,12 +2316,16 @@ function forgetMailbox() {
   sized.clear();
   painted = {};
   openLabel = null;
+  listedSenders = [];
+  selected = new Set();
   currentGroups = null;
   closeEditor();
-  // Whatever was being deleted belonged to the mailbox being left. The job
-  // record survives under that account's namespace; this is only the panel
-  // letting go of it.
+  closeMoveDialog();
+  // Whatever was being deleted or moved belonged to the mailbox being left. The
+  // job records survive under that account's namespace; this is only the panel
+  // letting go of them.
   deleteState = null;
+  bulkState = null;
   setAction(null);
   el.senderRows.replaceChildren();
   el.groups.replaceChildren();
@@ -1800,9 +2375,9 @@ el.connect.addEventListener('click', async () => {
     // An unreadable cache is an emptier first frame, never a failed connect.
     await paintCache().catch((err) => console.warn('[MailBoy] cache unreadable:', err));
     await load();
-    // Signing back in within the retention window can find a delete that was
+    // Signing back in within the retention window can find a job that was
     // interrupted by the sign-out still outstanding.
-    watchPendingDelete();
+    watchPendingJobs();
   } catch (err) {
     // Closing the Google window is a choice, not a failure worth shouting about.
     if (err instanceof AuthCancelled) {
@@ -1827,6 +2402,9 @@ async function eraseAccountData(id) {
     // A half-finished delete is intent, not data, but it is keyed the same way
     // and there is nothing left for it to act on once the rest of this is gone.
     deleteJobKey(id),
+    // This one *is* mail data — a selection job carries the message ids it is
+    // working through, since nothing in the mailbox can re-derive them.
+    bulkJobKey(id),
   ]);
 }
 
@@ -1960,6 +2538,70 @@ el.deleteTrash.addEventListener('change', paintDeleteHint);
 
 el.back.addEventListener('click', closeBreakdown);
 
+// ── Picking senders ──────────────────────────────────────────────
+
+// The box inside the label toggles itself, so this covers that half.
+el.senderRows.addEventListener('change', (event) => {
+  const box = event.target.closest('input[type="checkbox"]');
+  const row = box?.closest('.sender');
+  if (row) toggleSender(row.dataset.sender, box.checked);
+});
+
+el.senderRows.addEventListener('click', (event) => {
+  // The label already toggled its own box and fired `change` above.
+  if (event.target.closest('.sender-tick')) return;
+
+  const row = event.target.closest('.sender');
+  if (!row) return;
+
+  // A drag that ended up selecting text is somebody copying an address, not a
+  // tick — an addressee is the one thing on this screen worth copying.
+  if (!window.getSelection()?.isCollapsed) return;
+
+  toggleSender(row.dataset.sender, !selected.has(row.dataset.sender));
+});
+
+el.selectAll.addEventListener('change', () => {
+  // Exactly what is listed, which is the period's doing — a sender out of scope
+  // cannot be acted on, so "all" cannot mean it.
+  selected = el.selectAll.checked ? new Set(listedSenders.map(senderKey)) : new Set();
+  syncSelection();
+});
+
+el.trash.addEventListener('click', () => void startTrash());
+el.restore.addEventListener('click', () => void startRestore());
+el.move.addEventListener('click', () => startMove());
+el.moveCancel.addEventListener('click', closeMoveDialog);
+// Escape closes a dialog on its own, leaving the editor inside it and the ids
+// it was holding behind. Re-entrant by design: `close()` is guarded on `.open`,
+// which is already false by the time this fires.
+el.moveDialog.addEventListener('close', closeMoveDialog);
+
+// Delegated for the same reason the mailbox list is: these rows are rebuilt
+// whenever a folder is created from inside the dialog.
+el.moveList.addEventListener('click', (event) => {
+  const action = event.target.closest('.row-action');
+  if (action) {
+    event.stopPropagation();
+    if (action.dataset.action === 'add') handleAdd(action);
+    // 'cancel' belongs to the editor and is wired where it is built.
+    return;
+  }
+
+  const row = event.target.closest('.row');
+  if (row) chooseMoveTarget(row.dataset.labelId, row.dataset.labelName);
+});
+
+el.moveList.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  if (event.target.closest('.row-action, .folder-editor')) return;
+
+  const row = event.target.closest('.row');
+  if (!row) return;
+  event.preventDefault(); // Space would scroll the list.
+  chooseMoveTarget(row.dataset.labelId, row.dataset.labelName);
+});
+
 el.senderHead.addEventListener('click', (event) => {
   const head = event.target.closest('.col-head');
   if (!head) return;
@@ -1985,7 +2627,14 @@ document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   // A dialog closes itself on Escape; without this the same press would also
   // close the breakdown standing behind it.
-  if (el.logoutDialog.open || el.deleteDialog.open) return;
+  if (
+    el.logoutDialog.open ||
+    el.deleteDialog.open ||
+    el.confirmDialog.open ||
+    el.moveDialog.open
+  ) {
+    return;
+  }
   if (anyMenuOpen()) {
     closeMenus();
   } else if (editor) {
@@ -2035,5 +2684,5 @@ document.addEventListener('keydown', (event) => {
 
   // Last, because it dims rows the load has to have drawn first — and after
   // any account switch, so it never adopts the outgoing mailbox's job.
-  watchPendingDelete();
+  watchPendingJobs();
 })();
