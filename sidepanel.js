@@ -147,6 +147,9 @@ function renderRow(item) {
   row.setAttribute('role', 'button');
   row.tabIndex = 0;
   row.dataset.labelName = item.name;
+  // Only the count can decide this, and it lands much later — so the intent
+  // travels with the row and `paintRow` acts on it.
+  if (item.hideWhenEmpty) row.dataset.hideEmpty = 'true';
 
   const name = document.createElement('span');
   name.className = 'row-name';
@@ -269,6 +272,12 @@ function paintRow(labelId, record) {
   const cell = row.querySelector('.row-count');
   const num = row.querySelector('.row-num');
   const size = row.querySelector('.row-size');
+
+  // An empty inbox category is dropped rather than shown as 0 — Gmail returns
+  // all five whether or not the mailbox uses tabs. Only a real count decides
+  // it: an unknown or unavailable one leaves the row where it is, and a later
+  // pass finding messages brings it back.
+  if (row.dataset.hideEmpty === 'true') row.hidden = record?.count === 0;
 
   if (!record) {
     num.textContent = '—';

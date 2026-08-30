@@ -90,6 +90,12 @@ function asTree(labels) {
  * which is why `category:promotions` finds archived mail. Unscoped, Promotions
  * could out-count Inbox and the five would not add up to anything. Narrowed to
  * `in:inbox` they partition Inbox exactly, which is what lets them sit under it.
+ *
+ * An empty category is dropped from the list rather than shown as 0. Gmail
+ * hands back all five whether or not the mailbox uses tabs, so a mailbox with
+ * tabs switched off would otherwise show four permanent zeroes under Inbox.
+ * The flag rides on the row because only the panel knows the count — see
+ * `paintRow`.
  */
 function googleFolders(system) {
   const rows = byOrder(system, MAILBOX_ORDER);
@@ -97,6 +103,7 @@ function googleFolders(system) {
     ...row,
     depth: 1,
     scope: 'inbox',
+    hideWhenEmpty: true,
   }));
 
   const at = rows.findIndex((row) => row.id === 'INBOX');
