@@ -8,7 +8,7 @@
   font-style: normal;
   font-weight: 400;
   font-display: block;
-  src: url('fonts/material-symbols-outlined.woff2') format('woff2');
+  src: url('resources/fonts/material-symbols-outlined.woff2') format('woff2');
 }
 
 .icon {
@@ -124,19 +124,6 @@ body {
   width: 52px;
   height: 52px;
   margin-bottom: 14px;
-}
-
-.mark-body {
-  fill: var(--accent-soft);
-  stroke: var(--accent);
-  stroke-width: 2.4;
-}
-
-.mark-fold {
-  fill: none;
-  stroke: var(--accent);
-  stroke-width: 2.4;
-  stroke-linecap: round;
 }
 
 .welcome h1 {

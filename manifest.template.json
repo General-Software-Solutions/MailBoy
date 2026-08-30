@@ -10,12 +10,24 @@
     "https://oauth2.googleapis.com/*",
     "https://openidconnect.googleapis.com/*"
   ],
+  "icons": {
+    "16": "resources/icons/icon16.png",
+    "32": "resources/icons/icon32.png",
+    "48": "resources/icons/icon48.png",
+    "128": "resources/icons/icon128.png"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
   "action": {
-    "default_title": "Open MailBoy"
+    "default_title": "Open MailBoy",
+    "default_icon": {
+      "16": "resources/icons/icon16.png",
+      "32": "resources/icons/icon32.png",
+      "48": "resources/icons/icon48.png",
+      "128": "resources/icons/icon128.png"
+    }
   },
   "side_panel": {
     "default_path": "sidepanel.html"
