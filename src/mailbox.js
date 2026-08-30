@@ -41,9 +41,26 @@ let counts = new Map();
 
 const MEMBERSHIP_KEY = 'membership';
 
-/** Every sender behind a label's number, heaviest first. No Gmail calls. */
-export function sendersIn(labelId) {
-  return bySender(counts.get(labelId) ?? []);
+/**
+ * Who is behind a label's number.
+ *
+ * Entirely local — the ids come from the last enumeration and every size and
+ * sender is already cached, so this costs no Gmail calls at all.
+ *
+ * `measured` is below `total` when some of the label's messages have not been
+ * read yet; the caller should say so rather than present a short total as
+ * complete.
+ *
+ * @returns {{senders: object[], total: number, measured: number}}
+ */
+export function breakdownOf(labelId) {
+  const ids = counts.get(labelId) ?? [];
+  const senders = bySender(ids);
+
+  let measured = 0;
+  for (const sender of senders) measured += sender.count;
+
+  return { senders, total: ids.length, measured };
 }
 
 /**
@@ -62,8 +79,16 @@ async function saveMembership(counted) {
   }
 }
 
-/** Put the last enumeration back in memory when this open skipped its own. */
+/**
+ * Put the last enumeration back in memory when this open skipped its own.
+ *
+ * Also loads the message cache, which is easy to forget: a skipped load never
+ * reaches `collect`, and `collect` is the only other caller of
+ * `loadMessages()`. Without it a breakdown reads an empty map and reports that
+ * nothing has been measured, however much actually has.
+ */
 export async function restoreMembership() {
+  await loadMessages();
   if (counts.size) return;
   try {
     const { [MEMBERSHIP_KEY]: stored } = await chrome.storage.local.get(MEMBERSHIP_KEY);

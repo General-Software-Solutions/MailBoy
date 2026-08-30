@@ -59,8 +59,3 @@ export function parseFrom(value) {
 
   return { address, name: decodeWords(name) };
 }
-
-/** What to show for a sender, preferring the name but never rendering blank. */
-export function senderLabel({ name, address }) {
-  return name || address || 'Unknown sender';
-}

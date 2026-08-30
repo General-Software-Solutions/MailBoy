@@ -8,7 +8,12 @@ import {
 import { GmailError, getUserInfo, listLabels } from './src/gmail.js';
 import { formatAgo, formatBytes, formatTimeLeft } from './src/format.js';
 import { buildGroups } from './src/labels.js';
-import { collect, forgetMembership, restoreMembership } from './src/mailbox.js';
+import {
+  breakdownOf,
+  collect,
+  forgetMembership,
+  restoreMembership,
+} from './src/mailbox.js';
 import { clearMessages } from './src/messages.js';
 
 const CACHE_KEY = 'snapshot';
@@ -26,6 +31,7 @@ const REFRESH_AFTER_MS = 24 * 60 * 60 * 1000;
 const el = {
   boot: document.getElementById('screen-boot'),
   welcome: document.getElementById('screen-welcome'),
+  app: document.getElementById('app'),
   main: document.getElementById('screen-main'),
   connect: document.getElementById('btn-connect'),
   logout: document.getElementById('btn-logout'),
@@ -41,6 +47,14 @@ const el = {
   progressBar: document.getElementById('progress-bar'),
   progressDone: document.getElementById('progress-done'),
   progressLeft: document.getElementById('progress-left'),
+  detail: document.getElementById('screen-detail'),
+  back: document.getElementById('btn-back'),
+  detailName: document.getElementById('detail-name'),
+  detailTotal: document.getElementById('detail-total'),
+  sortTrigger: document.getElementById('btn-sort'),
+  sortLabel: document.getElementById('sort-label'),
+  sortMenu: document.getElementById('sort-menu'),
+  senders: document.getElementById('senders'),
 };
 
 let loading = false;
@@ -53,7 +67,9 @@ let detailsOpen = false;
 
 function showWelcome(message) {
   el.boot.hidden = true;
-  el.main.hidden = true;
+  // Hiding the shell takes the identity bar with it, which is right: there is
+  // nobody signed in to show.
+  el.app.hidden = true;
   el.welcome.hidden = false;
   el.connect.disabled = false;
   setNotice(el.welcomeError, message);
@@ -62,6 +78,8 @@ function showWelcome(message) {
 function showMain() {
   el.boot.hidden = true;
   el.welcome.hidden = true;
+  el.app.hidden = false;
+  el.detail.hidden = true;
   el.main.hidden = false;
   setNotice(el.welcomeError, null);
 }
@@ -109,6 +127,11 @@ function renderRow(item) {
   row.className = 'row';
   row.dataset.labelId = item.id;
   row.dataset.depth = String(item.depth ?? 0);
+  // Not a <button>: the row is a grid of its own and the element would fight
+  // that. Given the role, it has to answer the keyboard like one.
+  row.setAttribute('role', 'button');
+  row.tabIndex = 0;
+  row.dataset.labelName = item.name;
 
   const name = document.createElement('span');
   name.className = 'row-name';
@@ -383,6 +406,161 @@ function setProgress(phase, done, total) {
   setFooter();
 }
 
+// ── Breakdown ────────────────────────────────────────────────────
+
+const SORTS = {
+  count: { label: 'Email count', compare: (a, b) => b.count - a.count },
+  bytes: { label: 'Size', compare: (a, b) => b.bytes - a.bytes },
+  address: {
+    label: 'Email address',
+    compare: (a, b) =>
+      (a.address || '').localeCompare(b.address || '', undefined, { sensitivity: 'base' }),
+  },
+};
+
+/** Which label is open, and how its senders are ordered. */
+let openLabel = null;
+let sortKey = 'count';
+
+/**
+ * Resolves once the ids behind each row are in memory. An open that skipped
+ * enumeration restores them from storage in the background, and a click can
+ * easily beat that.
+ */
+let membershipReady = Promise.resolve();
+
+function renderSender(sender) {
+  const row = document.createElement('div');
+  row.className = 'sender';
+
+  const who = document.createElement('span');
+  who.className = 'sender-who';
+
+  // The address identifies a sender; the display name is whatever they chose
+  // to call themselves that day, and the same sender varies it constantly.
+  const address = document.createElement('span');
+  address.className = 'sender-id';
+  address.textContent = sender.address || 'Unknown sender';
+  who.append(address);
+
+  if (sender.name) {
+    const display = document.createElement('span');
+    display.className = 'sender-display';
+    display.textContent = sender.name;
+    who.append(display);
+  }
+
+  const figs = document.createElement('span');
+  figs.className = 'sender-figs';
+
+  const count = document.createElement('span');
+  count.className = 'sender-count';
+  count.textContent = sender.count.toLocaleString();
+
+  const size = document.createElement('span');
+  size.className = 'sender-size';
+  size.textContent = formatBytes(sender.bytes);
+
+  figs.append(count, size);
+  row.append(who, figs);
+  const who_ = sender.name ? `${sender.name} · ${sender.address}` : sender.address;
+  row.title = `${who_ || 'Unknown sender'} · ${sender.count.toLocaleString()} messages · ${formatBytes(sender.bytes)}`;
+  return row;
+}
+
+function emptyNote(text) {
+  const note = document.createElement('p');
+  note.className = 'empty';
+  note.textContent = text;
+  return note;
+}
+
+function renderBreakdown() {
+  if (!openLabel) return;
+
+  const { senders, total, measured } = breakdownOf(openLabel.id);
+
+  let bytes = 0;
+  for (const sender of senders) bytes += sender.bytes;
+
+  el.detailTotal.textContent = !total
+    ? ''
+    : measured < total
+      ? `${measured.toLocaleString()} of ${total.toLocaleString()} read`
+      : `${total.toLocaleString()} · ${formatBytes(bytes)}`;
+
+  if (!senders.length) {
+    el.senders.replaceChildren(
+      emptyNote(
+        total
+          ? 'None of these messages have been read yet. They are measured in the background — check back shortly.'
+          : "Nothing here yet. If MailBoy is still going through your mailbox, this fills in once it's done."
+      )
+    );
+    return;
+  }
+
+  const sorted = [...senders].sort(SORTS[sortKey].compare);
+  const nodes = sorted.map(renderSender);
+
+  // Sizes land every second or so while measuring, and rebuilding the list
+  // resets its scroll — which would yank the page out from under anyone
+  // reading it.
+  const scroll = el.senders.scrollTop;
+
+  // A short breakdown is not a wrong one, but it should say so.
+  if (measured < total) {
+    nodes.push(
+      emptyNote(
+        `${(total - measured).toLocaleString()} more not measured yet, so these totals will grow.`
+      )
+    );
+  }
+
+  el.senders.replaceChildren(...nodes);
+  el.senders.scrollTop = scroll;
+}
+
+async function openBreakdown(labelId, labelName) {
+  openLabel = { id: labelId, name: labelName };
+
+  el.detailName.textContent = labelName;
+  el.detailTotal.textContent = '';
+  el.senders.replaceChildren(emptyNote('Working it out…'));
+
+  el.main.hidden = true;
+  el.detail.hidden = false;
+  el.back.focus();
+
+  await membershipReady;
+  // Guard against a fast Back followed by a different label.
+  if (openLabel?.id === labelId) renderBreakdown();
+}
+
+function closeBreakdown() {
+  const previous = openLabel?.id;
+  openLabel = null;
+  closeSortMenu();
+  showMain();
+
+  const row = previous && el.groups.querySelector(`[data-label-id="${CSS.escape(previous)}"]`);
+  if (row) row.focus();
+}
+
+function setSort(key) {
+  sortKey = key;
+  el.sortLabel.textContent = SORTS[key].label;
+  for (const option of el.sortMenu.querySelectorAll('.sort-option')) {
+    option.setAttribute('aria-checked', String(option.dataset.sort === key));
+  }
+  renderBreakdown();
+}
+
+function closeSortMenu() {
+  el.sortMenu.hidden = true;
+  el.sortTrigger.setAttribute('aria-expanded', 'false');
+}
+
 // ── Error state ──────────────────────────────────────────────────
 
 const ICON_ALERT = `
@@ -600,7 +778,7 @@ async function load({ force = false } = {}) {
   if (!force && (await isFresh())) {
     // Nothing to re-read. Put the last enumeration's ids back in memory,
     // though, so a breakdown works without having listed anything.
-    void restoreMembership();
+    membershipReady = restoreMembership();
     return;
   }
 
@@ -624,6 +802,8 @@ async function load({ force = false } = {}) {
       onCounting: (done, total) => setProgress('counting', done, total),
       onSizes: (records, done, total) => {
         paintRecords(records);
+        // Sizes arriving behind an open breakdown should show up in it.
+        if (openLabel) renderBreakdown();
         // Enumeration is finished by the time this first fires, so the counts
         // are final and worth stamping — sizes carry on in the card.
         setFooter(generatedAt);
@@ -729,6 +909,8 @@ async function handleLogout() {
   // rebuilding the cache is the slowest thing the panel does.
   await clearMessages();
   await forgetMembership();
+  openLabel = null;
+  el.senders.replaceChildren();
   painted = {};
   el.groups.replaceChildren();
   setProgress(null);
@@ -742,6 +924,54 @@ async function handleLogout() {
 el.logout.addEventListener('click', () => handleLogout());
 
 el.refresh.addEventListener('click', () => load({ force: true }));
+
+// Delegated, because the rows are rebuilt on every render.
+el.groups.addEventListener('click', (event) => {
+  const row = event.target.closest('.row');
+  if (row) void openBreakdown(row.dataset.labelId, row.dataset.labelName);
+});
+
+el.groups.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const row = event.target.closest('.row');
+  if (!row) return;
+  event.preventDefault(); // Space would scroll the list.
+  void openBreakdown(row.dataset.labelId, row.dataset.labelName);
+});
+
+el.back.addEventListener('click', closeBreakdown);
+
+el.sortTrigger.addEventListener('click', (event) => {
+  event.stopPropagation(); // Otherwise the document handler closes it again.
+  const open = el.sortMenu.hidden;
+  el.sortMenu.hidden = !open;
+  el.sortTrigger.setAttribute('aria-expanded', String(open));
+});
+
+el.sortMenu.addEventListener('click', (event) => {
+  const option = event.target.closest('.sort-option');
+  if (!option) return;
+  setSort(option.dataset.sort);
+  closeSortMenu();
+  el.sortTrigger.focus();
+});
+
+document.addEventListener('click', (event) => {
+  if (!el.sortMenu.hidden && !event.target.closest('.sort')) closeSortMenu();
+});
+
+// Puts the default on the trigger and the tick beside it.
+setSort(sortKey);
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (!el.sortMenu.hidden) {
+    closeSortMenu();
+    el.sortTrigger.focus();
+  } else if (!el.detail.hidden) {
+    closeBreakdown();
+  }
+});
 
 // ── Boot ─────────────────────────────────────────────────────────
 

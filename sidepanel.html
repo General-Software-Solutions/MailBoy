@@ -93,8 +93,10 @@
       </div>
     </section>
 
-    <!-- ── Mailbox ─────────────────────────────────────────────── -->
-    <section id="screen-main" class="screen" hidden>
+    <!-- ── Signed in ───────────────────────────────────────────── -->
+    <!-- The identity bar belongs to every signed-in screen, so it lives out
+         here rather than inside one of them. -->
+    <div id="app" class="app" hidden>
       <header class="topbar">
         <div class="identity">
           <span id="avatar" class="avatar">
@@ -114,46 +116,106 @@
         </button>
       </header>
 
-      <div class="content">
-        <section id="notice" class="notice-card" hidden>
-          <div class="notice-head">
-            <span class="notice-spinner" aria-hidden="true"></span>
-            <h2 class="notice-title">Getting your mailbox ready</h2>
-          </div>
-          <p class="notice-body">
-            MailBoy is going through your mailbox to work out how much room
-            each label takes up. This happens once — after that, opening
-            MailBoy is quick. Labels can't be opened for a breakdown until it
-            finishes.
-          </p>
-          <div class="progress-stats">
-            <span id="progress-done"></span>
-            <span id="progress-left" class="progress-left"></span>
-          </div>
-          <div
-            id="progress"
-            class="progress"
-            role="progressbar"
-            aria-label="Reading messages"
-            aria-valuemin="0"
-            aria-valuemax="100"
-          >
-            <div id="progress-bar" class="progress-bar"></div>
-          </div>
-        </section>
+      <!-- ── Mailbox ───────────────────────────────────────────── -->
+      <section id="screen-main" class="screen" hidden>
+        <div class="content">
+          <section id="notice" class="notice-card" hidden>
+            <div class="notice-head">
+              <span class="notice-spinner" aria-hidden="true"></span>
+              <h2 class="notice-title">Getting your mailbox ready</h2>
+            </div>
+            <p class="notice-body">
+              MailBoy is going through your mailbox to work out how much room
+              each label takes up. This happens once — after that, opening
+              MailBoy is quick. Labels can't be opened for a breakdown until it
+              finishes.
+            </p>
+            <div class="progress-stats">
+              <span id="progress-done"></span>
+              <span id="progress-left" class="progress-left"></span>
+            </div>
+            <div
+              id="progress"
+              class="progress"
+              role="progressbar"
+              aria-label="Reading messages"
+              aria-valuemin="0"
+              aria-valuemax="100"
+            >
+              <div id="progress-bar" class="progress-bar"></div>
+            </div>
+          </section>
 
-        <main id="groups" class="groups"></main>
-      </div>
+          <main id="groups" class="groups"></main>
+        </div>
 
-      <div class="actions-bar">
-        <button id="btn-refresh" class="btn btn--ghost btn--xs">
-          <span class="icon" aria-hidden="true">refresh</span
-          ><span>Refresh current data</span>
-        </button>
-      </div>
+        <div class="actions-bar">
+          <button id="btn-refresh" class="btn btn--ghost btn--xs">
+            <span class="icon" aria-hidden="true">refresh</span
+            ><span>Refresh current data</span>
+          </button>
+        </div>
 
-      <footer id="footer" class="footer"></footer>
-    </section>
+        <footer id="footer" class="footer"></footer>
+      </section>
+
+      <!-- ── Breakdown ───────────────────────────────────────────── -->
+      <!-- Who is filling one label. Entirely local: the ids come from the last
+           enumeration and sizes and senders are already cached, so opening this
+           costs no Gmail calls at all. -->
+      <section id="screen-detail" class="screen" hidden>
+        <header class="detail-head">
+          <button id="btn-back" class="icon-btn" aria-label="Back to labels">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M9.5 3.5L5 8l4.5 4.5" />
+            </svg>
+          </button>
+          <h1 id="detail-name" class="detail-name"></h1>
+        </header>
+
+        <div class="detail-tools">
+          <span id="detail-total" class="detail-total"></span>
+
+          <div class="sort">
+            <button
+              id="btn-sort"
+              class="sort-trigger"
+              aria-haspopup="true"
+              aria-expanded="false"
+            >
+              <svg class="sort-icon" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M2.5 4h11M4 8h8M6 12h4" />
+              </svg>
+              <span class="sort-prefix">Sort by:</span>
+              <span id="sort-label">Email count</span>
+            </button>
+
+            <div id="sort-menu" class="sort-menu" role="menu" hidden>
+              <button class="sort-option" role="menuitemradio" data-sort="count">
+                <svg class="sort-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 8.5l3 3 6-7" />
+                </svg>
+                <span>Email count</span>
+              </button>
+              <button class="sort-option" role="menuitemradio" data-sort="bytes">
+                <svg class="sort-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 8.5l3 3 6-7" />
+                </svg>
+                <span>Size</span>
+              </button>
+              <button class="sort-option" role="menuitemradio" data-sort="address">
+                <svg class="sort-tick" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 8.5l3 3 6-7" />
+                </svg>
+                <span>Email address</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <main id="senders" class="senders"></main>
+      </section>
+    </div>
 
     <script type="module" src="sidepanel.js"></script>
   </body>

@@ -473,8 +473,17 @@ body {
   border-radius: 0;
 }
 
+.row {
+  cursor: pointer;
+}
+
 .row:hover {
   background: var(--surface);
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .row-name {
@@ -560,6 +569,247 @@ body {
   padding: 4px var(--pad-x) 10px;
   color: var(--faint);
   font-size: 12px;
+}
+
+/* ── Signed-in shell ─────────────────────────────────────────── */
+/* The identity bar is common to every signed-in screen, so it sits outside
+   them and the active screen fills what is left. */
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.app > .screen {
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ── Breakdown ───────────────────────────────────────────────── */
+.detail-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px var(--pad-x) 9px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.icon-btn {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.detail-name {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 620;
+  letter-spacing: -0.012em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-tools {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  /* The trigger carries its own right padding, so the row gives back exactly
+     that much — otherwise the control reads as inset from the edge. */
+  padding: 7px calc(var(--pad-x) - 8px) 7px var(--pad-x);
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-total {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* ── Sort menu ───────────────────────────────────────────────── */
+.sort {
+  position: relative;
+}
+
+.sort-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px 4px 6px;
+  font: inherit;
+  font-size: 11.5px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.sort-trigger:hover,
+.sort-trigger[aria-expanded='true'] {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.sort-prefix {
+  color: var(--faint);
+}
+
+#sort-label {
+  color: var(--text);
+}
+
+.sort-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+/* Anchored to the trigger rather than the panel, so it stays under the control
+   whatever the panel width — right-aligned, since the trigger sits at the
+   right edge and a left-aligned menu would overflow. */
+.sort-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
+  min-width: 150px;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 12%);
+}
+
+.sort-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.sort-option:hover {
+  background: var(--surface);
+}
+
+.sort-tick {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* Held in place rather than removed, so the labels do not shift on select. */
+  visibility: hidden;
+}
+
+.sort-option[aria-checked='true'] .sort-tick {
+  visibility: visible;
+}
+
+/* ── Sender rows ─────────────────────────────────────────────── */
+.senders {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 4px 0 12px;
+}
+
+.sender {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px var(--pad-x);
+}
+
+.sender:hover {
+  background: var(--surface);
+}
+
+.sender-who {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The address is the identifier and leads; the display name sits under it. */
+.sender-id,
+.sender-display {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sender-id {
+  font-size: 12.5px;
+}
+
+.sender-display {
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.sender-figs {
+  flex: 0 0 auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.sender-count,
+.sender-size {
+  display: block;
+}
+
+.sender-count {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.sender-size {
+  font-size: 11px;
+  color: var(--faint);
 }
 
 /* ── Notices ─────────────────────────────────────────────────── */
