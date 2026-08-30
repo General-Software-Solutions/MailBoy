@@ -434,6 +434,171 @@
         </main>
       </section>
 
+      <!-- ── One sender's mail ───────────────────────────────────── -->
+      <!-- The first screen that shows mail rather than figures about it. The
+           list itself is local — the ids come from the same enumeration the
+           breakdown aggregates and the sort keys are already cached — but a
+           subject and a first line exist nowhere but on the message, so the ten
+           rows on screen are fetched a page at a time and never written down.
+           -->
+      <section id="screen-mails" class="screen" hidden>
+        <header class="detail-head">
+          <button id="btn-mails-back" class="icon-btn" aria-label="Back to senders">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M9.5 3.5L5 8l4.5 4.5" />
+            </svg>
+          </button>
+          <h1 class="detail-name">
+            <span id="mails-label"></span>
+            <span id="mails-total" class="detail-total"></span>
+            <span id="mails-spinner" class="row-spinner" hidden></span>
+          </h1>
+        </header>
+
+        <div class="detail-tools">
+          <!-- Same swap as the breakdown: ticking anything replaces the sort
+               control with what can be done with the selection. -->
+          <div id="mails-filters" class="tools-filters">
+            <span id="mails-scope" class="selection-summary"></span>
+
+            <div class="picker">
+              <button
+                id="btn-mail-sort"
+                class="picker-trigger"
+                aria-haspopup="true"
+                aria-expanded="false"
+              >
+                <svg class="picker-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M2.5 4h11M4 8h8M6 12h4" />
+                </svg>
+                <span class="picker-prefix">Sort by:</span>
+                <span id="mail-sort-label">Date</span>
+              </button>
+
+              <div id="mail-sort-menu" class="picker-menu picker-menu--right" role="menu" hidden>
+                <button class="picker-option" role="menuitemradio" data-mailsort="date">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M3.5 8.5l3 3 6-7" />
+                  </svg>
+                  <span>Date</span>
+                </button>
+                <button class="picker-option" role="menuitemradio" data-mailsort="bytes">
+                  <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M3.5 8.5l3 3 6-7" />
+                  </svg>
+                  <span>Size</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div id="mails-actions" class="tools-actions" hidden>
+            <span id="mail-selection-summary" class="selection-summary"></span>
+            <div class="tools-buttons">
+              <button id="btn-mail-restore" class="btn btn--ghost btn--xs" hidden>
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" />
+                  <path d="M2.6 2.6v2.6h2.6" />
+                </svg>
+                <span>Restore</span>
+              </button>
+              <button id="btn-mail-move" class="btn btn--ghost btn--xs">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M2 12.6V3.9h3.7l1.2 1.6h7.1v7.1z" />
+                  <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
+                </svg>
+                <span>Move</span>
+              </button>
+              <button id="btn-mail-trash" class="btn btn--ghost btn--xs btn--danger">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
+                  />
+                </svg>
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <main id="mails" class="senders">
+          <div id="mail-head" class="mail-head">
+            <label class="sender-tick sender-tick--head">
+              <input type="checkbox" id="mail-select-all" aria-label="Select every email listed" />
+            </label>
+            <!-- Not a .col-head button: only Size and Date are sortable, and a
+                 heading that takes a click without doing anything is worse than
+                 one that plainly does not. -->
+            <span class="col-head col-head--static">
+              <span class="col-label">Mail</span>
+              <span id="mail-count" class="col-count"></span>
+            </span>
+            <button class="col-head col-num" data-mailsort="bytes">
+              <span class="col-label">Size</span>
+              <svg class="col-arrow" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 3.5v9M4.5 9L8 12.5 11.5 9" />
+              </svg>
+            </button>
+            <button class="col-head col-num" data-mailsort="date">
+              <span class="col-label">Date</span>
+              <svg class="col-arrow" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 3.5v9M4.5 9L8 12.5 11.5 9" />
+              </svg>
+            </button>
+          </div>
+          <div id="mail-rows"></div>
+        </main>
+      </section>
+
+      <!-- ── One message ─────────────────────────────────────────── -->
+      <!-- Move and Delete sit in the tools row and stay there, so the two
+           things you can do with an open message are in the same place they
+           were in the list behind it. Trash is the exception the rest of the
+           product already makes: there is nowhere to move deleted mail to, and
+           "delete" there could only mean permanently. -->
+      <section id="screen-message" class="screen" hidden>
+        <header class="detail-head">
+          <button id="btn-message-back" class="icon-btn" aria-label="Back to emails">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M9.5 3.5L5 8l4.5 4.5" />
+            </svg>
+          </button>
+          <h1 class="detail-name"><span id="message-subject"></span></h1>
+        </header>
+
+        <div class="detail-tools">
+          <div class="tools-actions">
+            <span id="message-scope" class="selection-summary"></span>
+            <div class="tools-buttons">
+              <button id="btn-message-restore" class="btn btn--ghost btn--xs" hidden>
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" />
+                  <path d="M2.6 2.6v2.6h2.6" />
+                </svg>
+                <span>Restore</span>
+              </button>
+              <button id="btn-message-move" class="btn btn--ghost btn--xs">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M2 12.6V3.9h3.7l1.2 1.6h7.1v7.1z" />
+                  <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
+                </svg>
+                <span>Move</span>
+              </button>
+              <button id="btn-message-trash" class="btn btn--ghost btn--xs btn--danger">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
+                  />
+                </svg>
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <main id="message-view" class="message-view"></main>
+      </section>
+
       <div class="actions-bar">
         <button id="btn-refresh" class="btn btn--ghost btn--xs">
           <span id="refresh-icon" class="icon" aria-hidden="true">refresh</span>

@@ -22,8 +22,22 @@ import {
   readDeleteJob,
   validateFolderName,
 } from './src/folders.js';
-import { GmailError, getUserInfo, listLabels } from './src/gmail.js';
-import { formatAgo, formatBytes, formatRate, formatTimeLeft } from './src/format.js';
+import {
+  GmailError,
+  fetchMessageHeaders,
+  getMessage,
+  getUserInfo,
+  listLabels,
+} from './src/gmail.js';
+import {
+  formatAgo,
+  formatBytes,
+  formatDate,
+  formatDateFull,
+  formatRate,
+  formatTimeLeft,
+} from './src/format.js';
+import { shapeHeader, shapeMessage } from './src/mail.js';
 import { buildGroups, buildTree, descendantsOf } from './src/labels.js';
 import {
   breakdownOf,
@@ -34,7 +48,7 @@ import {
   resetMembership,
   restoreMembership,
 } from './src/mailbox.js';
-import { clearMessages, resetMessages } from './src/messages.js';
+import { clearMessages, dayOf, resetMessages, sizeOf } from './src/messages.js';
 
 // Both live in the signed-in account's namespace — see src/account.js. Bare
 // names, scoped at the point of use.
@@ -113,6 +127,38 @@ const el = {
   moveText: document.getElementById('move-text'),
   moveList: document.getElementById('move-list'),
   moveCancel: document.getElementById('btn-move-cancel'),
+
+  // One sender's mail.
+  mailsScreen: document.getElementById('screen-mails'),
+  mailsBack: document.getElementById('btn-mails-back'),
+  mailsLabel: document.getElementById('mails-label'),
+  mailsTotal: document.getElementById('mails-total'),
+  mailsSpinner: document.getElementById('mails-spinner'),
+  mailsScope: document.getElementById('mails-scope'),
+  mailSortTrigger: document.getElementById('btn-mail-sort'),
+  mailSortLabel: document.getElementById('mail-sort-label'),
+  mailSortMenu: document.getElementById('mail-sort-menu'),
+  mailsFilters: document.getElementById('mails-filters'),
+  mailsActions: document.getElementById('mails-actions'),
+  mailSelectionSummary: document.getElementById('mail-selection-summary'),
+  mailMove: document.getElementById('btn-mail-move'),
+  mailTrash: document.getElementById('btn-mail-trash'),
+  mailRestore: document.getElementById('btn-mail-restore'),
+  mails: document.getElementById('mails'),
+  mailHead: document.getElementById('mail-head'),
+  mailCount: document.getElementById('mail-count'),
+  mailSelectAll: document.getElementById('mail-select-all'),
+  mailRows: document.getElementById('mail-rows'),
+
+  // One message.
+  messageScreen: document.getElementById('screen-message'),
+  messageBack: document.getElementById('btn-message-back'),
+  messageSubject: document.getElementById('message-subject'),
+  messageScope: document.getElementById('message-scope'),
+  messageMove: document.getElementById('btn-message-move'),
+  messageTrash: document.getElementById('btn-message-trash'),
+  messageRestore: document.getElementById('btn-message-restore'),
+  messageView: document.getElementById('message-view'),
 };
 
 let loading = false;
@@ -139,13 +185,29 @@ function showWelcome(message) {
   setNotice(el.welcomeError, message);
 }
 
-function showMain() {
+/**
+ * The signed-in screens, in the order you reach them: folders → who is filling
+ * one → that sender's mail → one message. Only ever one is up, so they are
+ * switched as a set rather than each hiding the others itself — four screens is
+ * where hand-rolled pairs of `hidden` assignments start missing one.
+ */
+const SCREENS = {
+  main: () => el.main,
+  detail: () => el.detail,
+  mails: () => el.mailsScreen,
+  message: () => el.messageScreen,
+};
+
+function showScreen(which) {
   el.boot.hidden = true;
   el.welcome.hidden = true;
   el.app.hidden = false;
-  el.detail.hidden = true;
-  el.main.hidden = false;
+  for (const [name, node] of Object.entries(SCREENS)) node().hidden = name !== which;
   setNotice(el.welcomeError, null);
+}
+
+function showMain() {
+  showScreen('main');
 }
 
 function setNotice(node, message) {
@@ -493,9 +555,22 @@ function setBusy(running) {
   el.detailSpinner.hidden = !running;
   paintProgress();
   setFooter();
-  // The breakdown grows a trailing spinner while a pass runs, and loses it
-  // when one ends.
-  if (openLabel) renderBreakdown();
+  // Both lists grow a "still reading" row while a pass runs, and lose it when
+  // one ends.
+  refreshOpenLists();
+}
+
+/**
+ * Re-render whichever list is on screen.
+ *
+ * Sizes and senders land every second or so while measuring, and both lists are
+ * derived from them — so both have to be redrawn as they arrive, and neither
+ * should be redrawn when it is not being looked at. The open message is left
+ * alone: its content came from Gmail and a measuring pass says nothing about it.
+ */
+function refreshOpenLists() {
+  if (openSender && !el.mailsScreen.hidden) renderMails();
+  else if (openLabel && !el.detail.hidden) renderBreakdown();
 }
 
 /**
@@ -824,16 +899,18 @@ function renderSender(sender) {
   const picked = selected.has(key);
   row.dataset.sender = key;
   row.classList.toggle('sender--picked', picked);
+  // The row opens this sender's mail now, so it is a control rather than a
+  // line of text. Not a <button>: it is a grid of its own and the element
+  // would fight that, which is the same trade the folder rows make.
+  row.setAttribute('role', 'button');
+  row.tabIndex = 0;
 
-  // The label is what makes the 15px box a slightly larger target; the row
-  // itself is the real one, wired below.
-  const tick = document.createElement('label');
-  tick.className = 'sender-tick';
-  const box = document.createElement('input');
-  box.type = 'checkbox';
+  // The tick is the only part of the row that still toggles, so it stretches
+  // the full height of its column rather than being a bare 15px box.
+  const { cell: tick, box } = tickBox(
+    `Select ${sender.address || sender.name || 'unknown sender'}`
+  );
   box.checked = picked;
-  box.setAttribute('aria-label', `Select ${sender.address || sender.name || 'unknown sender'}`);
-  tick.append(box);
 
   const who = document.createElement('span');
   who.className = 'sender-who';
@@ -974,8 +1051,7 @@ async function openBreakdown(labelId, labelName) {
   clearSelection();
   el.senderRows.replaceChildren(emptyNote('Working it out…'));
 
-  el.main.hidden = true;
-  el.detail.hidden = false;
+  showScreen('detail');
   el.back.focus();
 
   await membershipReady;
@@ -1035,11 +1111,12 @@ function setPeriod(key) {
   renderBreakdown();
 }
 
-/** Both pickers behave identically, so they are wired the same way. */
+/** Every picker behaves identically, so they are wired the same way. */
 function closeMenus(except) {
   for (const [trigger, menu] of [
     [el.sortTrigger, el.sortMenu],
     [el.periodTrigger, el.periodMenu],
+    [el.mailSortTrigger, el.mailSortMenu],
   ]) {
     if (menu === except) continue;
     menu.hidden = true;
@@ -1067,7 +1144,569 @@ function wirePicker(trigger, menu, attribute, choose) {
 }
 
 function anyMenuOpen() {
-  return !el.sortMenu.hidden || !el.periodMenu.hidden;
+  return !el.sortMenu.hidden || !el.periodMenu.hidden || !el.mailSortMenu.hidden;
+}
+
+// ── One sender's mail ────────────────────────────────────────────
+//
+// The first screen that shows mail rather than figures about it, and the split
+// of work is the point:
+//
+// - **The list is local.** Which messages a sender has in this folder, how big
+//   each is and when it arrived all come from the same enumeration and the same
+//   cache the breakdown aggregates, so filtering, sorting and paging cost no
+//   Gmail calls at all.
+// - **The rows are not.** A subject and a first line exist nowhere but on the
+//   message. So ten at a time are fetched — one batch, 50 quota units — and
+//   held in memory for as long as the screen is up and no longer. Writing them
+//   down would break the promise in *What is on disk*.
+//
+// Ten is what makes that affordable. A scrolling list of a sender's four
+// thousand messages would fetch content for all of them.
+
+const MAIL_PAGE = 10;
+
+/** Same shape as SORTS: read the column, and say which way round it starts. */
+const MAIL_SORTS = {
+  date: { label: 'Date', dir: 'desc', of: (id) => dayOf(id) },
+  bytes: { label: 'Size', dir: 'desc', of: (id) => sizeOf(id) ?? 0 },
+};
+
+/**
+ * Whose mail is listed, which page of it, and how it is ordered.
+ * @type {{key: string, address: string, name: string} | null}
+ */
+let openSender = null;
+let mailPage = 0;
+let mailSortKey = 'date';
+let mailSortDir = MAIL_SORTS.date.dir;
+
+/** The ids the last render listed, in the order it listed them. */
+let mailIds = [];
+
+/** Message ids ticked in the open list. Stable, so ticks survive paging. */
+let selectedMails = new Set();
+
+/**
+ * Subject, first line and exact date per message — fetched a page at a time.
+ *
+ * Memory only, and cleared with the screen: this is mail content, and the
+ * per-message cache on disk deliberately holds nothing of the kind.
+ *
+ * An id Gmail would not answer for gets an entry all the same, marked `gone`.
+ * Without that the row stays permanently "missing" and every render asks again.
+ *
+ * @type {Map<string, object>}
+ */
+let mailMeta = new Map();
+
+/** A header fetch is in flight, so the heading can say so. */
+let fetchingHeaders = 0;
+
+/**
+ * When a refused fetch may be tried again.
+ *
+ * Without this a batch Gmail will not answer — a 400, a revoked scope — spins:
+ * the failure leaves the ids uncached, the retry re-renders, and the re-render
+ * asks again. A measuring pass re-rendering this list every second would turn
+ * that into a request a second, indefinitely. `fetchMessageHeaders` already
+ * retries the transient statuses itself, so anything reaching here is worth
+ * waiting on rather than repeating.
+ */
+let headersBlockedUntil = 0;
+
+const HEADER_RETRY_MS = 30_000;
+
+/**
+ * The sender's messages in this folder, in sort order.
+ *
+ * Re-derived on every render rather than held: a measuring pass keeps adding
+ * messages to this sender and a completed job takes them away, and a stale list
+ * would page over mail that has moved. It is a filter and a sort over one
+ * label's ids, which is nothing beside what the render itself costs.
+ *
+ * `idsForSelection` is deliberately the same call the actions resolve through,
+ * so the rows listed and the mail a Move touches cannot describe different sets.
+ */
+function mailIdsFor() {
+  if (!openLabel || !openSender) return [];
+
+  const ids = idsForSelection(openLabel.id, [openSender.key], sinceDay());
+  const { of } = MAIL_SORTS[mailSortKey];
+  const sign = mailSortDir === 'asc' ? 1 : -1;
+
+  // The id breaks ties, so paging is deterministic: dates are whole days and
+  // sizes collide constantly, and an unstable order would shuffle rows between
+  // page 2 and page 3 as the list is re-derived.
+  return ids.sort((a, b) => sign * (of(a) - of(b)) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * What is ticked, as the list currently on screen sees it.
+ *
+ * Filtered against `mailIds` for the same reason the breakdown's is: a tick on
+ * a message the current period no longer lists cannot be acted on, so it must
+ * not be counted either.
+ */
+function mailSelectionFacts() {
+  const ids = mailIds.filter((id) => selectedMails.has(id));
+  return { ids, messages: ids.length };
+}
+
+/** The same swap the breakdown does: ticking replaces the sort with actions. */
+function paintMailSelection() {
+  const { messages } = mailSelectionFacts();
+  const picked = messages > 0;
+
+  el.mailsFilters.hidden = picked;
+  el.mailsActions.hidden = !picked;
+
+  el.mailSelectAll.checked = picked && messages === mailIds.length;
+  el.mailSelectAll.indeterminate = picked && messages < mailIds.length;
+
+  if (!picked) return;
+
+  // Trash offers one thing, and it is the way back — the same rule the
+  // breakdown follows, for the same reason (see paintSelection).
+  const inTrash = openLabel?.id === 'TRASH';
+  el.mailRestore.hidden = !inTrash;
+  el.mailMove.hidden = inTrash;
+  el.mailTrash.hidden = inTrash;
+
+  // A picker left open goes off screen with its trigger.
+  closeMenus();
+
+  const scope = periodKey === 'all' ? '' : ` · ${PERIODS[periodKey].label}`;
+  el.mailSelectionSummary.textContent = `${emails(messages)}${scope}`;
+  el.mailSelectionSummary.title = `${emails(messages)} selected${scope}`;
+}
+
+/** Paint ticks from `selectedMails` rather than trusting the boxes: a measuring
+ *  pass rebuilds these rows every second or so. */
+function syncMailSelection() {
+  for (const row of el.mailRows.querySelectorAll('.mail')) {
+    const on = selectedMails.has(row.dataset.id);
+    row.classList.toggle('mail--picked', on);
+    const box = row.querySelector('input[type="checkbox"]');
+    if (box && box.checked !== on) box.checked = on;
+  }
+  paintMailSelection();
+}
+
+function toggleMail(id, on) {
+  if (!id) return;
+  if (on) selectedMails.add(id);
+  else selectedMails.delete(id);
+  syncMailSelection();
+}
+
+function clearMailSelection() {
+  selectedMails = new Set();
+  paintMailSelection();
+}
+
+function tickBox(label) {
+  const cell = document.createElement('label');
+  cell.className = 'sender-tick';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.setAttribute('aria-label', label);
+  cell.append(box);
+  return { cell, box };
+}
+
+function renderMail(id) {
+  const meta = mailMeta.get(id);
+
+  const row = document.createElement('div');
+  row.className = meta?.gone ? 'mail mail--gone' : 'mail';
+  row.dataset.id = id;
+  // Not a <button>: the row is a grid of its own. Given the role, it has to
+  // answer the keyboard like one — same as the folder rows.
+  row.setAttribute('role', 'button');
+  row.tabIndex = 0;
+
+  const picked = selectedMails.has(id);
+  row.classList.toggle('mail--picked', picked);
+
+  const { cell, box } = tickBox(`Select ${meta?.subject || 'this email'}`);
+  box.checked = picked;
+
+  const who = document.createElement('span');
+  who.className = 'mail-who';
+
+  const subject = document.createElement('span');
+  subject.className = 'mail-subject';
+
+  const snippet = document.createElement('span');
+  snippet.className = 'mail-snippet';
+
+  if (!meta) {
+    // The figures are cached and land instantly; the subject is a round trip
+    // away, so the row appears complete except for the part still coming.
+    subject.append(skeleton());
+  } else if (meta.gone) {
+    subject.textContent = 'No longer in Gmail';
+    snippet.textContent = 'It was moved or deleted since this list was built.';
+  } else {
+    subject.textContent = meta.subject || '(no subject)';
+    snippet.textContent = meta.snippet;
+  }
+
+  who.append(subject, snippet);
+
+  // Size is exact in the cache and lands with the row.
+  const bytes = meta?.bytes || sizeOf(id) || 0;
+
+  // The date is not. The cache keeps whole days and rounds to get them, so
+  // roughly half of them sit on the day after the message actually arrived —
+  // fine for ordering, which is all the sort needs, and wrong to put on screen.
+  // So the column waits for the exact `internalDate` the header fetch brings,
+  // rather than showing a date that would silently correct itself a moment
+  // later.
+  const when = meta?.date ?? 0;
+  const date = document.createElement('span');
+  date.className = 'sender-figure';
+  if (!meta) date.append(skeleton());
+  else date.textContent = formatDate(when) || '—';
+
+  row.append(cell, who, figure(formatBytes(bytes)), date);
+
+  const parts = [meta?.subject, formatDateFull(when), formatBytes(bytes)].filter(Boolean);
+  row.title = parts.join(' · ');
+  return row;
+}
+
+/**
+ * Numbered pages, windowed to five.
+ *
+ * A sender with four thousand messages has four hundred pages and no room to
+ * list them, so the window is the current page and the next four — enough to
+ * jump ahead without the row becoming a scroll of its own. It slides back at
+ * the end of the list so the last page is never the only one reachable, and the
+ * arrows are what step outside the window.
+ */
+function renderPager(pages) {
+  if (pages <= 1) return null;
+
+  const bar = document.createElement('nav');
+  bar.className = 'pager';
+  bar.setAttribute('aria-label', 'Pages of emails');
+
+  const button = (text, page, { label, current = false, disabled = false } = {}) => {
+    const node = document.createElement('button');
+    node.type = 'button';
+    node.className = current ? 'pager-btn pager-btn--current' : 'pager-btn';
+    node.textContent = text;
+    node.disabled = disabled;
+    if (page !== null) node.dataset.page = String(page);
+    node.setAttribute('aria-label', label ?? `Page ${text}`);
+    if (current) node.setAttribute('aria-current', 'page');
+    return node;
+  };
+
+  bar.append(
+    button('‹', mailPage - 1, { label: 'Previous page', disabled: mailPage === 0 })
+  );
+
+  const start = Math.max(0, Math.min(mailPage, pages - 5));
+  for (let page = start; page < Math.min(pages, start + 5); page++) {
+    bar.append(button(String(page + 1), page, { current: page === mailPage }));
+  }
+
+  bar.append(
+    button('›', mailPage + 1, { label: 'Next page', disabled: mailPage >= pages - 1 })
+  );
+
+  return bar;
+}
+
+/**
+ * Fetch the subjects for the page on screen, then re-render with them.
+ *
+ * Every id asked for gets an entry, found or not, so a message Gmail will not
+ * answer for is asked about once rather than on every render. The re-render
+ * then finds nothing missing and does not recurse.
+ */
+async function ensureHeaders(ids) {
+  const missing = ids.filter((id) => !mailMeta.has(id));
+  if (!missing.length || Date.now() < headersBlockedUntil) return;
+
+  fetchingHeaders++;
+  el.mailsSpinner.hidden = false;
+
+  try {
+    const found = await fetchMessageHeaders(missing);
+    // Every id asked for, found or not — an entry marked `gone` is what stops
+    // a message Gmail will not answer for being asked about on every render.
+    for (const id of missing) mailMeta.set(id, shapeHeader(id, found.get(id)));
+    headersBlockedUntil = 0;
+
+    if (openSender) renderMails();
+  } catch (err) {
+    console.warn('[MailBoy] could not read those emails:', err);
+    // Nothing is cached, so the rows stay as skeletons and the next render
+    // after the cooldown tries again. Deliberately no re-render here: it would
+    // be the failing call asking for itself.
+    headersBlockedUntil = Date.now() + HEADER_RETRY_MS;
+    flash(`Couldn't read those emails. ${describeWriteError(err)}`);
+  } finally {
+    fetchingHeaders--;
+    el.mailsSpinner.hidden = fetchingHeaders > 0;
+  }
+}
+
+function renderMails() {
+  if (!openSender || !openLabel) return;
+
+  mailIds = mailIdsFor();
+
+  const bytes = mailIds.reduce((sum, id) => sum + (sizeOf(id) ?? 0), 0);
+  el.mailsLabel.textContent = openSender.address || openSender.name || 'Unknown sender';
+  el.mailsTotal.textContent = mailIds.length
+    ? `(${mailIds.length.toLocaleString()} · ${formatBytes(bytes)})`
+    : '';
+
+  // The period picker is on the screen behind this one, so the scope has to be
+  // stated here or the count is a figure with no visible basis.
+  const scope = periodKey === 'all' ? '' : ` · ${PERIODS[periodKey].label}`;
+  el.mailsScope.textContent = `In ${departing()}${scope}`;
+  el.mailsScope.title = el.mailsScope.textContent;
+
+  const pages = Math.max(1, Math.ceil(mailIds.length / MAIL_PAGE));
+  // A pass that removed messages can leave the page past the end of the list.
+  if (mailPage >= pages) mailPage = pages - 1;
+
+  const page = mailIds.slice(mailPage * MAIL_PAGE, mailPage * MAIL_PAGE + MAIL_PAGE);
+
+  el.mailCount.textContent = mailIds.length ? `(${mailIds.length.toLocaleString()})` : '';
+  el.mailHead.hidden = !page.length;
+  paintMailSelection();
+
+  const nodes = [];
+  // Same notice the breakdown carries, at the head for the same reason.
+  if (busy) nodes.push(stillReading());
+
+  if (!page.length) {
+    nodes.push(
+      emptyNote(
+        busy
+          ? 'Still working through this folder — this sender’s mail appears as it is read.'
+          : 'Nothing from this sender in this period.'
+      )
+    );
+  } else {
+    for (const id of page) nodes.push(renderMail(id));
+    const pager = renderPager(pages);
+    if (pager) nodes.push(pager);
+  }
+
+  // Sizes land every second or so while measuring and re-render this list;
+  // `replaceChildren` resets the scroll, which yanks the page out from under
+  // anyone reading it.
+  const scroll = el.mails.scrollTop;
+  el.mailRows.replaceChildren(...nodes);
+  el.mails.scrollTop = scroll;
+
+  void ensureHeaders(page);
+}
+
+function openMails(sender) {
+  openSender = { key: senderKey(sender), address: sender.address, name: sender.name };
+  mailPage = 0;
+  mailIds = [];
+  clearMailSelection();
+  el.mailHead.hidden = true;
+  el.mailRows.replaceChildren(emptyNote('Working it out…'));
+
+  showScreen('mails');
+  el.mailsBack.focus();
+  renderMails();
+}
+
+function closeMails() {
+  const previous = openSender?.key;
+  openSender = null;
+  mailIds = [];
+  clearMailSelection();
+  // Content, and it belongs to the screen being left.
+  mailMeta = new Map();
+  closeMenus();
+
+  showScreen('detail');
+  renderBreakdown();
+
+  const row = previous && el.senderRows.querySelector(`[data-sender="${CSS.escape(previous)}"]`);
+  if (row) row.focus();
+  else el.back.focus();
+}
+
+/**
+ * @param {'date' | 'bytes'} key
+ * @param {'asc' | 'desc'} [direction] defaults to whichever way round that
+ *   column is useful to start
+ */
+function setMailSort(key, direction = MAIL_SORTS[key].dir) {
+  mailSortKey = key;
+  mailSortDir = direction;
+  el.mailSortLabel.textContent = MAIL_SORTS[key].label;
+  // Re-ordering the whole list changes what page 1 holds, so staying on page 4
+  // would be showing a slice of something the user has not seen the start of.
+  mailPage = 0;
+
+  for (const option of el.mailSortMenu.querySelectorAll('.picker-option')) {
+    option.setAttribute('aria-checked', String(option.dataset.mailsort === key));
+  }
+
+  // The column heads and the menu are two ways into the same setting, and
+  // aria-sort doubles as the hook the arrow is drawn from.
+  for (const head of el.mailHead.querySelectorAll('.col-head[data-mailsort]')) {
+    if (head.dataset.mailsort === key) {
+      head.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
+    } else {
+      head.removeAttribute('aria-sort');
+    }
+  }
+
+  renderMails();
+}
+
+// ── One message ──────────────────────────────────────────────────
+//
+// The only screen that reads a message body, and it reads it as **text**.
+//
+// Rendering a sender's HTML would mean `innerHTML` over the least trustworthy
+// string in the product, and every remote image in it is a read receipt fetched
+// the moment the panel draws. `src/mail.js` flattens an HTML part through an
+// inert document instead, which runs nothing and loads nothing. The cost is
+// layout — a heavily designed newsletter reads as a plain transcript.
+
+/** The message on screen, if any. @type {string | null} */
+let openMessageId = null;
+
+/** Move and Delete are always up here, in the place the list behind it put
+ *  them — except in Trash, where the rest of the product offers only Restore. */
+function paintMessageActions() {
+  const inTrash = openLabel?.id === 'TRASH';
+  el.messageRestore.hidden = !inTrash;
+  el.messageMove.hidden = inTrash;
+  el.messageTrash.hidden = inTrash;
+}
+
+function messageLine(text, className) {
+  const node = document.createElement('p');
+  node.className = className;
+  node.textContent = text;
+  return node;
+}
+
+function renderMessage(mail) {
+  el.messageSubject.textContent = mail.subject || '(no subject)';
+  el.messageSubject.title = mail.subject || '';
+
+  const meta = document.createElement('div');
+  meta.className = 'message-meta';
+
+  const who = document.createElement('strong');
+  who.textContent = mail.from.name
+    ? `${mail.from.name} <${mail.from.address}>`
+    : mail.from.address || 'Unknown sender';
+  meta.append(who);
+
+  const when = document.createElement('span');
+  when.textContent = [formatDateFull(mail.date), formatBytes(mail.bytes)]
+    .filter(Boolean)
+    .join(' · ');
+  meta.append(when);
+
+  const nodes = [meta];
+
+  if (mail.fromHtml) {
+    nodes.push(
+      messageLine(
+        'Shown as plain text. MailBoy never loads a sender’s images or styling, so the layout is gone but the words are all here.',
+        'message-note'
+      )
+    );
+  }
+
+  nodes.push(
+    mail.text
+      ? Object.assign(document.createElement('pre'), {
+          className: 'message-text',
+          textContent: mail.text,
+        })
+      : emptyNote('This message has no readable text — it may be attachments only.')
+  );
+
+  if (mail.attachments.length) {
+    const list = document.createElement('ul');
+    list.className = 'message-files';
+
+    const heading = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent =
+      mail.attachments.length === 1 ? '1 attachment' : `${mail.attachments.length} attachments`;
+    heading.append(label);
+    list.append(heading);
+
+    for (const file of mail.attachments) {
+      const item = document.createElement('li');
+      const name = document.createElement('span');
+      name.textContent = file.name || '(unnamed)';
+      name.title = file.name || '';
+      const size = document.createElement('span');
+      size.textContent = formatBytes(file.bytes);
+      item.append(name, size);
+      list.append(item);
+    }
+
+    nodes.push(list);
+  }
+
+  el.messageView.replaceChildren(...nodes);
+}
+
+async function openMessage(id) {
+  if (!id) return;
+  openMessageId = id;
+
+  // Whatever the list already knows, so the header is not blank for the length
+  // of a round trip.
+  const known = mailMeta.get(id);
+  el.messageSubject.textContent = known?.subject || '(no subject)';
+  el.messageScope.textContent = `In ${departing()}`;
+  paintMessageActions();
+  el.messageView.replaceChildren(emptyNote('Opening…'));
+
+  showScreen('message');
+  el.messageBack.focus();
+
+  try {
+    const raw = await getMessage(id);
+    // A fast Back followed by a different message.
+    if (openMessageId !== id) return;
+    renderMessage(shapeMessage(raw));
+  } catch (err) {
+    console.error('[MailBoy] could not open the message:', err);
+    if (openMessageId !== id) return;
+    el.messageView.replaceChildren(
+      emptyNote(`Couldn't open this email. ${describeWriteError(err)}`)
+    );
+  }
+}
+
+function closeMessage() {
+  const previous = openMessageId;
+  openMessageId = null;
+  el.messageView.replaceChildren();
+
+  showScreen('mails');
+  renderMails();
+
+  const row = previous && el.mailRows.querySelector(`[data-id="${CSS.escape(previous)}"]`);
+  if (row) row.focus();
+  else el.mailsBack.focus();
 }
 
 // ── Creating and removing folders ────────────────────────────────
@@ -1509,11 +2148,10 @@ function departing() {
   return openLabel.id.startsWith('CATEGORY_') ? 'your inbox' : `“${openLabel.name}”`;
 }
 
-/** The scope both dialogs have to state: the period picker is off screen. */
-function scopeLine({ senders }) {
-  const who = senders === 1 ? 'one sender' : `${senders.toLocaleString()} senders`;
-  const when = periodKey === 'all' ? '' : `, ${PERIODS[periodKey].label.toLowerCase()}`;
-  return `From ${who} in ${departing()}${when}.`;
+/** The period picker is off screen in all three places these can be started
+ *  from, so every scope line has to carry it. */
+function periodClause() {
+  return periodKey === 'all' ? '' : `, ${PERIODS[periodKey].label.toLowerCase()}`;
 }
 
 /**
@@ -1522,12 +2160,22 @@ function scopeLine({ senders }) {
  * The selection is cleared at the hand-over rather than at the end: the action
  * is under way, the ticks no longer describe anything outstanding, and leaving
  * them up invites a second press of the same button.
+ *
+ * A job started from an open message ends that screen too — the mail it was
+ * showing is on its way somewhere else, and leaving it up would be showing a
+ * message in a folder it is leaving.
  */
 function dispatchBulk(job, { total, action, target, status }) {
   bulkState = { action, total, target };
   setAction(status);
+
   clearSelection();
-  renderBreakdown();
+  clearMailSelection();
+
+  if (!el.messageScreen.hidden) closeMessage();
+  else if (!el.mailsScreen.hidden) renderMails();
+  else renderBreakdown();
+
   folderChannel().postMessage({ type: 'bulk', job });
 }
 
@@ -1563,21 +2211,31 @@ function askConfirm({ verb, count, where, text, button, destructive = false }) {
 }
 
 /**
- * Resolve the ticks to ids and check nothing has moved out from under them.
+ * Whether an action can be started at all — one long job at a time, and there
+ * has to be a folder for the removal set to be built against.
+ */
+function canAct() {
+  if (!openLabel) return false;
+  if (jobRunning()) {
+    flash('MailBoy is still finishing the last job.');
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Resolve the breakdown's ticks to ids and check nothing has moved out from
+ * under them.
  *
  * Always called *before* a dialog opens, and it is the returned array that
  * travels with the job: the number someone is shown has to be the mail that
  * actually moves, not a figure taken from the rows and then re-derived at the
  * click from a cache a measuring pass has moved on since.
  *
- * @returns {{facts: object, ids: string[]} | null}
+ * @returns {{ids: string[], line: string} | null}
  */
 function resolveSelection() {
-  if (!openLabel) return null;
-  if (jobRunning()) {
-    flash('MailBoy is still finishing the last job.');
-    return null;
-  }
+  if (!canAct()) return null;
 
   const facts = selectionFacts();
   if (!facts.messages) return null;
@@ -1589,20 +2247,59 @@ function resolveSelection() {
     return null;
   }
 
-  return { facts, ids };
+  const who = facts.senders === 1 ? 'one sender' : `${facts.senders.toLocaleString()} senders`;
+  return { ids, line: `From ${who} in ${departing()}${periodClause()}.` };
 }
 
-async function startTrash() {
-  const picked = resolveSelection();
+/**
+ * The same thing for the mail list, where the ticks are message ids already —
+ * no sender to resolve through, so `mailIds` filtering is the whole check.
+ *
+ * @returns {{ids: string[], line: string} | null}
+ */
+function resolveMailSelection() {
+  if (!canAct() || !openSender) return null;
+
+  const { ids } = mailSelectionFacts();
+  if (!ids.length) {
+    flash('Those emails are no longer in this folder.');
+    clearMailSelection();
+    return null;
+  }
+
+  const who = openSender.address || openSender.name || 'this sender';
+  return { ids, line: `From “${who}” in ${departing()}${periodClause()}.` };
+}
+
+/**
+ * And for the open message, which is a selection of one.
+ *
+ * The subject rather than the sender: it is what is on screen, and it is what
+ * makes the confirmation unmistakably about *this* email.
+ *
+ * @returns {{ids: string[], line: string} | null}
+ */
+function resolveOpenMessage() {
+  if (!canAct() || !openMessageId) return null;
+
+  const subject = mailMeta.get(openMessageId)?.subject || el.messageSubject.textContent;
+  return {
+    ids: [openMessageId],
+    line: subject ? `“${subject}” in ${departing()}.` : `This email, in ${departing()}.`,
+  };
+}
+
+/** @param {{ids: string[], line: string} | null} picked */
+async function startTrash(picked) {
   if (!picked) return;
-  const { facts, ids } = picked;
+  const { ids, line } = picked;
 
   const confirmed = await askConfirm({
     verb: 'Move',
     count: ids.length,
     where: 'to Trash',
     text:
-      `${scopeLine(facts)} Gmail keeps trashed mail for 30 days, so you can still get it ` +
+      `${line} Gmail keeps trashed mail for 30 days, so you can still get it ` +
       'back from Trash. On a large selection this takes a while — MailBoy carries on in ' +
       'the background, so you can close the panel.',
     button: 'Move to Trash',
@@ -1630,16 +2327,15 @@ async function startTrash() {
  * restored message with no folders of its own would come back into All Mail and
  * nowhere MailBoy shows, which reads as the restore having done nothing.
  */
-async function startRestore() {
-  const picked = resolveSelection();
+async function startRestore(picked) {
   if (!picked) return;
-  const { facts, ids } = picked;
+  const { ids, line } = picked;
 
   const confirmed = await askConfirm({
     verb: 'Restore',
     count: ids.length,
     where: 'to your inbox',
-    text: `${scopeLine(facts)} They keep any folders they were in when they were deleted.`,
+    text: `${line} They keep any folders they were in when they were deleted.`,
     button: 'Restore to inbox',
   });
   if (!confirmed) return;
@@ -1723,8 +2419,8 @@ function closeMoveDialog() {
   if (el.moveDialog.open) el.moveDialog.close();
 }
 
-function startMove() {
-  if (el.moveDialog.open) return;
+function startMove(picked) {
+  if (el.moveDialog.open || !picked) return;
 
   // The removal set is built from the folder list, so a move cannot be started
   // before that list exists — a half-built one would shed only some folders and
@@ -1734,14 +2430,12 @@ function startMove() {
     return;
   }
 
-  const picked = resolveSelection();
-  if (!picked) return;
-  const { facts, ids } = picked;
+  const { ids, line } = picked;
 
   moveIds = ids;
   el.moveCount.textContent = emails(ids.length);
   el.moveText.textContent =
-    `${scopeLine(facts)} They move out of every folder they are in now — your inbox ` +
+    `${line} They move out of every folder they are in now — your inbox ` +
     'included — and into the one you pick.';
 
   renderMoveList();
@@ -2237,8 +2931,8 @@ async function load({ force = false } = {}) {
       onCounting: (done, total) => setProgress('counting', done, total),
       onSizes: (records, done, total) => {
         paintRecords(records);
-        // Sizes arriving behind an open breakdown should show up in it.
-        if (openLabel) renderBreakdown();
+        // Sizes arriving behind an open list should show up in it.
+        refreshOpenLists();
         // Enumeration is finished by the time this first fires, so the counts
         // are final and worth stamping — sizes carry on in the card.
         setFooter(generatedAt);
@@ -2321,6 +3015,14 @@ function forgetMailbox() {
   openLabel = null;
   listedSenders = [];
   selected = new Set();
+  // Mail content, and it belongs to the mailbox being left. Nothing here was
+  // ever written to disk, so letting go of it is the whole of forgetting it.
+  openSender = null;
+  openMessageId = null;
+  mailIds = [];
+  selectedMails = new Set();
+  mailMeta = new Map();
+  mailPage = 0;
   currentGroups = null;
   closeEditor();
   closeMoveDialog();
@@ -2331,6 +3033,8 @@ function forgetMailbox() {
   bulkState = null;
   setAction(null);
   el.senderRows.replaceChildren();
+  el.mailRows.replaceChildren();
+  el.messageView.replaceChildren();
   el.groups.replaceChildren();
   setProgress(null);
   setFooter(null);
@@ -2550,18 +3254,38 @@ el.senderRows.addEventListener('change', (event) => {
   if (row) toggleSender(row.dataset.sender, box.checked);
 });
 
+/** The sender a row stands for, as `openMails` wants it. */
+function senderRowFor(row) {
+  return listedSenders.find((sender) => senderKey(sender) === row.dataset.sender);
+}
+
 el.senderRows.addEventListener('click', (event) => {
-  // The label already toggled its own box and fired `change` above.
+  // The label already toggled its own box and fired `change` above. It is now
+  // the only part of the row that ticks — the rest of it opens the mail.
   if (event.target.closest('.sender-tick')) return;
 
   const row = event.target.closest('.sender');
   if (!row) return;
 
   // A drag that ended up selecting text is somebody copying an address, not a
-  // tick — an addressee is the one thing on this screen worth copying.
+  // click — an address is the one thing on this screen worth copying.
   if (!window.getSelection()?.isCollapsed) return;
 
-  toggleSender(row.dataset.sender, !selected.has(row.dataset.sender));
+  const sender = senderRowFor(row);
+  if (sender) openMails(sender);
+});
+
+el.senderRows.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  // The checkbox answers the keyboard itself; the row must not also open.
+  if (event.target.closest('.sender-tick')) return;
+
+  const row = event.target.closest('.sender');
+  if (!row) return;
+  event.preventDefault(); // Space would scroll the list.
+
+  const sender = senderRowFor(row);
+  if (sender) openMails(sender);
 });
 
 el.selectAll.addEventListener('change', () => {
@@ -2571,10 +3295,90 @@ el.selectAll.addEventListener('change', () => {
   syncSelection();
 });
 
-el.trash.addEventListener('click', () => void startTrash());
-el.restore.addEventListener('click', () => void startRestore());
-el.move.addEventListener('click', () => startMove());
+el.trash.addEventListener('click', () => void startTrash(resolveSelection()));
+el.restore.addEventListener('click', () => void startRestore(resolveSelection()));
+el.move.addEventListener('click', () => startMove(resolveSelection()));
 el.moveCancel.addEventListener('click', closeMoveDialog);
+
+// ── One sender's mail ────────────────────────────────────────────
+
+el.mailsBack.addEventListener('click', closeMails);
+
+// The box inside the label toggles itself, so this covers that half.
+el.mailRows.addEventListener('change', (event) => {
+  const box = event.target.closest('input[type="checkbox"]');
+  const row = box?.closest('.mail');
+  if (row) toggleMail(row.dataset.id, box.checked);
+});
+
+el.mailRows.addEventListener('click', (event) => {
+  const page = event.target.closest('.pager-btn');
+  if (page) {
+    mailPage = Number(page.dataset.page);
+    // Back to the top: the pager is at the bottom of the list, and staying
+    // there would land the next page mid-way through itself.
+    el.mails.scrollTop = 0;
+    renderMails();
+    return;
+  }
+
+  // The label already toggled its own box and fired `change` above.
+  if (event.target.closest('.sender-tick')) return;
+
+  const row = event.target.closest('.mail');
+  if (!row) return;
+
+  // A drag that ended up selecting text is somebody copying a subject line.
+  if (!window.getSelection()?.isCollapsed) return;
+
+  void openMessage(row.dataset.id);
+});
+
+el.mailRows.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  // The checkbox and the pager buttons are real controls and answer the
+  // keyboard themselves.
+  if (event.target.closest('.sender-tick, .pager-btn')) return;
+
+  const row = event.target.closest('.mail');
+  if (!row) return;
+  event.preventDefault(); // Space would scroll the list.
+  void openMessage(row.dataset.id);
+});
+
+/**
+ * Every message this sender has in scope, not just the ten on screen.
+ *
+ * Pagination is a viewport, not a scope: someone who opens a sender with four
+ * hundred messages and presses the header box means all four hundred. The
+ * summary beside the buttons says how many, so the figure is never implied.
+ */
+el.mailSelectAll.addEventListener('change', () => {
+  selectedMails = el.mailSelectAll.checked ? new Set(mailIds) : new Set();
+  syncMailSelection();
+});
+
+el.mailHead.addEventListener('click', (event) => {
+  const head = event.target.closest('.col-head[data-mailsort]');
+  if (!head) return;
+
+  // Clicking the column already in use turns it round; clicking the other moves
+  // to it the way round that column starts.
+  const key = head.dataset.mailsort;
+  setMailSort(key, key === mailSortKey ? (mailSortDir === 'asc' ? 'desc' : 'asc') : undefined);
+});
+
+el.mailTrash.addEventListener('click', () => void startTrash(resolveMailSelection()));
+el.mailRestore.addEventListener('click', () => void startRestore(resolveMailSelection()));
+el.mailMove.addEventListener('click', () => startMove(resolveMailSelection()));
+
+// ── One message ──────────────────────────────────────────────────
+
+el.messageBack.addEventListener('click', closeMessage);
+
+el.messageTrash.addEventListener('click', () => void startTrash(resolveOpenMessage()));
+el.messageRestore.addEventListener('click', () => void startRestore(resolveOpenMessage()));
+el.messageMove.addEventListener('click', () => startMove(resolveOpenMessage()));
 // Escape closes a dialog on its own, leaving the editor inside it and the ids
 // it was holding behind. Re-entrant by design: `close()` is guarded on `.open`,
 // which is already false by the time this fires.
@@ -2617,6 +3421,7 @@ el.senderHead.addEventListener('click', (event) => {
 
 wirePicker(el.sortTrigger, el.sortMenu, 'sort', setSort);
 wirePicker(el.periodTrigger, el.periodMenu, 'period', setPeriod);
+wirePicker(el.mailSortTrigger, el.mailSortMenu, 'mailsort', setMailSort);
 
 document.addEventListener('click', (event) => {
   if (anyMenuOpen() && !event.target.closest('.picker')) closeMenus();
@@ -2625,6 +3430,7 @@ document.addEventListener('click', (event) => {
 // Puts the defaults on the triggers and the ticks beside them.
 setSort(sortKey);
 setPeriod(periodKey);
+setMailSort(mailSortKey);
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
@@ -2644,6 +3450,11 @@ document.addEventListener('keydown', (event) => {
     // Nearest thing first: an editor is open over the list, so the press is
     // about that rather than about the screen it is on.
     closeEditor();
+  } else if (!el.messageScreen.hidden) {
+    // One step back per press, down the same path the screens were opened on.
+    closeMessage();
+  } else if (!el.mailsScreen.hidden) {
+    closeMails();
   } else if (!el.detail.hidden) {
     closeBreakdown();
   }

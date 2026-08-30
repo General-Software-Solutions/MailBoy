@@ -76,6 +76,36 @@ export function formatRate(count, days) {
   return `${shown}/${unit}`;
 }
 
+const MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/**
+ * A message's date, short enough for a column that is about 70px wide:
+ * "12 Aug" this year, "12 Aug 24" before that.
+ *
+ * The year is what carries the information — two messages a week apart do not
+ * need to be told apart at a glance, two messages two years apart do — so it is
+ * the only part that earns its width, and only when it is not the current one.
+ * The full date lives in the row's tooltip.
+ */
+export function formatDate(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+
+  const when = new Date(ms);
+  const stem = `${when.getDate()} ${MONTHS[when.getMonth()]}`;
+  const year = when.getFullYear();
+
+  return year === new Date().getFullYear() ? stem : `${stem} ${String(year).slice(2)}`;
+}
+
+/** The unabbreviated form, for a tooltip or an open message. */
+export function formatDateFull(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+  return new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 /**
  * How much longer something has to run: "about 6 minutes left".
  *

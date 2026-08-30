@@ -440,6 +440,83 @@ async function runBatch(ids, retry) {
   return found;
 }
 
+// ── Reading actual messages ──────────────────────────────────────
+//
+// The only place MailBoy asks Gmail for content rather than for figures. It is
+// deliberately *not* part of the measuring pass and nothing it returns is
+// cached: subjects, snippets and bodies are the mail itself, and "what is on
+// disk" is a promise the panel keeps by never writing them down.
+//
+// Cost is the same 5 units a message the size pass pays, but only ever for the
+// handful on screen — one page of a list, or one open message.
+
+/**
+ * Subject, snippet, size and date for one page of messages, in a single batch.
+ *
+ * `snippet` is Gmail's own first-line extract, which is exactly the second line
+ * a mail row wants and is free here — `format=metadata` carries it.
+ *
+ * Ids Gmail would not answer for are simply absent from the result. The caller
+ * has a row on screen for each one and has to say so itself; throwing would
+ * cost the whole page for one deleted message.
+ *
+ * @param {string[]} ids
+ * @returns {Promise<Map<string, object>>} id → the raw message resource
+ */
+export async function fetchMessageHeaders(ids) {
+  const found = new Map();
+  let pending = [...ids];
+
+  for (let attempt = 0; pending.length && attempt < 3; attempt++) {
+    if (attempt) await sleep(2 ** attempt * 400 + Math.random() * 200);
+
+    const retry = [];
+    const reply = await postBatch(
+      pending,
+      (id) =>
+        `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}` +
+        '?format=metadata&metadataHeaders=Subject&metadataHeaders=From' +
+        '&fields=snippet,internalDate,sizeEstimate,payload/headers&prettyPrint=false\r\n\r\n',
+      pending.length * UNIT_COST.get,
+      retry
+    );
+
+    // Null means the batch itself was refused; postBatch has already queued
+    // every id for another go.
+    if (reply) {
+      eachPart(reply.text, reply.contentType, pending, retry, (id, code, body) => {
+        // 404 is a message that has gone since it was listed. Asking again
+        // produces the same nothing.
+        if (code !== 200 || !body) return;
+        try {
+          found.set(id, JSON.parse(body));
+        } catch {
+          retry.push(id);
+        }
+      });
+    }
+
+    pending = retry;
+  }
+
+  return found;
+}
+
+/**
+ * One whole message, payload and all.
+ *
+ * No `fields` mask: the payload is a tree whose shape is not known in advance,
+ * and the parts that carry real weight — attachments — come back as an
+ * `attachmentId` and a size rather than as data, so `format=full` is not the
+ * large transfer it sounds like.
+ *
+ * Reading a message through the API does not mark it read, so opening one here
+ * changes nothing in the mailbox.
+ */
+export function getMessage(id) {
+  return call(`/messages/${encodeURIComponent(id)}`, { format: 'full' }, UNIT_COST.get);
+}
+
 /**
  * Send one multipart batch and hand back its raw reply.
  *

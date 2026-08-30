@@ -64,6 +64,13 @@
   --col-count: 19fr;
   --col-size: 17fr;
   --col-rate: 32fr;
+  /* One sender's mail: subject and first line, then the two sortable figures.
+     Same arithmetic as the sender table — shares, never widths — with one
+     fewer column, so the name track keeps most of what Frequency gave back.
+     Date is the tight one: "12 Aug 24" has to fit whole at a 320px panel. */
+  --col-mail: 46fr;
+  --col-msize: 20fr;
+  --col-date: 25fr;
   --col-gap: 8px;
   /* The tick column is the one fixed track, because a checkbox has a size
      rather than a share. The fractions divide whatever is left, so the table
@@ -1110,23 +1117,22 @@ body {
   background: var(--surface);
 }
 
-.sender--picked {
+.sender--picked,
+.mail--picked {
   background: var(--accent-soft);
 }
 
-/* The whole row toggles, so the box is a target rather than the target — 15px
-   is a small thing to hit in a list this dense. The label stretches over the
-   track to widen it a little further. */
+/* The tick is the only part of a row that toggles — the row itself opens what
+   is behind it — so the label stretches over the whole track, top to bottom.
+   That turns a 15px box into an 18px-by-row-height target, which is what makes
+   picking senders in a list this dense workable at all. */
 .sender-tick {
   display: flex;
+  align-self: stretch;
   align-items: center;
   justify-content: center;
   min-width: 0;
   cursor: pointer;
-}
-
-.sender-tick--head {
-  align-self: stretch;
 }
 
 .sender-tick input {
@@ -1179,6 +1185,208 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ── One sender's mail ───────────────────────────────────────── */
+/* Header and rows share one grid rule for the same reason the sender table
+   does: defining the columns twice is how the two drift apart. */
+.mail-head,
+.mail {
+  display: grid;
+  grid-template-columns:
+    var(--col-tick)
+    minmax(0, var(--col-mail))
+    minmax(0, var(--col-msize))
+    minmax(0, var(--col-date));
+  gap: var(--col-gap);
+  align-items: center;
+  padding: 0 var(--pad-x);
+}
+
+.mail-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The Mail column heading sorts nothing, so it is styled as a heading and not
+   as a control: no hover, no pointer, no focus ring inviting a press. */
+.col-head--static {
+  cursor: default;
+}
+
+.col-head--static:hover {
+  color: var(--faint);
+}
+
+.mail {
+  padding-top: 6px;
+  padding-bottom: 6px;
+  cursor: pointer;
+}
+
+.mail:hover {
+  background: var(--surface);
+}
+
+.mail-who {
+  min-width: 0;
+}
+
+/* Subject leads, first line under it — the shape Gmail uses, and the shape the
+   sender rows on the screen behind already use for address and display name. */
+.mail-subject,
+.mail-snippet {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mail-subject {
+  font-size: 12.5px;
+}
+
+/* A subject is a line of text, so its placeholder should read as one rather
+   than as the small pill a figure gets. */
+.mail-subject .skeleton {
+  width: 60%;
+  height: 10px;
+}
+
+.mail-snippet {
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* A message Gmail would not hand over still has a row — it is in the count
+   behind it — so it says so rather than showing an empty line. */
+.mail--gone .mail-subject {
+  color: var(--faint);
+  font-style: italic;
+}
+
+/* ── Pager ───────────────────────────────────────────────────── */
+/* Ten at a time, so the list is a page rather than a scroll with no end. The
+   window is the current page plus the next four; the arrows are what reach
+   anything outside it. */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 12px var(--pad-x) 16px;
+}
+
+.pager-btn {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.pager-btn:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.pager-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pager-btn--current {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ── One message ─────────────────────────────────────────────── */
+.message-view {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px var(--pad-x) 20px;
+}
+
+/* The view carries its own padding, so a note inside it must not add the list
+   indent on top. */
+.message-view .empty {
+  padding: 4px 0 10px;
+}
+
+.message-meta {
+  margin: 0 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.message-meta strong {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* Plain text, so the sender's own line breaks are the layout. `pre-wrap` keeps
+   them without letting a long URL push the panel sideways. */
+.message-text {
+  margin: 0;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message-note {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.message-files {
+  margin: 14px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  list-style: none;
+}
+
+.message-files li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.message-files span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-files span:last-child {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
 }
 
 /* ── Notices ─────────────────────────────────────────────────── */
