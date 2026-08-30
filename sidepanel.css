@@ -1045,6 +1045,15 @@ body {
 }
 
 /* ── Footer ──────────────────────────────────────────────────── */
+/* Not a Material Symbols glyph: the font is subsetted to the icons in use, so
+   a one-off square is cheaper drawn than re-subsetted. */
+.stop-icon {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+}
+
 /* Pinned below the scroll area: the list ends above the button, not under it. */
 .actions-bar {
   flex: 0 0 auto;

@@ -188,11 +188,13 @@ export function getLabel(id) {
  *
  * @returns {Promise<string[]>}
  */
-export async function listMessageIds(labelId, query) {
+export async function listMessageIds(labelId, query, stopped) {
   const ids = [];
   let pageToken;
 
   for (let page = 0; page < MAX_PAGES; page++) {
+    if (stopped?.()) break;
+
     const data = await call(
       '/messages',
       {
@@ -246,11 +248,11 @@ const MAX_ATTEMPTS = 4;
  * `onBatch(found)` fires with each batch's results as they land, so a long
  * first run can report progress instead of going quiet.
  */
-export async function fetchMessageMeta(ids, onBatch) {
+export async function fetchMessageMeta(ids, onBatch, stopped) {
   const meta = new Map();
   let pending = [...ids];
 
-  for (let attempt = 0; pending.length && attempt < MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 0; pending.length && attempt < MAX_ATTEMPTS && !stopped?.(); attempt++) {
     if (attempt) await sleep(2 ** attempt * 500 + Math.random() * 400);
 
     const chunks = [];
@@ -264,6 +266,9 @@ export async function fetchMessageMeta(ids, onBatch) {
     await Promise.all(
       Array.from({ length: Math.min(BATCH_CONCURRENCY, chunks.length) }, async () => {
         while (cursor < chunks.length) {
+          // Checked per batch rather than per message: a batch is already in
+          // flight and its results are worth keeping.
+          if (stopped?.()) return;
           const chunk = chunks[cursor++];
           const found = await runBatch(chunk, retry);
           for (const [id, entry] of found) meta.set(id, entry);

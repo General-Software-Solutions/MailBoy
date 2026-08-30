@@ -259,7 +259,7 @@ const FLUSH_AFTER_MS = 60_000;
  * can show where it has got to; `found` maps id → bytes. Ids already known are
  * filtered out of it, so a caller keeping running totals cannot double-count.
  */
-export async function ensureMeta(ids, onBatch) {
+export async function ensureMeta(ids, onBatch, stopped) {
   await loadMessages();
 
   // Includes entries that predate dates: same 5 quota units, and re-reading is
@@ -271,7 +271,7 @@ export async function ensureMeta(ids, onBatch) {
   let sinceFlush = 0;
   let lastFlush = Date.now();
 
-  await fetchMessageMeta(missing, (found) => {
+  const onFound = (found) => {
     const fresh = new Map();
     let written = 0;
 
@@ -301,7 +301,9 @@ export async function ensureMeta(ids, onBatch) {
       // Deliberately not awaited: measuring should not stall on a disk write.
       void flushMessages();
     }
-  });
+  };
+
+  await fetchMessageMeta(missing, onFound, stopped);
 }
 
 /** Writes are serialised: an interval flush must not overlap the final one. */

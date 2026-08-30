@@ -47,6 +47,9 @@ let progress = null;
 
 let running = false;
 
+/** Set by a stop from the panel; cleared when a fresh pass begins. */
+let stopping = false;
+
 function broadcast(message) {
   for (const port of ports) {
     try {
@@ -76,6 +79,17 @@ chrome.runtime.onConnect.addListener((port) => {
 
 // ── The job ──────────────────────────────────────────────────────
 
+/**
+ * Stop arrives as a one-off message rather than over the port, so it lands
+ * even if the panel is between reconnects. It also clears the alarm — a pass
+ * the user stopped must not quietly resume a minute later.
+ */
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== 'stop') return;
+  stopping = true;
+  void chrome.alarms.clear(ALARM);
+});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) void measure();
 });
@@ -87,6 +101,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 async function measure(order) {
   if (running) return;
   running = true;
+  stopping = false;
 
   // Set before any await: if this pass dies halfway, the alarm is what brings
   // it back.
@@ -95,14 +110,19 @@ async function measure(order) {
   try {
     const queue = order ?? (await buildQueue());
 
-    await ensureMeta(queue, (found, done, total) => {
-      progress = { done, total };
-      broadcast({ type: 'progress', done, total, sizes: Object.fromEntries(found) });
-    });
+    await ensureMeta(
+      queue,
+      (found, done, total) => {
+        progress = { done, total };
+        broadcast({ type: 'progress', done, total, sizes: Object.fromEntries(found) });
+      },
+      () => stopping
+    );
 
+    // Whatever was read before the stop is still worth keeping.
     await flushMessages(new Set(queue));
     progress = null;
-    broadcast({ type: 'done' });
+    broadcast({ type: stopping ? 'stopped' : 'done' });
     await chrome.alarms.clear(ALARM);
   } catch (err) {
     console.error('[MailBoy] measuring failed:', err);

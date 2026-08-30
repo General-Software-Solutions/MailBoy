@@ -132,19 +132,21 @@ const rowsOf = (groups) => [...groups.defaults, ...groups.user];
  *
  * @returns {Promise<Map<string, string[]>>} row id → exactly the ids its number counts
  */
-async function enumerateRows(groups, onRow) {
+async function enumerateRows(groups, onRow, stopped) {
   const rows = rowsOf(groups);
   const isUser = new Set(groups.user.map((row) => row.id));
   const counted = new Map();
 
   await pool(rows, LIST_CONCURRENCY, async (row) => {
+    if (stopped?.()) return;
     const filed = isUser.has(row.id);
     try {
       // A row can carry its own scope — the categories are narrowed to the
       // inbox so they partition it rather than counting archived mail twice.
       const ids = await listMessageIds(
         row.id,
-        row.scope ? SCOPES[row.scope] : filed ? UNFILED_QUERY : undefined
+        row.scope ? SCOPES[row.scope] : filed ? UNFILED_QUERY : undefined,
+        stopped
       );
       counted.set(row.id, ids);
       onRow?.(row, ids, filed);
@@ -207,6 +209,7 @@ export async function buildQueue() {
  */
 export async function collect(groups, hooks = {}) {
   const rows = rowsOf(groups);
+  const stopped = hooks.stopped ?? (() => false);
 
   /**
    * Sparse on purpose: a missing key means "not known yet" and leaves the
@@ -234,6 +237,7 @@ export async function collect(groups, hooks = {}) {
   // and for a user row it is the tooltip's "in the label" figure. Deliberately
   // not awaited here — it runs alongside the listing rather than delaying it.
   const provisional = pool(rows, LIST_CONCURRENCY, async (row) => {
+    if (stopped()) return;
     try {
       // Google's precomputed total counts the whole label. For a scoped row
       // that is a different number entirely, so it is no head start at all.
@@ -269,24 +273,33 @@ export async function collect(groups, hooks = {}) {
   let listed = 0;
   hooks.onCounting?.(0, rows.length);
 
-  const counted = await enumerateRows(groups, (row, ids, filed) => {
-    if (!ids) {
-      // A label that would not enumerate may still have a provisional total,
-      // and a real number beats a dash.
-      records[row.id] = records[row.id] ?? null;
-    } else {
-      records[row.id] = filed
-        ? { count: ids.length, total: totals.get(row.id) }
-        : { count: ids.length };
-    }
-    hooks.onCounting?.(++listed, rows.length);
-    emit();
-  });
+  const counted = await enumerateRows(
+    groups,
+    (row, ids, filed) => {
+      if (!ids) {
+        // A label that would not enumerate may still have a provisional total,
+        // and a real number beats a dash.
+        records[row.id] = records[row.id] ?? null;
+      } else {
+        records[row.id] = filed
+          ? { count: ids.length, total: totals.get(row.id) }
+          : { count: ids.length };
+      }
 
-  // Available to a drill-down from here on, before sizes are in: the ids are
-  // final, only what is known about each message is still filling in.
-  counts = counted;
-  void saveMembership(counted);
+      hooks.onCounting?.(++listed, rows.length);
+      emit();
+    },
+    stopped
+  );
+
+  // A stopped enumeration is partial, and partial membership is worse than
+  // none: it would drop ids for every row it did not reach.
+  if (!stopped()) {
+    // Available to a drill-down from here on, before sizes are in: the ids are
+    // final, only what is known about each message is still filling in.
+    counts = counted;
+    void saveMembership(counted);
+  }
 
   await provisional;
 
@@ -320,7 +333,7 @@ export async function collect(groups, hooks = {}) {
   const outstanding = order.filter((id) => !isMeasured(id)).length;
   hooks.onSizes?.(snapshot(records), 0, outstanding);
 
-  if (outstanding && hooks.measure) {
+  if (outstanding && hooks.measure && !stopped()) {
     await hooks.measure(order, (found, done, total) => {
       for (const [id, bytes] of found) {
         for (const rowId of owners.get(id) ?? []) {

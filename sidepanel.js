@@ -36,6 +36,9 @@ const el = {
   connect: document.getElementById('btn-connect'),
   logout: document.getElementById('btn-logout'),
   refresh: document.getElementById('btn-refresh'),
+  refreshIcon: document.getElementById('refresh-icon'),
+  stopIcon: document.getElementById('stop-icon'),
+  refreshLabel: document.getElementById('refresh-label'),
   welcomeError: document.getElementById('welcome-error'),
   account: document.getElementById('account'),
   avatarPhoto: document.getElementById('avatar-photo'),
@@ -64,6 +67,12 @@ const el = {
 };
 
 let loading = false;
+
+/** Raised by the stop button; cleared when the next load starts. */
+let stopRequested = false;
+
+/** Resolves the moment stop is pressed, so nothing has to wait out a reply. */
+let stopSignal = null;
 
 /** Survives the re-render a failed retry causes, so the panel doesn't collapse
  *  the details someone just opened to read. */
@@ -331,8 +340,12 @@ let ticker = null;
 
 function setBusy(running) {
   busy = running;
-  el.refresh.disabled = running;
-  el.refresh.querySelector('.icon').classList.toggle('icon--spin', running);
+
+  // The one button does both jobs: it is how you start a refresh and the only
+  // way to call one off, so it is never disabled.
+  el.refreshIcon.hidden = running;
+  el.stopIcon.hidden = !running;
+  el.refreshLabel.textContent = running ? 'Stop refreshing' : 'Refresh current data';
   el.detailSpinner.hidden = !running;
   paintProgress();
   setFooter();
@@ -892,18 +905,43 @@ function renderErrorState(err) {
  * takes minutes and nobody should have to sit and watch it. The panel is only
  * a viewer here: it can come and go, and the pass carries on.
  */
+/**
+ * Call off whatever is running.
+ *
+ * The panel's half stops on the next check; the worker's half is told over a
+ * one-off message rather than the port, so it lands even between reconnects —
+ * and the worker clears its alarm, or the pass would resume a minute later.
+ */
+function stopLoad() {
+  if (!busy) return;
+  stopRequested = true;
+
+  // Tell the worker, but do not wait to hear back. It stops on its own; the
+  // panel has no reason to sit through a batch that is already in flight.
+  chrome.runtime.sendMessage({ type: 'stop' }).catch(() => {});
+  stopSignal?.();
+  setFooter();
+}
+
 async function measureInWorker(order, onBatch) {
   // A killed worker drops the port. It resumes on its own from the alarm, so
   // reconnecting and asking again is all that is needed — and because the
   // cache filters what it has already read, nothing is measured twice.
-  for (let attempt = 0; attempt < 60; attempt++) {
+  for (let attempt = 0; attempt < 60 && !stopRequested; attempt++) {
     const outcome = await new Promise((resolve, reject) => {
       const port = chrome.runtime.connect({ name: 'measure' });
+
+      // Pressing stop ends the wait here and now, whatever the worker is
+      // mid-way through.
+      stopSignal = () => {
+        port.disconnect();
+        resolve('done');
+      };
 
       port.onMessage.addListener((message) => {
         if (message?.type === 'progress') {
           onBatch(new Map(Object.entries(message.sizes ?? {})), message.done, message.total);
-        } else if (message?.type === 'done') {
+        } else if (message?.type === 'done' || message?.type === 'stopped') {
           port.disconnect();
           resolve('done');
         } else if (message?.type === 'failed') {
@@ -918,6 +956,7 @@ async function measureInWorker(order, onBatch) {
       port.postMessage({ type: 'start', order });
     });
 
+    stopSignal = null;
     if (outcome === 'done') return;
     await new Promise((done) => setTimeout(done, 1000));
   }
@@ -955,6 +994,8 @@ async function load({ force = false } = {}) {
   membershipReady = restoreMembership();
 
   loading = true;
+  stopRequested = false;
+  stopSignal = null;
   setBusy(true);
 
   try {
@@ -982,6 +1023,7 @@ async function load({ force = false } = {}) {
         setProgress('measuring', done, total);
       },
       measure: measureInWorker,
+      stopped: () => stopRequested,
     });
 
     paintRecords(counts);
@@ -989,9 +1031,11 @@ async function load({ force = false } = {}) {
     setBusy(false);
     setFooter(generatedAt);
 
-    await chrome.storage.local.set({
-      [CACHE_KEY]: { generatedAt, groups, counts },
-    });
+    if (!stopRequested) {
+      await chrome.storage.local.set({
+        [CACHE_KEY]: { generatedAt, groups, counts },
+      });
+    }
   } catch (err) {
     setProgress(null);
     console.error('[MailBoy] load failed:', err);
@@ -1096,7 +1140,7 @@ async function handleLogout() {
 
 el.logout.addEventListener('click', () => handleLogout());
 
-el.refresh.addEventListener('click', () => load({ force: true }));
+el.refresh.addEventListener('click', () => (busy ? stopLoad() : load({ force: true })));
 
 // Delegated, because the rows are rebuilt on every render.
 el.groups.addEventListener('click', (event) => {
