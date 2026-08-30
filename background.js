@@ -15,6 +15,7 @@
 // inactivity, and while a batch every couple of seconds keeps it alive, that
 // is a happy accident and never something to depend on.
 
+import { activeAccount } from './src/account.js';
 import { AuthError } from './src/auth.js';
 import { buildQueue } from './src/mailbox.js';
 import { ensureMeta, flushMessages } from './src/messages.js';
@@ -103,11 +104,20 @@ async function measure(order) {
   running = true;
   stopping = false;
 
-  // Set before any await: if this pass dies halfway, the alarm is what brings
-  // it back.
-  chrome.alarms.create(ALARM, { periodInMinutes: RESUME_MINUTES });
-
   try {
+    // Signed out, there is no mailbox to measure and nowhere to file the
+    // results. The alarm outlives a logout, so this is checked on every wake.
+    // Safe ahead of the alarm below: no work has been done yet, and a wake that
+    // got here from the alarm still has that alarm set.
+    if (!(await activeAccount())) {
+      await chrome.alarms.clear(ALARM);
+      return;
+    }
+
+    // Set before the pass starts: if it dies halfway, the alarm is what brings
+    // it back.
+    chrome.alarms.create(ALARM, { periodInMinutes: RESUME_MINUTES });
+
     const queue = order ?? (await buildQueue());
 
     await ensureMeta(

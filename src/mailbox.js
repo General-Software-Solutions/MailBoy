@@ -5,6 +5,7 @@
 // size and sender, neither of which can change. Counts come from enumerating
 // the labels every time, because that is both exact and nearly free.
 
+import { activeAccount, keyFor } from './account.js';
 import { AuthError, getLabel, listLabels, listMessageIds } from './gmail.js';
 import { buildGroups } from './labels.js';
 import { bySender, isMeasured, loadMessages, reloadMessages, sizeOf } from './messages.js';
@@ -28,7 +29,10 @@ const LIST_CONCURRENCY = 8;
  */
 let counts = new Map();
 
-const MEMBERSHIP_KEY = 'membership';
+const MEMBERSHIP_NAME = 'membership';
+
+/** The one key a mailbox's membership occupies, for erasing it. */
+export const membershipKey = (id) => keyFor(id, MEMBERSHIP_NAME);
 
 /**
  * Who is behind a label's number.
@@ -56,8 +60,11 @@ export function breakdownOf(labelId, sinceDay = 0) {
  */
 async function saveMembership(counted) {
   try {
+    const account = await activeAccount();
+    if (!account) return;
+
     await chrome.storage.local.set({
-      [MEMBERSHIP_KEY]: { savedAt: Date.now(), ids: Object.fromEntries(counted) },
+      [membershipKey(account)]: { savedAt: Date.now(), ids: Object.fromEntries(counted) },
     });
   } catch (err) {
     // Costs a breakdown until the next enumeration, never the panel.
@@ -77,16 +84,38 @@ export async function restoreMembership() {
   await loadMessages();
   if (counts.size) return;
   try {
-    const { [MEMBERSHIP_KEY]: stored } = await chrome.storage.local.get(MEMBERSHIP_KEY);
+    const account = await activeAccount();
+    if (!account) return;
+
+    const key = membershipKey(account);
+    const { [key]: stored } = await chrome.storage.local.get(key);
     if (stored?.ids) counts = new Map(Object.entries(stored.ids));
   } catch (err) {
     console.warn('[MailBoy] membership unreadable:', err);
   }
 }
 
-export function forgetMembership() {
+/**
+ * Drop the ids held in memory without touching disk — what leaving a mailbox
+ * needs, since a stored membership belongs to the account it was saved under
+ * and outlives the panel on purpose.
+ */
+export function resetMembership() {
   counts = new Map();
-  return chrome.storage.local.remove(MEMBERSHIP_KEY);
+}
+
+/**
+ * Erase one mailbox's membership. Defaults to the signed-in one; an explicit id
+ * sweeps expired data, which must leave the live in-memory set alone.
+ */
+export async function forgetMembership(account) {
+  const active = await activeAccount();
+  const id = account ?? active;
+
+  if (id === active) counts = new Map();
+  if (!id) return;
+
+  await chrome.storage.local.remove(membershipKey(id));
 }
 
 async function pool(items, limit, worker) {

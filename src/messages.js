@@ -9,15 +9,23 @@
 // Label membership is deliberately *not* cached. That does change, and
 // re-reading it costs 5 units per 500 ids, so it is cheaper to ask than to
 // keep correct.
+//
+// Every key here is namespaced by account (see ./account.js), which is what
+// lets the cache outlive a logout: erasing it was the only safe answer while
+// there was one global cache, and erasing it costs a multi-minute re-read.
 
+import { activeAccount, keyFor, keysFor } from './account.js';
 import { fetchMessageMeta } from './gmail.js';
 import { parseFrom } from './sender.js';
 
 /** Sharded so a refresh rewrites only the buckets it touched — chrome.storage
  *  re-serialises a whole key on every write. */
 const SHARDS = 16;
-const shardKey = (n) => `msg:${n}`;
-const SENDERS_KEY = 'msg:senders';
+const SHARD_NAMES = Array.from({ length: SHARDS }, (_, n) => `msg:${n}`);
+const SENDERS_NAME = 'msg:senders';
+
+/** Every key one mailbox's cache occupies, which is what erasing it removes. */
+export const messageKeys = (id) => keysFor(id, [...SHARD_NAMES, SENDERS_NAME]);
 
 /**
  * The cache before senders existed held bare byte counts and cannot answer who
@@ -93,33 +101,52 @@ function intern(from) {
 /** In-flight read, so two callers starting at once do the work once. */
 let loading = null;
 
+/**
+ * Which mailbox the map in memory describes.
+ *
+ * The panel and the service worker each hold their own copy, and either can
+ * outlive an account switch — the worker especially, since it is woken by an
+ * alarm rather than by anything the user did. A copy left over from the
+ * previous account would answer for the wrong mailbox and, worse, be written
+ * back under the new one's keys.
+ */
+let loadedFor = null;
+
 /** Load the cache into memory. A cold cache is a normal path, not a failure. */
-export function loadMessages() {
-  if (messages) return Promise.resolve();
-  loading ??= readAll().finally(() => {
+export async function loadMessages() {
+  const account = await activeAccount();
+  if (messages && loadedFor !== account) resetMessages();
+  if (messages) return;
+
+  loading ??= readAll(account).finally(() => {
     loading = null;
   });
   return loading;
 }
 
-async function readAll() {
+async function readAll(account) {
   messages = new Map();
   senders = [];
   senderIndex = new Map();
+  loadedFor = account;
 
-  const keys = [...Array.from({ length: SHARDS }, (_, n) => shardKey(n)), SENDERS_KEY];
+  // Signed out there is no mailbox to read for, and no namespace to read from.
+  if (!account) return;
 
   try {
-    const stored = await chrome.storage.local.get(keys);
+    const stored = await chrome.storage.local.get(messageKeys(account));
 
-    senders = Array.isArray(stored[SENDERS_KEY]) ? stored[SENDERS_KEY] : [];
+    const stash = stored[keyFor(account, SENDERS_NAME)];
+    senders = Array.isArray(stash) ? stash : [];
     senders.forEach((sender, index) => senderIndex.set(keyOf(sender), index));
 
-    for (let n = 0; n < SHARDS; n++) {
-      for (const [id, entry] of Object.entries(stored[shardKey(n)] ?? {})) {
+    for (const name of SHARD_NAMES) {
+      for (const [id, entry] of Object.entries(stored[keyFor(account, name)] ?? {})) {
         if (Array.isArray(entry)) messages.set(id, entry);
       }
     }
+
+    if (!messages.size) await adoptUnscoped(account);
   } catch (err) {
     console.warn('[MailBoy] message cache unreadable, starting empty:', err);
   }
@@ -128,14 +155,55 @@ async function readAll() {
 }
 
 /**
+ * Before the cache was namespaced by account it lived under bare `msg:` keys.
+ * Re-reading a mailbox costs minutes, so rather than drop that work those keys
+ * are adopted by the first account to look for a cache and find none of its
+ * own — which, on the install that wrote them, is the account that wrote them.
+ *
+ * Safe to delete once no install predates namespacing.
+ */
+async function adoptUnscoped(account) {
+  const stored = await chrome.storage.local.get([...SHARD_NAMES, SENDERS_NAME]);
+
+  for (const name of SHARD_NAMES) {
+    for (const [id, entry] of Object.entries(stored[name] ?? {})) {
+      if (Array.isArray(entry)) messages.set(id, entry);
+    }
+  }
+  if (!messages.size) return;
+
+  senders = Array.isArray(stored[SENDERS_NAME]) ? stored[SENDERS_NAME] : [];
+  senderIndex = new Map();
+  senders.forEach((sender, index) => senderIndex.set(keyOf(sender), index));
+
+  for (let n = 0; n < SHARDS; n++) dirty.add(n);
+  sendersDirty = true;
+
+  // Only drop the originals once the namespaced copy is actually on disk.
+  await flushMessages();
+  await chrome.storage.local.remove([...SHARD_NAMES, SENDERS_NAME]);
+}
+
+/**
+ * Drop the in-memory copy without touching disk — what switching accounts
+ * needs, since what is held belongs to the mailbox being left.
+ */
+export function resetMessages() {
+  messages = null;
+  loading = null;
+  loadedFor = null;
+  senders = [];
+  senderIndex = new Map();
+  dirty.clear();
+  sendersDirty = false;
+}
+
+/**
  * Re-read from storage. The service worker owns the writing now, so a panel
  * that has been open across a measuring pass is holding a stale copy.
  */
 export async function reloadMessages() {
-  messages = null;
-  loading = null;
-  dirty.clear();
-  sendersDirty = false;
+  resetMessages();
   await loadMessages();
 }
 
@@ -322,16 +390,23 @@ export function flushMessages(seen) {
 async function write(seen) {
   if (!messages) return;
 
+  // Nobody signed in: keep the changes in memory rather than guessing at a
+  // mailbox to file them under. And never write a map that was read for a
+  // different account than the one signed in now — that is how one mailbox's
+  // messages would end up under another's keys.
+  const account = await activeAccount();
+  if (!account || loadedFor !== account) return;
+
   if (seen && messages.size > MAX_ENTRIES) prune(seen);
   if (!dirty.size && !sendersDirty) return;
 
   const payload = {};
-  for (const shard of dirty) payload[shardKey(shard)] = {};
+  for (const shard of dirty) payload[keyFor(account, SHARD_NAMES[shard])] = {};
   for (const [id, entry] of messages) {
-    const key = shardKey(shardOf(id));
+    const key = keyFor(account, SHARD_NAMES[shardOf(id)]);
     if (key in payload) payload[key][id] = entry;
   }
-  if (sendersDirty) payload[SENDERS_KEY] = senders;
+  if (sendersDirty) payload[keyFor(account, SENDERS_NAME)] = senders;
 
   dirty.clear();
   sendersDirty = false;
@@ -376,15 +451,17 @@ function prune(seen) {
   sendersDirty = true;
 }
 
-export async function clearMessages() {
-  messages = null;
-  senders = [];
-  senderIndex = new Map();
-  dirty.clear();
-  sendersDirty = false;
-  await chrome.storage.local.remove([
-    ...Array.from({ length: SHARDS }, (_, n) => shardKey(n)),
-    SENDERS_KEY,
-    ...LEGACY_KEYS,
-  ]);
+/**
+ * Erase one mailbox's cache. Defaults to the signed-in one; an explicit id is
+ * how expired data is swept, and that must not disturb what is in memory for
+ * whoever is signed in now.
+ */
+export async function clearMessages(account) {
+  const active = await activeAccount();
+  const id = account ?? active;
+
+  if (id === active) resetMessages();
+  if (!id) return;
+
+  await chrome.storage.local.remove([...messageKeys(id), ...LEGACY_KEYS]);
 }

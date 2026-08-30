@@ -116,6 +116,32 @@
         </button>
       </header>
 
+      <!-- ── Logging out ─────────────────────────────────────────── -->
+      <!-- Worth confirming for what it costs rather than for being hard to
+           undo: a mailbox whose data has gone must be read message by message
+           again, which is minutes. Buttons stack because three of them do not
+           fit across a side panel, and `method="dialog"` is what carries the
+           choice back as returnValue. -->
+      <dialog id="logout-dialog" class="dialog">
+        <form method="dialog">
+          <h2 class="dialog-title">Log out of MailBoy?</h2>
+          <p class="dialog-text">
+            What MailBoy has measured for
+            <strong id="logout-mailbox">this mailbox</strong> stays on this
+            device for 7 days, so signing back in is immediate. After that it is
+            erased, and the next sign-in do a full scan — which can
+            take many minutes on a large mailbox.
+          </p>
+          <div class="dialog-actions">
+            <button value="keep" class="btn btn--primary btn--sm">Log out</button>
+            <button value="erase" class="btn btn--ghost btn--sm dialog-danger">
+              Log out and erase data now
+            </button>
+            <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
+          </div>
+        </form>
+      </dialog>
+
       <!-- ── Mailbox ───────────────────────────────────────────── -->
       <section id="screen-main" class="screen" hidden>
         <div class="content">

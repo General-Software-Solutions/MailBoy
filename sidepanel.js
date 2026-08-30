@@ -1,4 +1,13 @@
 import {
+  activeAccount,
+  dropAccount,
+  expiredAccounts,
+  keyFor,
+  releaseAccount,
+  scopedKey,
+  setActiveAccount,
+} from './src/account.js';
+import {
   AuthCancelled,
   AuthError,
   getToken,
@@ -12,12 +21,15 @@ import {
   breakdownOf,
   collect,
   forgetMembership,
+  resetMembership,
   restoreMembership,
 } from './src/mailbox.js';
-import { clearMessages } from './src/messages.js';
+import { clearMessages, resetMessages } from './src/messages.js';
 
-const CACHE_KEY = 'snapshot';
-const IDENTITY_KEY = 'identity';
+// Both live in the signed-in account's namespace — see src/account.js. Bare
+// names, scoped at the point of use.
+const CACHE_NAME = 'snapshot';
+const IDENTITY_NAME = 'identity';
 
 /**
  * How stale the numbers may get before an open re-reads them.
@@ -35,6 +47,8 @@ const el = {
   main: document.getElementById('screen-main'),
   connect: document.getElementById('btn-connect'),
   logout: document.getElementById('btn-logout'),
+  logoutDialog: document.getElementById('logout-dialog'),
+  logoutMailbox: document.getElementById('logout-mailbox'),
   refresh: document.getElementById('btn-refresh'),
   refreshIcon: document.getElementById('refresh-icon'),
   stopIcon: document.getElementById('stop-icon'),
@@ -598,16 +612,14 @@ function renderBreakdown() {
 
   if (!senders.length) {
     el.senderHead.hidden = true;
-    el.senderRows.replaceChildren(
-      emptyNote(
-        !total
-          ? "Nothing here yet. If MailBoy is still going through your mailbox, this fills in once it's done."
-          : !cached
-            ? 'None of these messages have been read yet. They are measured in the background — check back shortly.'
-            : 'Nothing in this period.'
-      )
+    const note = emptyNote(
+      !total
+        ? "Nothing here yet. If MailBoy is still going through your mailbox, this fills in once it's done."
+        : !cached
+          ? 'None of these messages have been read yet. They are measured in the background — check back shortly.'
+          : 'Nothing in this period.'
     );
-    if (busy) el.senderRows.append(stillReading());
+    el.senderRows.replaceChildren(...(busy ? [stillReading(), note] : [note]));
     return;
   }
 
@@ -643,7 +655,10 @@ function renderBreakdown() {
     );
   }
 
-  if (busy) nodes.push(stillReading());
+  // First, not last: the list is as long as the mailbox has senders, so a
+  // trailing notice is below the fold and nobody scrolls to find out the list
+  // is still growing. Under the sticky header it is the first thing read.
+  if (busy) nodes.unshift(stillReading());
 
   el.senderRows.replaceChildren(...nodes);
   el.senders.scrollTop = scroll;
@@ -973,7 +988,10 @@ async function measureInWorker(order, onBatch) {
 /** Whether the snapshot on screen is recent enough to stand on its own. */
 async function isFresh() {
   try {
-    const { [CACHE_KEY]: cached } = await chrome.storage.local.get(CACHE_KEY);
+    const key = await scopedKey(CACHE_NAME);
+    if (!key) return false;
+
+    const { [key]: cached } = await chrome.storage.local.get(key);
     return Boolean(cached?.counts) && Date.now() - cached.generatedAt < REFRESH_AFTER_MS;
   } catch {
     return false;
@@ -1037,16 +1055,18 @@ async function load({ force = false } = {}) {
     setBusy(false);
     setFooter(generatedAt);
 
-    if (!stopRequested) {
+    const key = await scopedKey(CACHE_NAME);
+    if (key && !stopRequested) {
       await chrome.storage.local.set({
-        [CACHE_KEY]: { generatedAt, groups, counts },
+        [key]: { generatedAt, groups, counts },
       });
     }
   } catch (err) {
     setProgress(null);
     console.error('[MailBoy] load failed:', err);
     if (err instanceof AuthError) {
-      await chrome.storage.local.remove(CACHE_KEY);
+      const key = await scopedKey(CACHE_NAME);
+      if (key) await chrome.storage.local.remove(key);
       showWelcome('Gmail access expired. Please connect again.');
     } else {
       renderErrorState(err);
@@ -1064,7 +1084,7 @@ async function load({ force = false } = {}) {
 async function loadIdentity() {
   try {
     const info = await getUserInfo();
-    if (!info) return;
+    if (!info) return false;
 
     const email = info.email ?? null;
     const photo = info.picture ?? null;
@@ -1073,15 +1093,45 @@ async function loadIdentity() {
     setPhoto(photo);
 
     if (email) await rememberAccount(email);
-    await chrome.storage.local.set({ [IDENTITY_KEY]: { email, photo } });
+
+    // `sub` is what every cache key hangs off. Without it there is no namespace
+    // to write into, so the panel runs for this session and stores nothing —
+    // better than filing one mailbox's data under another's name.
+    if (!info.sub) return false;
+
+    const switched = await setActiveAccount(info.sub, email);
+    if (switched) forgetMailbox();
+
+    await chrome.storage.local.set({ [keyFor(info.sub, IDENTITY_NAME)]: { email, photo } });
+    return switched;
   } catch (err) {
     // Identity is decoration; never let it break the panel.
     console.warn('[MailBoy] identity unavailable:', err);
+    return false;
   }
 }
 
+/**
+ * Drop everything held about a mailbox, on disk or not. What is in memory
+ * describes the account being left, and the screen is still showing it.
+ */
+function forgetMailbox() {
+  resetMessages();
+  resetMembership();
+  sized.clear();
+  painted = {};
+  openLabel = null;
+  el.senderRows.replaceChildren();
+  el.groups.replaceChildren();
+  setProgress(null);
+  setFooter(null);
+}
+
 async function paintIdentityCache() {
-  const { [IDENTITY_KEY]: cached } = await chrome.storage.local.get(IDENTITY_KEY);
+  const key = await scopedKey(IDENTITY_NAME);
+  if (!key) return;
+
+  const { [key]: cached } = await chrome.storage.local.get(key);
   if (!cached) return;
   setAccount(cached.email);
   setPhoto(cached.photo);
@@ -1089,7 +1139,10 @@ async function paintIdentityCache() {
 
 /** Paint the last known good view instantly, then refresh behind it. */
 async function paintCache() {
-  const { [CACHE_KEY]: cached } = await chrome.storage.local.get(CACHE_KEY);
+  const key = await scopedKey(CACHE_NAME);
+  if (!key) return;
+
+  const { [key]: cached } = await chrome.storage.local.get(key);
   if (!cached?.groups) return;
 
   renderSkeleton(cached.groups);
@@ -1107,8 +1160,14 @@ el.connect.addEventListener('click', async () => {
   try {
     await getToken({ interactive: true });
     showMain();
-    // Header first, so it is populated even if the mailbox load fails.
+    // Header first, so it is populated even if the mailbox load fails — and
+    // because identity is what names the account whose cache the next two
+    // lines read.
     await loadIdentity();
+    // Signing back into a mailbox whose data is still here means `load` finds
+    // it fresh and returns without rendering, so the panel would sit empty.
+    // An unreadable cache is an emptier first frame, never a failed connect.
+    await paintCache().catch((err) => console.warn('[MailBoy] cache unreadable:', err));
     await load();
   } catch (err) {
     // Closing the Google window is a choice, not a failure worth shouting about.
@@ -1124,21 +1183,80 @@ el.connect.addEventListener('click', async () => {
   }
 });
 
+/** Every key one mailbox occupies. They are only ever erased together. */
+async function eraseAccountData(id) {
+  await clearMessages(id);
+  await forgetMembership(id);
+  await chrome.storage.local.remove([keyFor(id, CACHE_NAME), keyFor(id, IDENTITY_NAME)]);
+}
+
+/**
+ * Erase whatever was left by accounts signed out longer than the retention
+ * window. Housekeeping, so a failure is logged and the panel carries on.
+ */
+async function purgeExpired() {
+  try {
+    for (const id of await expiredAccounts()) {
+      await eraseAccountData(id);
+      await dropAccount(id);
+    }
+  } catch (err) {
+    console.warn('[MailBoy] could not purge expired data:', err);
+  }
+}
+
+/**
+ * Logging out is worth confirming because of what it costs, not because it is
+ * hard to undo: a mailbox whose data has gone has to be read message by
+ * message again, which is minutes rather than seconds.
+ *
+ * @returns {Promise<'keep' | 'erase' | null>} null if it was called off
+ */
+function confirmLogout() {
+  // showModal throws on an already-open dialog, which a second click would be.
+  if (el.logoutDialog.open) return Promise.resolve(null);
+
+  return new Promise((resolve) => {
+    el.logoutMailbox.textContent = el.account.textContent || 'this mailbox';
+    // Escape leaves the previous choice in place, so a second open would read
+    // as a confirmation of the first.
+    el.logoutDialog.returnValue = '';
+    el.logoutDialog.addEventListener(
+      'close',
+      () => {
+        const choice = el.logoutDialog.returnValue;
+        // Escape closes with no value at all, and Cancel closes with one that
+        // is neither. Anything but an explicit choice means no.
+        resolve(choice === 'keep' || choice === 'erase' ? choice : null);
+      },
+      { once: true }
+    );
+    el.logoutDialog.showModal();
+  });
+}
+
 async function handleLogout() {
+  const choice = await confirmLogout();
+  if (!choice) return;
+
+  // A pass still reading messages has no account to file them under once the
+  // sign-out lands, and its token is about to be revoked. The worker is told
+  // directly as well: it may be measuring from an earlier open, with this
+  // panel idle and unaware of it.
+  stopLoad();
+  chrome.runtime.sendMessage({ type: 'stop' }).catch(() => {});
+
   await logout();
-  await chrome.storage.local.remove([CACHE_KEY, IDENTITY_KEY]);
-  // Sizes are mail data. Signing out should leave nothing behind, even though
-  // rebuilding the cache is the slowest thing the panel does.
-  await clearMessages();
-  await forgetMembership();
-  sized.clear();
-  openLabel = null;
-  el.senderRows.replaceChildren();
-  painted = {};
-  el.groups.replaceChildren();
-  setProgress(null);
+
+  // Order matters: the data is keyed by the account, so it has to be erased
+  // while that account is still the active one.
+  const id = await activeAccount();
+  if (choice === 'erase' && id) await eraseAccountData(id);
+  await releaseAccount();
+
+  // Kept or erased, nothing about the mailbox stays on screen or in memory.
+  forgetMailbox();
   setBusy(false);
-  setFooter(null);
   setAccount(null);
   setPhoto(null);
   showWelcome(null);
@@ -1187,6 +1305,9 @@ setPeriod(periodKey);
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
+  // The dialog closes itself on Escape; without this the same press would also
+  // close the breakdown standing behind it.
+  if (el.logoutDialog.open) return;
   if (anyMenuOpen()) {
     closeMenus();
   } else if (!el.detail.hidden) {
@@ -1206,6 +1327,10 @@ document.addEventListener('keydown', (event) => {
     console.warn('[MailBoy] could not paint from cache:', err);
   });
 
+  // Data left by accounts nobody has signed back into. Not awaited: it touches
+  // nothing this open reads, and a slow sweep should not hold up the panel.
+  void purgeExpired();
+
   try {
     // Silent only: opening a sign-in window unprompted would be hostile.
     await getToken({ interactive: false });
@@ -1219,5 +1344,10 @@ document.addEventListener('keydown', (event) => {
   showMain();
   // Both already have a token, and the mailbox load should not queue behind a
   // userinfo round trip just to fill in the header.
-  await Promise.all([loadIdentity(), load()]);
+  const [switched] = await Promise.all([loadIdentity(), load()]);
+
+  // The silent renewal came back as a different mailbox from the one this open
+  // painted and loaded — everything on screen belongs to the account left
+  // behind, and `forgetMailbox` has already cleared it. Read the new one.
+  if (switched) await load({ force: true });
 })();

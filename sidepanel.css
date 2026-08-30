@@ -910,8 +910,9 @@ body {
   color: var(--faint);
 }
 
-/* Sits at the end of the list while more is still arriving, in place of the
-   card the mailbox screen uses. */
+/* Leads the list while more is still arriving, in place of the card the
+   mailbox screen uses. At the top because the list runs longer than the panel:
+   at the end it would sit below the fold, telling nobody anything. */
 .sender-more {
   display: flex;
   align-items: center;
@@ -947,6 +948,65 @@ body {
 
 .notice[hidden] {
   display: none;
+}
+
+/* ── Dialog ──────────────────────────────────────────────────── */
+/* A side panel is narrow enough that a dialog is effectively full width; the
+   margins are what keep it from reading as a second screen. */
+.dialog {
+  width: min(320px, calc(100% - 24px));
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 22%);
+}
+
+.dialog::backdrop {
+  background: rgb(0 0 0 / 38%);
+}
+
+.dialog-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dialog-text {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.dialog-text strong {
+  color: var(--text);
+  font-weight: 550;
+  /* An address is longer than the panel is wide and must not widen it. */
+  overflow-wrap: anywhere;
+}
+
+/* Stacked, because three buttons do not fit across a side panel. The order is
+   the order of the choices, not of their weight: the safe one is last so it
+   sits nearest the thumb. */
+.dialog-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dialog-actions .btn {
+  width: 100%;
+}
+
+.dialog-danger {
+  color: var(--danger);
+}
+
+.dialog-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 /* ── Error state ─────────────────────────────────────────────── */

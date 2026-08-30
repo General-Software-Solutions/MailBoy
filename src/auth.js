@@ -19,6 +19,17 @@ const REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke';
 const TOKEN_KEY = 'token';
 const HINT_KEY = 'accountHint';
 
+/**
+ * Set by an explicit logout, cleared by an explicit connect.
+ *
+ * Revoking the token is meant to end the grant, so a later `prompt=none`
+ * renewal should fail on its own — but revocation is a network call made on a
+ * best-effort basis, and if it does not land, Google's session is still live
+ * and a silent renewal signs the user straight back in on the next panel open.
+ * This makes the logout hold locally, whatever happened on the wire.
+ */
+const OUT_KEY = 'signedOut';
+
 /** Renew a little early so a request can't die mid-flight. */
 const EXPIRY_SKEW_MS = 60_000;
 
@@ -146,6 +157,7 @@ async function authorize(interactive) {
   const expiresAt = Date.now() + Number(params.get('expires_in') || 3600) * 1000;
   // Session storage keeps the token in memory only — it never touches disk.
   await chrome.storage.session.set({ [TOKEN_KEY]: { accessToken, expiresAt } });
+  await chrome.storage.local.remove(OUT_KEY);
 
   return accessToken;
 }
@@ -161,10 +173,18 @@ export async function getToken({ interactive = false } = {}) {
     return cached.accessToken;
   }
 
-  try {
-    return await authorize(false);
-  } catch (err) {
-    if (!interactive) throw err;
+  const { [OUT_KEY]: signedOut } = await chrome.storage.local.get(OUT_KEY);
+
+  // Someone who signed out stays signed out until they ask to come back. Only
+  // an interactive attempt — a press of Connect — gets past this.
+  if (signedOut) {
+    if (!interactive) throw new AuthError('Signed out of MailBoy.');
+  } else {
+    try {
+      return await authorize(false);
+    } catch (err) {
+      if (!interactive) throw err;
+    }
   }
 
   return authorize(true);
@@ -196,4 +216,5 @@ export async function logout() {
 
   await chrome.storage.session.remove(TOKEN_KEY);
   await chrome.storage.local.remove(HINT_KEY);
+  await chrome.storage.local.set({ [OUT_KEY]: true });
 }
