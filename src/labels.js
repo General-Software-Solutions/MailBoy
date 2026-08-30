@@ -7,14 +7,23 @@
 /**
  * Google's own folders worth surfacing, in reading order. Others are dropped.
  *
- * These five are where a message *is*, and it is in exactly one of them. Gmail
- * also returns UNREAD, STARRED and IMPORTANT, and those are deliberately not
- * here: they are states a message carries while sitting somewhere else, so a
- * starred inbox message would be counted twice in one section and their sizes
- * would overlap the rows above. They are also the same five the user-folder
- * query negates, which is what keeps the two sections consistent.
+ * These three are where *incoming* mail sits, and a message is in at most one
+ * of them.
+ *
+ * **SENT and DRAFT are deliberately not here.** MailBoy is about mail that
+ * arrived and needs sorting; a message you wrote is not something you file.
+ * Keeping them would also make deleting a folder dangerous, because Gmail
+ * labels *threads*: label a conversation and your own replies in it carry that
+ * label too. A folder delete that returns its mail to the inbox would then put
+ * your sent replies there. Excluding what you wrote — here, from user-folder
+ * counts, and from everything a delete acts on — is what makes that safe.
+ *
+ * Gmail also returns UNREAD, STARRED and IMPORTANT, and those are dropped for a
+ * different reason: they are states a message carries while sitting somewhere
+ * else, so a starred inbox message would be counted twice in one section and
+ * their sizes would overlap the rows above.
  */
-const MAILBOX_ORDER = ['INBOX', 'SENT', 'DRAFT', 'SPAM', 'TRASH'];
+const MAILBOX_ORDER = ['INBOX', 'SPAM', 'TRASH'];
 
 const CATEGORY_ORDER = [
   'CATEGORY_PERSONAL',
@@ -26,8 +35,6 @@ const CATEGORY_ORDER = [
 
 const DISPLAY_NAMES = {
   INBOX: 'Inbox',
-  SENT: 'Sent',
-  DRAFT: 'Drafts',
   SPAM: 'Spam',
   TRASH: 'Trash',
   CATEGORY_PERSONAL: 'Primary',
@@ -53,8 +60,15 @@ function byOrder(labels, order) {
  * Gmail encodes nesting in the name ("Work/Clients/Acme"), so we show the leaf
  * name and indent by depth. Membership is still flat — a child label's count
  * says nothing about its parent's.
+ *
+ * Exported because creating and deleting a folder both rebuild this list
+ * without re-reading the mailbox, and depth is not something the caller can
+ * patch by hand: adding "Work/Clients" turns an existing top-level
+ * "Work/Clients/Acme" into an indented child of it, three rows away.
+ *
+ * @param {{id: string, name: string}[]} labels raw labels, named by full path
  */
-function asTree(labels) {
+export function buildTree(labels) {
   const sorted = [...labels].sort((a, b) =>
     a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
   );
@@ -74,6 +88,13 @@ function asTree(labels) {
       name: parts.slice(depth).join('/'),
       fullName: label.name,
       depth: Math.min(depth, 3),
+      // Counts what arrived under this folder, not what you wrote in it. Gmail
+      // labels threads, so a conversation you replied to puts that label on
+      // your own replies too — and with Sent and Drafts no longer shown, a row
+      // counting them would be counting into folders that are not on screen.
+      // The same scope is what a delete acts on, which is what keeps a folder's
+      // number and the mail a delete touches the same set.
+      scope: 'incoming',
     };
   });
 }
@@ -108,12 +129,36 @@ function googleFolders(system) {
   return [...rows.slice(0, at + 1), ...categories, ...rows.slice(at + 1)];
 }
 
+/**
+ * The rows nested under `fullName`, deepest first.
+ *
+ * Nesting lives only in the name, so this is a string test and not a lookup:
+ * anything beginning `Work/` is inside `Work`. The trailing slash is what keeps
+ * a sibling called `Workshop` out of it.
+ *
+ * Deepest first because that is the order they have to be deleted in — Gmail
+ * removes only the label named, so taking the parent out first would leave its
+ * children behind as top-level folders for however long the rest of the pass
+ * takes, and orphan them for good if it failed in between.
+ *
+ * @param {{fullName?: string}[]} rows the user folders, as `asTree` returns them
+ * @returns {object[]}
+ */
+export function descendantsOf(rows, fullName) {
+  if (!fullName) return [];
+  const prefix = `${fullName}/`;
+
+  return rows
+    .filter((row) => row.fullName?.startsWith(prefix))
+    .sort((a, b) => b.fullName.length - a.fullName.length);
+}
+
 export function buildGroups(labels) {
   const system = labels.filter((label) => label.type === 'system');
   const user = labels.filter((label) => label.type === 'user');
 
   return {
     defaults: googleFolders(system),
-    user: asTree(user),
+    user: buildTree(user),
   };
 }

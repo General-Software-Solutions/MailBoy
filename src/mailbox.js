@@ -13,6 +13,10 @@ import { bySender, isMeasured, loadMessages, reloadMessages, sizeOf } from './me
 /** Rows that count something narrower than their whole label. */
 const SCOPES = {
   inbox: 'in:inbox',
+  // Mail that arrived, not mail you wrote. See the note on `scope` in
+  // labels.js — this is what keeps a folder delete from returning your own
+  // sent replies to your inbox.
+  incoming: '-in:sent -is:draft',
 };
 
 /** Listing is paced by the quota reserver, so concurrency only hides latency. */
@@ -102,6 +106,33 @@ export async function restoreMembership() {
  */
 export function resetMembership() {
   counts = new Map();
+}
+
+/**
+ * Patch membership after a folder is created or deleted, instead of enumerating
+ * again.
+ *
+ * A folder that has just been created holds nothing, and one that has just been
+ * deleted holds nothing that can still be reached, so both answers are known
+ * without asking Gmail. Worth having because enumeration is otherwise the only
+ * thing that writes here, and it runs at most once a day — without this a new
+ * folder's breakdown would read from whatever the last pass happened to know,
+ * which is nothing at all.
+ *
+ * @param {string[]} added label ids that now exist and are empty
+ * @param {string[]} removed label ids that are gone
+ */
+export function patchMembership({ added = [], removed = [] } = {}) {
+  // An empty map means `restoreMembership` has not finished — a panel that
+  // skipped enumeration restores in the background, and a click can beat it.
+  // Saving a patch of nothing would write a one-entry map over the real one and
+  // cost the next open every breakdown it has.
+  const restored = counts.size > 0;
+
+  for (const id of added) counts.set(id, []);
+  for (const id of removed) counts.delete(id);
+
+  if (restored) void saveMembership(counts);
 }
 
 /**

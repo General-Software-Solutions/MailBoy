@@ -14,13 +14,21 @@ import {
   logout,
   rememberAccount,
 } from './src/auth.js';
+import {
+  MAX_NAME,
+  createFolder,
+  deleteJobKey,
+  readDeleteJob,
+  validateFolderName,
+} from './src/folders.js';
 import { GmailError, getUserInfo, listLabels } from './src/gmail.js';
 import { formatAgo, formatBytes, formatRate, formatTimeLeft } from './src/format.js';
-import { buildGroups } from './src/labels.js';
+import { buildGroups, buildTree, descendantsOf } from './src/labels.js';
 import {
   breakdownOf,
   collect,
   forgetMembership,
+  patchMembership,
   resetMembership,
   restoreMembership,
 } from './src/mailbox.js';
@@ -49,6 +57,12 @@ const el = {
   logout: document.getElementById('btn-logout'),
   logoutDialog: document.getElementById('logout-dialog'),
   logoutMailbox: document.getElementById('logout-mailbox'),
+  deleteDialog: document.getElementById('delete-dialog'),
+  deleteName: document.getElementById('delete-name'),
+  deleteText: document.getElementById('delete-text'),
+  deleteTrash: document.getElementById('delete-trash'),
+  deleteTrashLabel: document.getElementById('delete-trash-label'),
+  deleteHint: document.getElementById('delete-hint'),
   refresh: document.getElementById('btn-refresh'),
   refreshIcon: document.getElementById('refresh-icon'),
   stopIcon: document.getElementById('stop-icon'),
@@ -151,7 +165,35 @@ function skeleton() {
   return Object.assign(document.createElement('span'), { className: 'skeleton' });
 }
 
-function renderRow(item) {
+// Material Symbols is bundled as a subset, so a new glyph would mean rebuilding
+// it. One-offs are inline SVG instead — see README.
+const ICON_ADD = '<path d="M8 3.5v9M3.5 8h9" />';
+const ICON_BIN =
+  '<path d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4" />';
+const ICON_CLOSE = '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />';
+
+/**
+ * @param {string} action what the delegated handler on `#groups` should do
+ * @param {string} path the glyph, as constant markup
+ */
+function actionButton(action, path, label, { danger = false } = {}) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = danger ? 'row-action row-action--danger' : 'row-action';
+  button.dataset.action = action;
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true">${path}</svg>`;
+  return button;
+}
+
+/**
+ * @param {{editable?: boolean}} [options] whether this row can be nested into
+ *   and removed. True only for Your Folders: Gmail's user labels are a flat
+ *   namespace that system labels are not part of, so there is nothing to create
+ *   under Inbox and nothing to delete about Sent.
+ */
+function renderRow(item, { editable = false } = {}) {
   const row = document.createElement('div');
   row.className = 'row';
   row.dataset.labelId = item.id;
@@ -183,17 +225,40 @@ function renderRow(item) {
   count.append(num, size);
 
   row.append(name, count);
+
+  if (editable) {
+    // The path, not the leaf: it is what a child's name has to be built from,
+    // and what identifies the subtree a delete has to take with it.
+    row.dataset.fullName = item.fullName ?? item.name;
+
+    const actions = document.createElement('span');
+    actions.className = 'row-actions';
+    actions.append(
+      actionButton('add', ICON_ADD, `New folder inside ${item.name}`),
+      actionButton('delete', ICON_BIN, `Delete ${item.name}`, { danger: true })
+    );
+    row.append(actions);
+  }
+
   return row;
 }
 
-function renderGroup(title, items, emptyText) {
+function renderGroup(title, items, emptyText, { editable = false } = {}) {
   const section = document.createElement('section');
   section.className = 'group';
 
   const heading = document.createElement('h2');
   heading.className = 'group-title';
   heading.textContent = title;
-  section.append(heading);
+
+  const head = document.createElement('div');
+  head.className = 'group-head';
+  head.append(heading);
+
+  // The heading's + is the only way to make a folder that sits at the top
+  // level; every other one nests into the row it is on.
+  if (editable) head.append(actionButton('add', ICON_ADD, 'New folder'));
+  section.append(head);
 
   if (!items.length) {
     const empty = document.createElement('p');
@@ -203,23 +268,53 @@ function renderGroup(title, items, emptyText) {
     return section;
   }
 
-  for (const item of items) section.append(renderRow(item));
+  for (const item of items) section.append(renderRow(item, { editable }));
   return section;
 }
+
+/** Rows a cached snapshot may still carry that the panel no longer shows. */
+const RETIRED = new Set(['SENT', 'DRAFT']);
 
 /**
  * A snapshot cached before the two groups were merged still carries the old
  * three, so read either shape rather than rendering a blank panel once.
+ *
+ * Retired rows are filtered here rather than left to the next load, because the
+ * 24-hour freshness gate means most opens never run one — Sent and Drafts would
+ * otherwise sit on screen for a day after they stopped being part of the
+ * product, showing counts nothing will ever refresh.
  */
 function defaultsOf(groups) {
-  return groups.defaults ?? [...(groups.mailboxes ?? []), ...(groups.categories ?? [])];
+  const rows = groups.defaults ?? [...(groups.mailboxes ?? []), ...(groups.categories ?? [])];
+  return rows.filter((row) => !RETIRED.has(row.id));
 }
 
+/**
+ * The folder list currently on screen.
+ *
+ * Held because creating and deleting a folder both patch this list and
+ * re-render rather than re-reading the mailbox — a new folder is empty and a
+ * deleted one is gone, so neither needs Gmail asked about it.
+ *
+ * @type {{defaults?: object[], user?: object[]} | null}
+ */
+let currentGroups = null;
+
 function renderSkeleton(groups) {
+  currentGroups = groups;
   el.groups.replaceChildren(
     renderGroup('Google Default Folders', defaultsOf(groups), 'None found.'),
-    renderGroup('Your Folders', groups.user ?? [], 'No folders of your own yet.')
+    renderGroup('Your Folders', groups.user ?? [], 'No folders of your own yet.', {
+      editable: true,
+    })
   );
+
+  // A re-render replaces the list wholesale, taking any open editor's DOM with
+  // it. Letting the reference go is what stops a create from writing into — and
+  // reporting errors against — a detached field nobody can see.
+  if (editor && !editor.box.isConnected) editor = null;
+
+  markWorkingRows();
 }
 
 /**
@@ -423,8 +518,55 @@ function secondsRemaining({ done, total, startedAt, startDone }) {
   return rate > 0 ? (total - done) / rate : null;
 }
 
+/**
+ * A folder being created or removed. It owns the status line for as long as it
+ * runs — it is the thing the user just asked for, and the load status it covers
+ * is still there afterwards.
+ */
+let actionStatus = null;
+
+/** The outcome of one, shown briefly and then given back. */
+let flashText = null;
+let flashTimer = null;
+
+const FLASH_MS = 7000;
+
+function setAction(text) {
+  actionStatus = text;
+  // An outcome supersedes whatever was being reported on the way to it.
+  if (text) clearFlash();
+  setFooter();
+}
+
+function clearFlash() {
+  flashText = null;
+  clearTimeout(flashTimer);
+  flashTimer = null;
+}
+
+function flash(text) {
+  clearFlash();
+  flashText = text;
+  flashTimer = setTimeout(() => {
+    flashText = null;
+    setFooter();
+  }, FLASH_MS);
+  setFooter();
+}
+
 function setFooter(timestamp = lastLoaded) {
   lastLoaded = timestamp;
+
+  // Both outrank the load: a refresh runs on its own schedule and says the same
+  // thing a second later, where these are answers to something just asked for.
+  if (actionStatus) {
+    el.footer.textContent = actionStatus;
+    return;
+  }
+  if (flashText) {
+    el.footer.textContent = flashText;
+    return;
+  }
 
   // Counting, warm or cold. Once it is done the counts on screen are final,
   // so the timestamp is honest even while sizes are still being read.
@@ -762,6 +904,485 @@ function anyMenuOpen() {
   return !el.sortMenu.hidden || !el.periodMenu.hidden;
 }
 
+// ── Creating and removing folders ────────────────────────────────
+//
+// Both are confined to Your Folders. Gmail's user labels are a flat namespace
+// that system labels are not part of, so there is nothing to create under Inbox
+// and nothing to delete about Sent — and offering the controls there would
+// promise something the API refuses.
+//
+// Creating is one call and lands instantly. Deleting is the asymmetric half:
+// `labels.delete` removes no mail at all, so what happens to the mail is
+// separate work that has to run *before* the label goes, and moving it to Trash
+// costs 5 quota units a message. That is why the delete is handed to the
+// service worker and only its outcome comes back here.
+
+const leafOf = (path) => path.split('/').pop();
+
+const emails = (n) => `${n.toLocaleString()} email${n === 1 ? '' : 's'}`;
+
+/** The user's folders as the last render knew them. */
+const folderRows = () => currentGroups?.user ?? [];
+
+const rowFor = (labelId) => el.groups.querySelector(`[data-label-id="${CSS.escape(labelId)}"]`);
+
+/**
+ * Write the patched folder list back to the cache.
+ *
+ * `generatedAt` is carried over rather than restamped: adding or removing a
+ * folder says nothing about how current the *counts* are, and restamping would
+ * push the next real load up to a day away. Nothing is written when there is no
+ * snapshot yet — the load that is coming will write a complete one.
+ */
+async function saveSnapshot() {
+  try {
+    const key = await scopedKey(CACHE_NAME);
+    if (!key || !currentGroups) return;
+
+    const { [key]: cached } = await chrome.storage.local.get(key);
+    if (!cached) return;
+
+    await chrome.storage.local.set({ [key]: { ...cached, groups: currentGroups, counts: painted } });
+  } catch (err) {
+    console.warn('[MailBoy] could not update the cached folder list:', err);
+  }
+}
+
+/** Short enough for the status line or the editor, with the detail in the log. */
+function describeWriteError(err) {
+  if (err instanceof AuthError) return 'Gmail access expired — reconnect and try again.';
+
+  if (err instanceof GmailError) {
+    if (err.status === 409) return 'Gmail already has a folder with that name.';
+    if (err.status === 400) return 'Gmail would not accept that name.';
+    if (err.status === 403) return 'Gmail turned down the change.';
+  }
+
+  // fetch() rejects with a TypeError when it never reached the server.
+  if (err instanceof TypeError) return "Couldn't reach Gmail.";
+
+  return 'Something went wrong.';
+}
+
+// ── The inline editor ────────────────────────────────────────────
+
+/** The open editor, if any — only ever one at a time. */
+let editor = null;
+
+function closeEditor() {
+  editor?.box.remove();
+  editor = null;
+}
+
+function showEditorError(message) {
+  if (!editor) return;
+  editor.error.textContent = message;
+  editor.error.hidden = false;
+}
+
+function setEditorBusy(working) {
+  if (!editor) return;
+  editor.working = working;
+  editor.input.disabled = working;
+  editor.create.disabled = working;
+  editor.create.textContent = working ? 'Creating…' : 'Create';
+}
+
+/**
+ * Open the name field in the place the folder is going to appear — under its
+ * parent, at the child indent. The position is the explanation, so nothing has
+ * to say in words which folder this will end up inside.
+ *
+ * @param {{parent?: string, depth?: number, after?: Element, into?: Element}} where
+ *   `after` puts it under a row; `into` puts it at the top of a section, which
+ *   is what the heading's + wants.
+ */
+function openEditor({ parent = '', depth = 0, after = null, into = null }) {
+  closeEditor();
+
+  const box = document.createElement('div');
+  box.className = 'folder-new';
+
+  const line = document.createElement('div');
+  line.className = 'folder-editor';
+  line.dataset.depth = String(Math.min(depth, 3));
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'folder-input';
+  // The ceiling is on the whole path, so a deeply nested folder has less of it
+  // left to spend on its own name.
+  input.maxLength = Math.max(1, MAX_NAME - (parent ? parent.length + 1 : 0));
+  input.placeholder = parent ? `New folder in ${leafOf(parent)}` : 'New folder';
+  input.setAttribute('aria-label', input.placeholder);
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+
+  const create = document.createElement('button');
+  create.type = 'button';
+  create.className = 'btn btn--primary btn--sm';
+  create.textContent = 'Create';
+
+  const cancel = actionButton('cancel', ICON_CLOSE, 'Cancel');
+
+  const error = document.createElement('p');
+  error.className = 'folder-error';
+  error.hidden = true;
+
+  line.append(input, create, cancel);
+  box.append(line, error);
+
+  if (after) after.after(box);
+  else if (into) into.querySelector('.group-head').after(box);
+  else return;
+
+  editor = { box, input, create, error, parent, working: false };
+
+  create.addEventListener('click', () => void submitCreate());
+  cancel.addEventListener('click', closeEditor);
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void submitCreate();
+    } else if (event.key === 'Escape') {
+      // Stopped here so the same press does not also close the breakdown or
+      // whatever else the document handler would reach for.
+      event.preventDefault();
+      event.stopPropagation();
+      closeEditor();
+    }
+  });
+
+  // Typing is the fix for whatever the last attempt was told off for.
+  input.addEventListener('input', () => {
+    editor.error.hidden = true;
+  });
+
+  input.focus();
+}
+
+async function submitCreate() {
+  if (!editor || editor.working) return;
+
+  const existing = folderRows().map((row) => row.fullName ?? row.name);
+  const check = validateFolderName(editor.input.value, { parent: editor.parent, existing });
+
+  if (check.error) {
+    showEditorError(check.error);
+    editor.input.focus();
+    return;
+  }
+
+  setEditorBusy(true);
+  setAction(`Creating “${leafOf(check.name)}”…`);
+
+  try {
+    const label = await createFolder(check.name);
+    closeEditor();
+    setAction(null);
+    addFolder(label);
+    flash(`Created “${leafOf(label.name)}”.`);
+  } catch (err) {
+    console.error('[MailBoy] could not create folder:', err);
+    setAction(null);
+
+    // The editor is gone if a refresh re-rendered the list underneath it, in
+    // which case the status line is the only place left to say so.
+    const reason = describeWriteError(err);
+    if (editor) {
+      setEditorBusy(false);
+      showEditorError(reason);
+      editor.input.focus();
+    }
+    flash(`Couldn't create the folder. ${reason}`);
+  }
+}
+
+/**
+ * Put a new folder on screen without re-reading anything.
+ *
+ * It cannot hold any mail, so its count is known to be 0 rather than unknown —
+ * which is why it gets a settled record instead of a spinner that would never
+ * resolve. The tree is rebuilt rather than spliced because a new "Work/Clients"
+ * turns an existing top-level "Work/Clients/Acme" into a child of it.
+ */
+function addFolder(label) {
+  if (!currentGroups) {
+    void load({ force: true });
+    return;
+  }
+
+  const raw = folderRows().map((row) => ({ id: row.id, name: row.fullName ?? row.name }));
+  raw.push({ id: label.id, name: label.name });
+
+  painted[label.id] = { count: 0, bytes: 0, pending: 0, settled: true };
+  sized.add(label.id);
+
+  renderSkeleton({ ...currentGroups, user: buildTree(raw) });
+  repaint();
+
+  patchMembership({ added: [label.id] });
+  void saveSnapshot();
+
+  rowFor(label.id)?.focus();
+}
+
+// ── Deleting ─────────────────────────────────────────────────────
+
+/** The delete in flight, if any. @type {{ids: string[], name: string} | null} */
+let deleteState = null;
+
+/**
+ * Dim the folders a delete is working through.
+ *
+ * They keep their numbers and stay on screen until the job actually finishes —
+ * removing a row at the click would claim a completion that a ten-minute Trash
+ * pass has not reached. Re-applied after every render, since the rows are
+ * rebuilt from scratch each time.
+ */
+function markWorkingRows() {
+  for (const row of el.groups.querySelectorAll('.row--working')) {
+    row.classList.remove('row--working');
+  }
+  for (const id of deleteState?.ids ?? []) rowFor(id)?.classList.add('row--working');
+}
+
+/** The hint tracks the box, because the two outcomes are genuinely different. */
+function paintDeleteHint() {
+  el.deleteHint.textContent = el.deleteTrash.checked
+    ? 'They go to Trash, where Gmail keeps them for 30 days. On a large folder this takes a while — MailBoy carries on in the background, so you can close the panel.'
+    : 'These emails will be appearing in your inbox (Primary, Social, Promotions, Updates, Forums).';
+}
+
+/**
+ * @returns {Promise<{trash: boolean} | null>} null if it was called off
+ */
+function askDelete(target, children, messages) {
+  // showModal throws on an already-open dialog, which a second click would be.
+  if (el.deleteDialog.open) return Promise.resolve(null);
+
+  el.deleteName.textContent = `“${target.name}”`;
+
+  const inside = children.length === 1 ? 'the folder inside it' : `the ${children.length} folders inside it`;
+  const holds = messages ? `Together they hold ${emails(messages)}.` : 'Neither holds any email.';
+
+  el.deleteText.textContent = children.length
+    ? `This also deletes ${inside}. ${holds}`
+    : messages
+      ? `It holds ${emails(messages)}.`
+      : 'It holds no email.';
+
+  // Nothing to move means there is no choice to offer.
+  const movable = messages > 0;
+  el.deleteTrash.closest('.checkbox').hidden = !movable;
+  el.deleteHint.hidden = !movable;
+  el.deleteTrashLabel.textContent = `Also move ${emails(messages)} to Trash`;
+
+  // Unticked every single time. Gmail's own folder delete never removes a
+  // message, and a box that remembers a previous yes is how mail gets deleted
+  // by accident.
+  el.deleteTrash.checked = false;
+  paintDeleteHint();
+
+  // Escape leaves the previous choice in place, so a second open would read as
+  // a confirmation of the first.
+  el.deleteDialog.returnValue = '';
+
+  return new Promise((resolve) => {
+    el.deleteDialog.addEventListener(
+      'close',
+      () => {
+        const confirmed = el.deleteDialog.returnValue === 'delete';
+        resolve(confirmed ? { trash: el.deleteTrash.checked } : null);
+      },
+      { once: true }
+    );
+    el.deleteDialog.showModal();
+  });
+}
+
+async function confirmDelete(labelId) {
+  if (deleteState) {
+    flash('MailBoy is still removing the last folder.');
+    return;
+  }
+
+  const rows = folderRows();
+  const target = rows.find((row) => row.id === labelId);
+  if (!target) return;
+
+  // Gmail removes only the label named, so a delete of "Work" would otherwise
+  // leave "Work/Clients" behind as a top-level folder with its full path for a
+  // name. Deepest first is also the order they have to go in.
+  const children = descendantsOf(rows, target.fullName ?? target.name);
+  const family = [...children, target];
+
+  // What the rows on screen add up to. A message carrying both a parent's label
+  // and a child's counts twice here — which is also what someone reading the
+  // two rows would work out, so the figure matches the panel even where it
+  // overstates the mailbox.
+  const messages = family.reduce((sum, row) => sum + (painted[row.id]?.count ?? 0), 0);
+
+  const choice = await askDelete(target, children, messages);
+  if (!choice) return;
+
+  deleteState = { ids: family.map((row) => row.id), name: target.name };
+  markWorkingRows();
+  setAction(`Deleting “${target.name}”…`);
+
+  folderChannel().postMessage({
+    type: 'delete',
+    job: {
+      trash: choice.trash,
+      labels: family.map((row) => ({
+        id: row.id,
+        name: row.name,
+        fullName: row.fullName ?? row.name,
+      })),
+      // No ratio worth reporting on the inbox path: it is one batchModify per
+      // thousand messages and over in about a second.
+      total: choice.trash ? messages : 0,
+    },
+  });
+}
+
+/** Take deleted folders off the screen and out of the cache. */
+function removeFolders(ids) {
+  if (!currentGroups || !ids.length) return;
+
+  const gone = new Set(ids);
+  const raw = folderRows()
+    .filter((row) => !gone.has(row.id))
+    .map((row) => ({ id: row.id, name: row.fullName ?? row.name }));
+
+  for (const id of gone) {
+    delete painted[id];
+    sized.delete(id);
+  }
+
+  renderSkeleton({ ...currentGroups, user: buildTree(raw) });
+  repaint();
+
+  patchMembership({ removed: ids });
+  void saveSnapshot();
+}
+
+function summariseDelete(message, name) {
+  const parts = [`Deleted “${name}”.`];
+
+  if (message.trashed) parts.push(`${emails(message.trashed)} moved to Trash.`);
+  else if (message.restored) parts.push(`${emails(message.restored)} moved to your inbox.`);
+
+  if (message.failed?.length) {
+    parts.push(`${message.failed.length.toLocaleString()} could not be moved.`);
+  }
+
+  return parts.join(' ');
+}
+
+// ── Talking to the worker about deletes ──────────────────────────
+
+/** @type {chrome.runtime.Port | null} */
+let folderPort = null;
+
+function folderChannel() {
+  if (folderPort) return folderPort;
+
+  const port = chrome.runtime.connect({ name: 'folders' });
+  folderPort = port;
+
+  port.onMessage.addListener(onFolderMessage);
+  port.onDisconnect.addListener(() => {
+    folderPort = null;
+    // The worker was killed mid-job. It comes back from its own alarm, and
+    // reconnecting is also what prompts it to pick a stranded record back up.
+    if (deleteState) {
+      setTimeout(() => {
+        if (deleteState) folderChannel();
+      }, 1000);
+    }
+  });
+
+  return port;
+}
+
+/** Nothing here re-sends the job: the worker owns it, and the record it wrote
+ *  before starting is what makes reconnecting safe. */
+function onFolderMessage(message) {
+  const name = deleteState?.name ?? message?.name ?? 'Folder';
+
+  if (message?.type === 'delete-progress') {
+    // `done` can fall short of `total`: a message under both a parent and a
+    // child is counted once per row that holds it, but Gmail only moves it
+    // once. Completion is the worker saying so, never the two meeting.
+    setAction(
+      message.total
+        ? `Deleting “${name}”… ${Math.min(message.done, message.total).toLocaleString()} of ${message.total.toLocaleString()}`
+        : `Deleting “${name}”…`
+    );
+    return;
+  }
+
+  if (message?.type === 'delete-done') {
+    const ids = deleteState?.ids ?? (message.labels ?? []).map((label) => label.id);
+    deleteState = null;
+    setAction(null);
+
+    removeFolders(ids);
+    flash(summariseDelete(message, name));
+
+    // Trashing mail and restoring it both change what other folders hold, so
+    // the numbers still on screen for those are now wrong. An empty folder
+    // changes nothing and is not worth a re-read.
+    if (message.trashed || message.restored) void load({ force: true });
+    return;
+  }
+
+  if (message?.type === 'delete-stopped') {
+    deleteState = null;
+    markWorkingRows();
+    setAction(null);
+    flash(`Stopped deleting “${name}”. The folder is still there.`);
+    return;
+  }
+
+  if (message?.type === 'delete-failed') {
+    console.error('[MailBoy] deleting folder failed:', message.message);
+    deleteState = null;
+    markWorkingRows();
+    setAction(null);
+    flash(`Couldn't finish deleting “${name}”.`);
+  }
+}
+
+/**
+ * Adopt a delete that is still running from a previous open, or one the worker
+ * was killed partway through.
+ *
+ * Without this the panel would look idle while folders quietly disappeared out
+ * from under it, and the rows involved would invite a second delete.
+ */
+/** Housekeeping at boot, so a failure here costs the dimming, never the panel. */
+function watchPendingDelete() {
+  adoptPendingDelete().catch((err) => {
+    console.warn('[MailBoy] could not pick up the pending delete:', err);
+  });
+}
+
+async function adoptPendingDelete() {
+  const job = await readDeleteJob();
+  if (!job || deleteState) return;
+
+  deleteState = {
+    ids: job.labels.map((label) => label.id),
+    name: job.labels.at(-1)?.name ?? '',
+  };
+  markWorkingRows();
+  setAction(`Deleting “${deleteState.name}”…`);
+  folderChannel();
+}
+
 // ── Error state ──────────────────────────────────────────────────
 
 const ICON_ALERT = `
@@ -939,7 +1560,10 @@ function stopLoad() {
 
   // Tell the worker, but do not wait to hear back. It stops on its own; the
   // panel has no reason to sit through a batch that is already in flight.
-  chrome.runtime.sendMessage({ type: 'stop' }).catch(() => {});
+  //
+  // Named, because this button is about refreshing. A delete has its own
+  // lifetime and pressing stop on a refresh must not abandon one half-done.
+  chrome.runtime.sendMessage({ type: 'stop', job: 'measure' }).catch(() => {});
   stopSignal?.();
   setFooter();
 }
@@ -1121,6 +1745,13 @@ function forgetMailbox() {
   sized.clear();
   painted = {};
   openLabel = null;
+  currentGroups = null;
+  closeEditor();
+  // Whatever was being deleted belonged to the mailbox being left. The job
+  // record survives under that account's namespace; this is only the panel
+  // letting go of it.
+  deleteState = null;
+  setAction(null);
   el.senderRows.replaceChildren();
   el.groups.replaceChildren();
   setProgress(null);
@@ -1169,6 +1800,9 @@ el.connect.addEventListener('click', async () => {
     // An unreadable cache is an emptier first frame, never a failed connect.
     await paintCache().catch((err) => console.warn('[MailBoy] cache unreadable:', err));
     await load();
+    // Signing back in within the retention window can find a delete that was
+    // interrupted by the sign-out still outstanding.
+    watchPendingDelete();
   } catch (err) {
     // Closing the Google window is a choice, not a failure worth shouting about.
     if (err instanceof AuthCancelled) {
@@ -1187,7 +1821,13 @@ el.connect.addEventListener('click', async () => {
 async function eraseAccountData(id) {
   await clearMessages(id);
   await forgetMembership(id);
-  await chrome.storage.local.remove([keyFor(id, CACHE_NAME), keyFor(id, IDENTITY_NAME)]);
+  await chrome.storage.local.remove([
+    keyFor(id, CACHE_NAME),
+    keyFor(id, IDENTITY_NAME),
+    // A half-finished delete is intent, not data, but it is keyed the same way
+    // and there is nothing left for it to act on once the rest of this is gone.
+    deleteJobKey(id),
+  ]);
 }
 
 /**
@@ -1266,19 +1906,57 @@ el.logout.addEventListener('click', () => handleLogout());
 
 el.refresh.addEventListener('click', () => (busy ? stopLoad() : load({ force: true })));
 
+/**
+ * The + on a row nests inside it; the + on the heading makes a top-level
+ * folder. Either way the editor opens where the folder will appear.
+ */
+function handleAdd(button) {
+  const row = button.closest('.row');
+
+  if (row) {
+    openEditor({
+      parent: row.dataset.fullName,
+      depth: Number(row.dataset.depth ?? 0) + 1,
+      after: row,
+    });
+    return;
+  }
+
+  openEditor({ into: button.closest('.group') });
+}
+
 // Delegated, because the rows are rebuilt on every render.
 el.groups.addEventListener('click', (event) => {
+  // Checked first: these sit inside a row that would otherwise take the click
+  // as "open the breakdown".
+  const action = event.target.closest('.row-action');
+  if (action) {
+    event.stopPropagation();
+    if (action.dataset.action === 'add') handleAdd(action);
+    else if (action.dataset.action === 'delete') {
+      void confirmDelete(action.closest('.row')?.dataset.labelId);
+    }
+    // 'cancel' belongs to the editor and is wired where it is built.
+    return;
+  }
+
   const row = event.target.closest('.row');
   if (row) void openBreakdown(row.dataset.labelId, row.dataset.labelName);
 });
 
 el.groups.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' && event.key !== ' ') return;
+  // The action buttons are real buttons and answer the keyboard themselves; the
+  // row must not also open a breakdown behind them.
+  if (event.target.closest('.row-action, .folder-editor')) return;
+
   const row = event.target.closest('.row');
   if (!row) return;
   event.preventDefault(); // Space would scroll the list.
   void openBreakdown(row.dataset.labelId, row.dataset.labelName);
 });
+
+el.deleteTrash.addEventListener('change', paintDeleteHint);
 
 el.back.addEventListener('click', closeBreakdown);
 
@@ -1305,11 +1983,15 @@ setPeriod(periodKey);
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  // The dialog closes itself on Escape; without this the same press would also
+  // A dialog closes itself on Escape; without this the same press would also
   // close the breakdown standing behind it.
-  if (el.logoutDialog.open) return;
+  if (el.logoutDialog.open || el.deleteDialog.open) return;
   if (anyMenuOpen()) {
     closeMenus();
+  } else if (editor) {
+    // Nearest thing first: an editor is open over the list, so the press is
+    // about that rather than about the screen it is on.
+    closeEditor();
   } else if (!el.detail.hidden) {
     closeBreakdown();
   }
@@ -1350,4 +2032,8 @@ document.addEventListener('keydown', (event) => {
   // painted and loaded — everything on screen belongs to the account left
   // behind, and `forgetMailbox` has already cleared it. Read the new one.
   if (switched) await load({ force: true });
+
+  // Last, because it dims rows the load has to have drawn first — and after
+  // any account switch, so it never adopts the outgoing mailbox's job.
+  watchPendingDelete();
 })();

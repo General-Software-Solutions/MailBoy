@@ -85,8 +85,10 @@
 
         <p class="fineprint">
           A Google sign-in window will open so you can choose an account.
-          MailBoy only ever gets read access, and talks to Gmail directly from
-          this browser — your mail is never sent to a server of ours.
+          MailBoy reads your mailbox, and adds or removes folders when you ask
+          it to — it can never delete a message for good. It talks to Gmail
+          directly from this browser, so your mail is never sent to a server of
+          ours.
         </p>
 
         <div id="welcome-error" class="notice notice--error" hidden></div>
@@ -136,6 +138,39 @@
             <button value="keep" class="btn btn--primary btn--sm">Log out</button>
             <button value="erase" class="btn btn--ghost btn--sm dialog-danger">
               Log out and erase data now
+            </button>
+            <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
+          </div>
+        </form>
+      </dialog>
+
+      <!-- ── Deleting a folder ───────────────────────────────────── -->
+      <!-- Confirmed because it is irreversible on Gmail's side: a deleted label
+           cannot be restored, and recreating it by name does not put any mail
+           back under it.
+
+           The checkbox is the only choice that touches mail, and it starts
+           unchecked because Gmail's own delete never removes a message. Left
+           alone, every email the folder held is moved to the inbox, so the
+           promise is one line and holds for all of them rather than for the
+           archived part only. Checked, it goes to Trash instead, where Gmail
+           keeps it for 30 days. -->
+      <dialog id="delete-dialog" class="dialog">
+        <form method="dialog">
+          <h2 class="dialog-title">
+            Delete <strong id="delete-name">this folder</strong>?
+          </h2>
+          <p class="dialog-text" id="delete-text"></p>
+
+          <label class="checkbox">
+            <input type="checkbox" id="delete-trash" />
+            <span id="delete-trash-label">Also move the emails to Trash</span>
+          </label>
+          <p class="checkbox-hint" id="delete-hint"></p>
+
+          <div class="dialog-actions">
+            <button value="delete" class="btn btn--primary btn--sm dialog-destructive">
+              Delete folder
             </button>
             <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
           </div>

@@ -1,27 +1,36 @@
 // MailBoy service worker.
 //
-// Two jobs: open the side panel from the toolbar, and own the slow half of the
-// data pass — reading every message for its size and sender.
+// Three jobs: open the side panel from the toolbar, own the slow half of the
+// data pass — reading every message for its size and sender — and empty a
+// folder that is being deleted.
 //
-// That work lives here rather than in the panel because it takes minutes on a
-// first run, and requiring someone to sit with the panel open for that is not
-// a reasonable thing to ask.
+// Both of the long ones live here rather than in the panel because they take
+// minutes, and requiring someone to sit with the panel open for that is not a
+// reasonable thing to ask.
 //
-// The job is deliberately stateless. Nothing about progress is persisted: no
-// cursor, no remaining-id list. Every wake rebuilds the queue from scratch and
-// the message cache filters out whatever is already known, so "start" and
-// "resume" are the same code path. That matters because a service worker can
-// be terminated at any instant — Chrome ends one after roughly 30 seconds of
-// inactivity, and while a batch every couple of seconds keeps it alive, that
-// is a happy accident and never something to depend on.
+// Neither keeps a cursor. The measuring queue is rebuilt from scratch on every
+// wake and the message cache filters out whatever is already known; a delete
+// re-lists its labels, and mail it has already moved no longer comes back in
+// that listing. So "start" and "resume" are one code path in both, which is
+// what makes a termination at any instant harmless — Chrome ends a worker after
+// roughly 30 seconds of inactivity, and while a batch every couple of seconds
+// keeps it alive, that is a happy accident and never something to depend on.
+//
+// A delete carries one small record all the same — which folders, and what to
+// do with their mail. That is intent, not progress: nothing in the mailbox can
+// tell the worker whether the user asked for Trash or for the inbox.
 
 import { activeAccount } from './src/account.js';
 import { AuthError } from './src/auth.js';
+import { clearDeleteJob, readDeleteJob, runDeleteJob, saveDeleteJob } from './src/folders.js';
 import { buildQueue } from './src/mailbox.js';
 import { ensureMeta, flushMessages } from './src/messages.js';
 
 const PORT_NAME = 'measure';
 const ALARM = 'measure';
+
+const FOLDER_PORT = 'folders';
+const DELETE_ALARM = 'folder-delete';
 
 /** Safety net: if the worker is killed mid-pass, this starts it again. */
 const RESUME_MINUTES = 1;
@@ -38,31 +47,61 @@ function openOnClick() {
 chrome.runtime.onInstalled.addListener(openOnClick);
 chrome.runtime.onStartup.addListener(openOnClick);
 
+// A browser restart takes the alarms with it, so a delete interrupted by one
+// would otherwise sit half-done until somebody opened the panel and noticed.
+chrome.runtime.onStartup.addListener(() => void resumeDelete());
+
 // ── Talking to the panel ─────────────────────────────────────────
 
 /** @type {Set<chrome.runtime.Port>} */
 const ports = new Set();
 
+/** @type {Set<chrome.runtime.Port>} */
+const folderPorts = new Set();
+
 /** Last progress seen, so a panel opening mid-pass is not left guessing. */
 let progress = null;
+
+/** The same, for a delete: `{done, total, name}`. */
+let deleteProgress = null;
 
 let running = false;
 
 /** Set by a stop from the panel; cleared when a fresh pass begins. */
 let stopping = false;
 
-function broadcast(message) {
-  for (const port of ports) {
+let deleting = false;
+let stoppingDelete = false;
+
+function broadcast(message, to = ports) {
+  for (const port of to) {
     try {
       port.postMessage(message);
     } catch {
       // The panel closed between the check and the send. Nothing to do.
-      ports.delete(port);
+      to.delete(port);
     }
   }
 }
 
 chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === FOLDER_PORT) {
+    folderPorts.add(port);
+    port.onDisconnect.addListener(() => folderPorts.delete(port));
+
+    if (deleteProgress) port.postMessage({ type: 'delete-progress', ...deleteProgress });
+
+    // Opening the panel is a recovery path in its own right. A job whose alarm
+    // was lost — cleared by a logout, or gone with a browser restart — would
+    // otherwise sit there with its folders half emptied and nothing to wake it.
+    if (!deleting) void resumeDelete();
+
+    port.onMessage.addListener((message) => {
+      if (message?.type === 'delete') void startDelete(message.job);
+    });
+    return;
+  }
+
   if (port.name !== PORT_NAME) return;
 
   ports.add(port);
@@ -84,15 +123,28 @@ chrome.runtime.onConnect.addListener((port) => {
  * Stop arrives as a one-off message rather than over the port, so it lands
  * even if the panel is between reconnects. It also clears the alarm — a pass
  * the user stopped must not quietly resume a minute later.
+ *
+ * `job` names which one to call off. The refresh button stops measuring only; a
+ * logout names nothing and stops everything, because the token both of them are
+ * using is about to be revoked.
  */
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type !== 'stop') return;
-  stopping = true;
-  void chrome.alarms.clear(ALARM);
+
+  if (!message.job || message.job === 'measure') {
+    stopping = true;
+    void chrome.alarms.clear(ALARM);
+  }
+
+  if (!message.job || message.job === 'delete') {
+    stoppingDelete = true;
+    void chrome.alarms.clear(DELETE_ALARM);
+  }
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) void measure();
+  if (alarm.name === DELETE_ALARM) void resumeDelete();
 });
 
 /**
@@ -149,5 +201,94 @@ async function measure(order) {
     }
   } finally {
     running = false;
+  }
+}
+
+// ── Deleting folders ─────────────────────────────────────────────
+
+/**
+ * Take a delete from the panel.
+ *
+ * The record is written before any work starts, so a worker killed on its very
+ * first await still leaves something for the alarm to find. Everything after
+ * this point goes through `runDelete`, which is also what the alarm calls —
+ * there is no separate resume path.
+ */
+async function startDelete(job) {
+  if (deleting) return;
+  const stamped = { ...job, startedAt: Date.now() };
+  await saveDeleteJob(stamped);
+  await runDelete(stamped);
+}
+
+/** What the alarm and a browser restart both come back to. */
+async function resumeDelete() {
+  if (deleting) return;
+  const job = await readDeleteJob();
+  if (job) await runDelete(job);
+}
+
+/**
+ * Move a folder's mail, then remove the folder.
+ *
+ * The record is cleared only on a completed run. A stop or a crash leaves it in
+ * place with the labels still there, which is exactly the state `runDeleteJob`
+ * knows how to pick up from — it re-lists each label and finds only the mail it
+ * has not dealt with yet.
+ */
+async function runDelete(job) {
+  if (deleting) return;
+  deleting = true;
+  stoppingDelete = false;
+
+  try {
+    // Signed out there is no token to spend and no mailbox to act on. The job
+    // record is namespaced to the account, so it waits rather than being lost.
+    if (!(await activeAccount())) {
+      await chrome.alarms.clear(DELETE_ALARM);
+      return;
+    }
+
+    // Before the first await that can be interrupted, same as the size pass.
+    chrome.alarms.create(DELETE_ALARM, { periodInMinutes: RESUME_MINUTES });
+
+    const name = job.labels.at(-1)?.name ?? '';
+    deleteProgress = { done: 0, total: job.total ?? 0, name };
+    broadcast({ type: 'delete-progress', ...deleteProgress }, folderPorts);
+
+    const outcome = await runDeleteJob(job, {
+      onProgress: (done, total) => {
+        deleteProgress = { done, total, name };
+        broadcast({ type: 'delete-progress', done, total, name }, folderPorts);
+      },
+      stopped: () => stoppingDelete,
+    });
+
+    deleteProgress = null;
+    await chrome.alarms.clear(DELETE_ALARM);
+
+    if (!outcome.complete) {
+      // Stopped, not finished. The record stays and the alarm above is gone, so
+      // nothing resumes until the panel asks again — which is what a stop means.
+      broadcast({ type: 'delete-stopped', ...outcome, name }, folderPorts);
+      return;
+    }
+
+    await clearDeleteJob();
+    broadcast({ type: 'delete-done', ...outcome, name, labels: job.labels }, folderPorts);
+  } catch (err) {
+    console.error('[MailBoy] deleting folder failed:', err);
+    deleteProgress = null;
+    broadcast({ type: 'delete-failed', message: err?.message ?? String(err) }, folderPorts);
+
+    // Same reasoning as the size pass: nothing here can re-grant a token, and
+    // hammering a refused API every minute helps no one. The record survives
+    // either way, so signing back in and reopening the panel picks it up.
+    await chrome.alarms.clear(DELETE_ALARM);
+    if (!(err instanceof AuthError)) {
+      chrome.alarms.create(DELETE_ALARM, { delayInMinutes: RETRY_MINUTES });
+    }
+  } finally {
+    deleting = false;
   }
 }

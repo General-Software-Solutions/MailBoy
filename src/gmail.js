@@ -22,7 +22,7 @@ const MAX_PAGES = 1000;
  * messages a second however they are batched. Pacing just under the ceiling
  * beats provoking 429s and backing off from them.
  */
-const UNIT_COST = { cheap: 1, list: 5, get: 5 };
+const UNIT_COST = { cheap: 1, list: 5, get: 5, write: 5, batchModify: 50 };
 const UNITS_PER_SECOND = 220;
 
 /** A request Gmail answered and refused, carrying enough to describe why. */
@@ -72,7 +72,16 @@ function call(path, params = {}, units = UNIT_COST.cheap) {
   return request(BASE + path, params, { units });
 }
 
-async function request(endpoint, params = {}, { units = UNIT_COST.cheap, attempt = 0 } = {}) {
+/**
+ * @param {{units?: number, attempt?: number, method?: string, body?: object}} options
+ *   `body` is sent as JSON and implies a write; the caller still picks `units`,
+ *   because Gmail prices writes very differently from each other.
+ */
+async function request(
+  endpoint,
+  params = {},
+  { units = UNIT_COST.cheap, attempt = 0, method = 'GET', body } = {}
+) {
   const url = new URL(endpoint);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) url.searchParams.set(key, value);
@@ -81,32 +90,41 @@ async function request(endpoint, params = {}, { units = UNIT_COST.cheap, attempt
   await reserve(units);
 
   const token = await getToken();
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const init = { method, headers: { Authorization: `Bearer ${token}` } };
+  if (body !== undefined) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(body);
+  }
 
+  const res = await fetch(url, init);
+
+  // 204 on a DELETE and on batchModify, so this is the ordinary success path
+  // for a write, not an edge case — readJson reads an empty body as {}.
   if (res.ok) return readJson(res);
 
   // A token Google no longer honours: drop it and renew silently, once.
+  //
+  // Safe to replay a write here: nothing has been applied, since the request
+  // never got past authorisation.
   if (res.status === 401 && attempt === 0) {
     await invalidateToken();
-    return request(endpoint, params, { units, attempt: attempt + 1 });
+    return request(endpoint, params, { units, attempt: attempt + 1, method, body });
   }
 
   if (res.status === 401 || res.status === 403) {
-    const body = await res.json().catch(() => ({}));
+    const refusal = await res.json().catch(() => ({}));
     const reason =
-      body?.error?.errors?.[0]?.reason ??
-      body?.error?.details?.find((detail) => detail.reason)?.reason ??
+      refusal?.error?.errors?.[0]?.reason ??
+      refusal?.error?.details?.find((detail) => detail.reason)?.reason ??
       '';
-    const message = body?.error?.message || `Gmail denied the request (${res.status}).`;
+    const message = refusal?.error?.message || `Gmail denied the request (${res.status}).`;
 
     // The UI only ever shows a summary, so keep the real reason reachable.
     console.error('[MailBoy] request rejected', endpoint, res.status, reason, message);
 
     // 403 is overloaded: rate limiting is retryable, the rest are not.
     if (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded') {
-      return backoffRetry(endpoint, params, { units, attempt });
+      return backoffRetry(endpoint, params, { units, attempt, method, body });
     }
 
     // Only a token problem is worth sending the user back to sign in. A
@@ -123,21 +141,22 @@ async function request(endpoint, params = {}, { units = UNIT_COST.cheap, attempt
   }
 
   if ((res.status === 429 || res.status >= 500) && attempt < 4) {
-    return backoffRetry(endpoint, params, { units, attempt });
+    return backoffRetry(endpoint, params, { units, attempt, method, body });
   }
 
-  const body = await res.json().catch(() => ({}));
-  throw new GmailError(body?.error?.message || `Gmail request failed (${res.status}).`, {
+  // `detail`, not `body`: that name is the request's own payload now.
+  const detail = await res.json().catch(() => ({}));
+  throw new GmailError(detail?.error?.message || `Gmail request failed (${res.status}).`, {
     status: res.status,
-    reason: body?.error?.errors?.[0]?.reason,
+    reason: detail?.error?.errors?.[0]?.reason,
   });
 }
 
-async function backoffRetry(endpoint, params, { units, attempt }) {
+async function backoffRetry(endpoint, params, { units, attempt, method, body }) {
   if (attempt >= 4) throw new Error('Gmail is rate limiting these requests.');
   const delay = 2 ** attempt * 400 + Math.random() * 300;
   await sleep(delay);
-  return request(endpoint, params, { units, attempt: attempt + 1 });
+  return request(endpoint, params, { units, attempt: attempt + 1, method, body });
 }
 
 // ── Identity ─────────────────────────────────────────────────────
@@ -173,6 +192,55 @@ export async function listLabels() {
  */
 export function getLabel(id) {
   return call(`/labels/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Create a folder.
+ *
+ * Nesting is encoded in the name and nowhere else — "Work/Clients/Acme" is a
+ * child of "Work/Clients" because of how it reads, not because of any link
+ * between them. So a subfolder is created by handing over the full path, and
+ * Gmail does not require the parent to exist.
+ *
+ * A duplicate name comes back 409, which is the one failure worth wording
+ * differently for the user, so it reaches the caller as a GmailError carrying
+ * that status rather than as a generic refusal.
+ *
+ * @param {string} name the full path, not the leaf
+ * @returns {Promise<{id: string, name: string}>}
+ */
+export function createLabel(name) {
+  return request(
+    `${BASE}/labels`,
+    {},
+    {
+      units: UNIT_COST.write,
+      method: 'POST',
+      // Both defaults already, stated so a Gmail-side change of default cannot
+      // quietly produce folders that do not show up in either list.
+      body: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' },
+    }
+  );
+}
+
+/**
+ * Remove a folder.
+ *
+ * **This deletes no mail.** Gmail strips the label from every message carrying
+ * it and leaves the messages alone, which is why anything done to that mail —
+ * moving it to Trash, or putting it back in the inbox — is separate work the
+ * caller does first, while it can still list what the label holds.
+ *
+ * It also removes only the label named: "Work/Clients" survives a delete of
+ * "Work", and then reads as a top-level folder called "Work/Clients". Deleting
+ * a subtree means one call per member of it.
+ */
+export async function deleteLabel(id) {
+  await request(
+    `${BASE}/labels/${encodeURIComponent(id)}`,
+    {},
+    { units: UNIT_COST.write, method: 'DELETE' }
+  );
 }
 
 /**
@@ -217,6 +285,49 @@ export async function listMessageIds(labelId, query, stopped) {
   }
 
   return ids;
+}
+
+// ── Moving messages ──────────────────────────────────────────────
+
+/** Gmail's ceiling on ids in one batchModify. */
+const MODIFY_CHUNK = 1000;
+
+/**
+ * Add and remove labels across many messages at once.
+ *
+ * The cheap half of the write API by a wide margin: 50 quota units moves up to
+ * a thousand messages, where trashing the same thousand costs 5,000. That is
+ * why putting a folder's mail back in the inbox is seconds and emptying it
+ * into Trash is minutes.
+ *
+ * **It cannot trash anything.** Gmail rejects TRASH, SPAM and DRAFT here, so
+ * moving mail to Trash goes through `trashMessages` and its per-message cost.
+ *
+ * @param {string[]} ids
+ * @param {{add?: string[], remove?: string[]}} change
+ * @returns {Promise<number>} how many were moved before a stop, if any
+ */
+export async function modifyMessages(ids, { add = [], remove = [] } = {}, stopped) {
+  let moved = 0;
+
+  for (let at = 0; at < ids.length; at += MODIFY_CHUNK) {
+    if (stopped?.()) break;
+    const chunk = ids.slice(at, at + MODIFY_CHUNK);
+
+    await request(
+      `${BASE}/messages/batchModify`,
+      {},
+      {
+        units: UNIT_COST.batchModify,
+        method: 'POST',
+        body: { ids: chunk, addLabelIds: add, removeLabelIds: remove },
+      }
+    );
+
+    moved += chunk.length;
+  }
+
+  return moved;
 }
 
 // ── Message sizes ────────────────────────────────────────────────
@@ -290,6 +401,56 @@ export async function fetchMessageMeta(ids, onBatch, stopped) {
  * @returns {Promise<Map<string, number>>}
  */
 async function runBatch(ids, retry) {
+  const reply = await postBatch(
+    ids,
+    (id) =>
+      `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}` +
+      '?format=metadata&metadataHeaders=From' +
+      '&fields=sizeEstimate,internalDate,payload/headers&prettyPrint=false\r\n\r\n',
+    ids.length * UNIT_COST.get,
+    retry
+  );
+
+  const found = new Map();
+  if (!reply) return found;
+
+  eachPart(reply.text, reply.contentType, ids, retry, (id, code, body) => {
+    // 404 means the message is gone. Nothing to weigh, and asking again will
+    // not bring it back.
+    if (code !== 200) return;
+    // Same empty-mask case as readJson: no size to report, and asking again
+    // would only produce the same nothing.
+    if (!body) return;
+
+    try {
+      const data = JSON.parse(body);
+      const bytes = data?.sizeEstimate;
+      // Header names are case-insensitive and Gmail's casing is not promised.
+      const from =
+        data?.payload?.headers?.find((header) => header.name?.toLowerCase() === 'from')?.value ??
+        '';
+      // internalDate is epoch milliseconds, delivered as a string.
+      const date = Number(data?.internalDate ?? 0);
+      if (Number.isFinite(bytes)) found.set(id, { bytes, from, date });
+    } catch {
+      retry.push(id);
+    }
+  });
+
+  return found;
+}
+
+/**
+ * Send one multipart batch and hand back its raw reply.
+ *
+ * `line(id)` writes the sub-request — everything after the part's own headers,
+ * ending in the blank line that closes it. Whatever could not be sent at all
+ * goes onto `retry`, and the caller gets null rather than an exception, so one
+ * refused batch never fails a pass.
+ *
+ * @returns {Promise<{text: string, contentType: string | null} | null>}
+ */
+async function postBatch(ids, line, units, retry) {
   const boundary = `mailboy_${crypto.randomUUID()}`;
 
   const body =
@@ -299,13 +460,11 @@ async function runBatch(ids, retry) {
           `--${boundary}\r\n` +
           'Content-Type: application/http\r\n' +
           `Content-ID: <m${index}>\r\n\r\n` +
-          `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}` +
-          '?format=metadata&metadataHeaders=From' +
-          '&fields=sizeEstimate,internalDate,payload/headers&prettyPrint=false\r\n\r\n'
+          line(id)
       )
       .join('') + `--${boundary}--\r\n`;
 
-  await reserve(ids.length * UNIT_COST.get);
+  await reserve(units);
 
   const token = await getToken();
   const res = await fetch(BATCH, {
@@ -320,13 +479,13 @@ async function runBatch(ids, retry) {
   if (res.status === 401) {
     await invalidateToken();
     retry.push(...ids);
-    return new Map();
+    return null;
   }
 
   if (!res.ok) {
     if (res.status === 429 || res.status >= 500) {
       retry.push(...ids);
-      return new Map();
+      return null;
     }
     const detail = await res.json().catch(() => ({}));
     const reason = detail?.error?.errors?.[0]?.reason ?? '';
@@ -335,22 +494,25 @@ async function runBatch(ids, retry) {
     throw new GmailError(message, { status: res.status, reason });
   }
 
-  return parseBatch(await res.text(), res.headers.get('Content-Type'), ids, retry);
+  return { text: await res.text(), contentType: res.headers.get('Content-Type') };
 }
 
 /**
+ * Walk a batch reply, handing `handle` each sub-response's status code and body
+ * alongside the id it answers for.
+ *
  * Batch replies are multipart/mixed, each part wrapping a complete HTTP
  * response with its own status. Sub-requests fail individually — a message
- * deleted between listing and reading 404s while its neighbours succeed — so
- * status is read per part, never per response.
+ * deleted between listing and acting on it 404s while its neighbours succeed —
+ * so status is read per part, never per response. Parts that are retryable, and
+ * ids that came back with no part at all, go onto `retry` before `handle` ever
+ * sees them.
  */
-function parseBatch(text, contentType, ids, retry) {
-  const found = new Map();
-
+function eachPart(text, contentType, ids, retry, handle) {
   const declared = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType ?? '');
   if (!declared) {
     retry.push(...ids);
-    return found;
+    return;
   }
 
   const parts = text.split(`--${declared[1] ?? declared[2]}`);
@@ -375,35 +537,107 @@ function parseBatch(text, contentType, ids, retry) {
       retry.push(id);
       continue;
     }
-    // 404 means the message is gone. Nothing to weigh, and asking again will
-    // not bring it back.
-    if (code !== 200) continue;
 
     // part = outer headers, blank line, inner status + headers, blank line, body.
     const [, , ...rest] = part.split(/\r?\n\r?\n/);
-    const body = rest.join('\n\n').trim();
-    // Same empty-mask case as readJson: no size to report, and asking again
-    // would only produce the same nothing.
-    if (!body) continue;
-
-    try {
-      const data = JSON.parse(body);
-      const bytes = data?.sizeEstimate;
-      // Header names are case-insensitive and Gmail's casing is not promised.
-      const from =
-        data?.payload?.headers?.find((header) => header.name?.toLowerCase() === 'from')?.value ??
-        '';
-      // internalDate is epoch milliseconds, delivered as a string.
-      const date = Number(data?.internalDate ?? 0);
-      if (Number.isFinite(bytes)) found.set(id, { bytes, from, date });
-    } catch {
-      retry.push(id);
-    }
+    handle(id, code, rest.join('\n\n').trim());
   }
 
   for (const id of ids) if (!answered.has(id)) retry.push(id);
+}
 
-  return found;
+// ── Trashing ─────────────────────────────────────────────────────
+
+/**
+ * Move messages to Trash, where Gmail keeps them for 30 days.
+ *
+ * Recoverable on purpose. The permanent equivalent, `messages.batchDelete`,
+ * needs the `https://mail.google.com/` scope — the widest Google publishes —
+ * and offers the user no way back from a mistake. Neither trade is worth it.
+ *
+ * There is no batched form of this: `batchModify` refuses the TRASH label, so
+ * it is one `messages.trash` per message at 5 quota units each. Against the
+ * 250-unit ceiling that is roughly 50 a second, the same rate as the size pass,
+ * which is why emptying a large folder is a background job rather than
+ * something to wait on. The multipart endpoint cuts the round trips but not
+ * the quota.
+ *
+ * `onBatch(count)` fires as each batch lands so a long run can report progress.
+ *
+ * @returns {Promise<{trashed: number, failed: string[]}>} `failed` are ids Gmail
+ *   would not move and would not retry — reported rather than swallowed, since
+ *   the folder is about to be deleted out from under them.
+ */
+export async function trashMessages(ids, onBatch, stopped) {
+  const trashed = new Set();
+  const failed = new Set();
+  let pending = [...ids];
+
+  for (let attempt = 0; pending.length && attempt < MAX_ATTEMPTS && !stopped?.(); attempt++) {
+    if (attempt) await sleep(2 ** attempt * 500 + Math.random() * 400);
+
+    const chunks = [];
+    for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+      chunks.push(pending.slice(i, i + BATCH_SIZE));
+    }
+
+    const retry = [];
+    let cursor = 0;
+
+    await Promise.all(
+      Array.from({ length: Math.min(BATCH_CONCURRENCY, chunks.length) }, async () => {
+        while (cursor < chunks.length) {
+          // Per batch, not per message: one already in flight has moved mail
+          // whether or not we wait for the answer, so its results matter.
+          if (stopped?.()) return;
+          const chunk = chunks[cursor++];
+          const moved = await runTrashBatch(chunk, retry, failed);
+          for (const id of moved) trashed.add(id);
+          if (moved.length) onBatch?.(moved.length);
+        }
+      })
+    );
+
+    pending = retry;
+  }
+
+  // Retries exhausted: never moved, and nothing further will move them, so they
+  // belong with the refusals rather than being forgotten.
+  //
+  // Not after a stop, though — what is left there was simply never attempted,
+  // and reporting it as refused would turn "you called this off" into "Gmail
+  // would not do it".
+  if (!stopped?.()) for (const id of pending) failed.add(id);
+
+  return { trashed: trashed.size, failed: [...failed] };
+}
+
+/** @returns {Promise<string[]>} the ids this batch actually moved */
+async function runTrashBatch(ids, retry, failed) {
+  const reply = await postBatch(
+    ids,
+    (id) =>
+      `POST /gmail/v1/users/me/messages/${encodeURIComponent(id)}/trash` +
+      '?fields=id&prettyPrint=false\r\n' +
+      // Explicit rather than absent: trash takes no body, and Google's batch
+      // parser should not have to infer that from a bare blank line.
+      'Content-Length: 0\r\n\r\n',
+    ids.length * UNIT_COST.write,
+    retry
+  );
+
+  const moved = [];
+  if (!reply) return moved;
+
+  eachPart(reply.text, reply.contentType, ids, retry, (id, code) => {
+    // 404 is a message that has already gone — deleted from another client
+    // mid-pass, or trashed by an earlier attempt of this same job. Either way
+    // it is out of the folder, which is what was asked for.
+    if (code === 200 || code === 204 || code === 404) moved.push(id);
+    else failed.add(id);
+  });
+
+  return moved;
 }
 
 export { AuthError };

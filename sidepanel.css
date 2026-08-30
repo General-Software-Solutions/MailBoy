@@ -576,6 +576,146 @@ body {
   font-size: 12px;
 }
 
+/* ── Adding & removing folders ───────────────────────────────── */
+/* Only ever on Your Folders. Gmail's user labels are a flat namespace that
+   system labels are not part of, so there is nothing to create under Inbox and
+   nothing to delete about Sent — putting these controls there would promise
+   something the API refuses. */
+
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: calc(var(--pad-x) - 4px);
+}
+
+.group-head .group-title {
+  flex: 1 1 auto;
+}
+
+/* Always visible: the + and bin sit on screen at all times rather than
+   appearing only on hover/focus. */
+.row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 1px;
+}
+
+.row-actions,
+.group-head .row-action {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.row-action {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.row-action:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.row-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.row-action--danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.row-action svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* A folder whose delete is running. It stays on screen with its number intact
+   until the job actually finishes — vanishing early would claim a completion
+   that a ten-minute Trash pass has not reached yet. */
+.row--working {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* ── The inline folder editor ────────────────────────────────── */
+/* Created in the place the folder will appear — under its parent, at its
+   parent's indent — so the position answers "where is this going?" without any
+   wording having to. */
+/* Carried as a variable rather than as a padding rule per depth, so the field
+   and the error line under it stay on the same left edge without either being
+   written out four times. The steps match .row[data-depth]. */
+.folder-new {
+  --indent: 0px;
+}
+.folder-new[data-depth='1'] {
+  --indent: 13px;
+}
+.folder-new[data-depth='2'] {
+  --indent: 26px;
+}
+.folder-new[data-depth='3'] {
+  --indent: 39px;
+}
+
+.folder-editor {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--row-h);
+  padding: 3px var(--pad-x) 3px calc(var(--pad-x) + var(--indent));
+}
+
+.folder-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+}
+
+.folder-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.folder-input:disabled {
+  opacity: 0.6;
+}
+
+.folder-editor .btn {
+  flex: 0 0 auto;
+  width: auto;
+}
+
+/* Sits under the input, on the editor's own left edge, so it reads as belonging
+   to the field rather than to the folder above it. */
+.folder-error {
+  margin: 0;
+  padding: 0 var(--pad-x) 8px calc(var(--pad-x) + var(--indent));
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
 /* ── Signed-in shell ─────────────────────────────────────────── */
 /* The identity bar is common to every signed-in screen, so it sits outside
    them and the active screen fills what is left. */
@@ -980,10 +1120,12 @@ body {
   line-height: 1.55;
 }
 
-.dialog-text strong {
+.dialog-text strong,
+.dialog-title strong {
   color: var(--text);
   font-weight: 550;
-  /* An address is longer than the panel is wide and must not widen it. */
+  /* An address — or a folder name — is longer than the panel is wide and must
+     not widen it. */
   overflow-wrap: anywhere;
 }
 
@@ -1007,6 +1149,49 @@ body {
 .dialog-danger:hover:not(:disabled) {
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+/* The primary action of a dialog whose primary action destroys something. It
+   keeps the filled weight — it is still what the dialog is for — and takes the
+   danger colour so the weight is not read as encouragement. */
+.dialog-destructive {
+  background: var(--danger);
+}
+
+/* Only choice in the dialog that touches mail, so it is stated as a choice and
+   left unticked: Gmail's own folder delete never removes a message. */
+.checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+/* The rule above is as specific as the UA's `[hidden] { display: none }`, and
+   an author rule wins a tie — so an empty folder's dialog would still show the
+   box without this. */
+.checkbox[hidden] {
+  display: none;
+}
+
+.checkbox input {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin: 1px 0 0;
+  accent-color: var(--danger);
+  cursor: pointer;
+}
+
+.checkbox-hint {
+  margin: 0 0 16px;
+  padding-left: 23px;
+  color: var(--faint);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 /* ── Error state ─────────────────────────────────────────────── */
