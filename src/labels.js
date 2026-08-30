@@ -4,17 +4,17 @@
 // label" and a "category" is an implementation detail of theirs; both are
 // folders Google made, and they read as one group.
 
-/** Google's own folders worth surfacing, in reading order. Others are dropped. */
-const MAILBOX_ORDER = [
-  'INBOX',
-  'UNREAD',
-  'STARRED',
-  'IMPORTANT',
-  'SENT',
-  'DRAFT',
-  'SPAM',
-  'TRASH',
-];
+/**
+ * Google's own folders worth surfacing, in reading order. Others are dropped.
+ *
+ * These five are where a message *is*, and it is in exactly one of them. Gmail
+ * also returns UNREAD, STARRED and IMPORTANT, and those are deliberately not
+ * here: they are states a message carries while sitting somewhere else, so a
+ * starred inbox message would be counted twice in one section and their sizes
+ * would overlap the rows above. They are also the same five the user-folder
+ * query negates, which is what keeps the two sections consistent.
+ */
+const MAILBOX_ORDER = ['INBOX', 'SENT', 'DRAFT', 'SPAM', 'TRASH'];
 
 const CATEGORY_ORDER = [
   'CATEGORY_PERSONAL',
@@ -26,9 +26,6 @@ const CATEGORY_ORDER = [
 
 const DISPLAY_NAMES = {
   INBOX: 'Inbox',
-  UNREAD: 'Unread',
-  STARRED: 'Starred',
-  IMPORTANT: 'Important',
   SENT: 'Sent',
   DRAFT: 'Drafts',
   SPAM: 'Spam',
