@@ -113,9 +113,23 @@
             <span id="account" class="account"></span>
           </span>
         </div>
-        <button id="btn-logout" class="btn btn--ghost btn--xs">
-          <span class="icon" aria-hidden="true">logout</span><span>Log out</span>
-        </button>
+        <!-- Refresh sits here rather than above the footer because the footer
+             now has the tab bar under it, and a third stacked strip at the
+             bottom of a side panel is more chrome than list. Icon only: the
+             wording it used to carry ("Refresh current data" / "Stop
+             refreshing") moves to the title and the label, which is where a
+             single-glyph control belongs anyway. -->
+        <div class="topbar-actions">
+          <button id="btn-refresh" class="icon-btn" aria-label="Refresh current data">
+            <span id="refresh-icon" class="icon" aria-hidden="true">refresh</span>
+            <svg id="stop-icon" class="stop-icon" viewBox="0 0 16 16" aria-hidden="true" hidden>
+              <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
+            </svg>
+          </button>
+          <button id="btn-logout" class="btn btn--ghost btn--xs">
+            <span class="icon" aria-hidden="true">logout</span><span>Log out</span>
+          </button>
+        </div>
       </header>
 
       <!-- ── Logging out ─────────────────────────────────────────── -->
@@ -190,6 +204,22 @@
             <span id="confirm-where"></span>?
           </h2>
           <p class="dialog-text" id="confirm-text"></p>
+
+          <!-- The same pair the move dialog carries, for the same reason: this
+               handles the mail that is here, a rule handles what arrives. Shown
+               only for Delete — a rule that restored future mail would mean
+               nothing — and hidden entirely when the dialog is being used to
+               confirm deleting rules themselves. -->
+          <label class="checkbox checkbox--rule" id="trash-rule-sender-row" hidden>
+            <input type="checkbox" id="trash-rule-sender" />
+            <span id="trash-rule-sender-label"></span>
+          </label>
+          <label class="checkbox checkbox--rule" id="trash-rule-subject-row" hidden>
+            <input type="checkbox" id="trash-rule-subject" />
+            <span id="trash-rule-subject-label"></span>
+          </label>
+          <p class="checkbox-hint" id="trash-rule-hint" hidden></p>
+
           <div class="dialog-actions">
             <button value="go" id="confirm-ok" class="btn btn--primary btn--sm"></button>
             <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
@@ -208,6 +238,24 @@
         <h2 class="dialog-title">Move <strong id="move-count">these emails</strong> to…</h2>
         <p class="dialog-text" id="move-text"></p>
         <div id="move-list" class="move-list"></div>
+
+        <!-- The move handles the mail that is already here; these handle the
+             mail that has not arrived. Gmail's filters only ever act at
+             delivery — the API has no equivalent of its "also apply to matching
+             conversations" box — so the two halves genuinely are separate, and
+             the wording says so. Unticked every time: a rule outlives the
+             action that made it, and a box remembering a previous yes would
+             quietly file mail nobody asked it to. -->
+        <label class="checkbox checkbox--rule" id="rule-sender-row">
+          <input type="checkbox" id="rule-sender" />
+          <span id="rule-sender-label">Move all future mails from this sender to this folder</span>
+        </label>
+        <label class="checkbox checkbox--rule" id="rule-subject-row">
+          <input type="checkbox" id="rule-subject" />
+          <span id="rule-subject-label">Move all future mails with this subject to this folder</span>
+        </label>
+        <p class="checkbox-hint" id="rule-hint" hidden></p>
+
         <div class="dialog-actions">
           <button type="button" id="btn-move-confirm" class="btn btn--primary btn--sm" disabled>
             Move here
@@ -603,17 +651,131 @@
         <main id="message-view" class="message-view"></main>
       </section>
 
-      <div class="actions-bar">
-        <button id="btn-refresh" class="btn btn--ghost btn--xs">
-          <span id="refresh-icon" class="icon" aria-hidden="true">refresh</span>
-          <svg id="stop-icon" class="stop-icon" aria-hidden="true" hidden>
-            <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
-          </svg>
-          <span id="refresh-label">Refresh current data</span>
-        </button>
-      </div>
+      <!-- ── Rules ───────────────────────────────────────────────── -->
+      <!-- Only the filters MailBoy made, and only ever grouped by where they
+           send mail: "Move to Receipts" is the thing a person decided, and the
+           sender or subject that triggers it is the detail inside that. Read
+           fresh on every visit — one quota unit for every filter on the account
+           — and held in memory only, because a subject-based rule carries a
+           real mail subject and those are never written to disk. -->
+      <section id="screen-rules" class="screen" hidden>
+        <header class="detail-head detail-head--flush">
+          <h1 class="detail-name">
+            <span>Rules</span>
+            <span id="rules-total" class="detail-total"></span>
+            <span id="rules-spinner" class="row-spinner" hidden></span>
+          </h1>
+        </header>
+
+        <div class="detail-tools">
+          <div id="rules-filters" class="tools-filters">
+            <span id="rules-scope" class="selection-summary"></span>
+          </div>
+
+          <!-- Same swap the breakdown makes, with one button instead of three:
+               a rule cannot be moved anywhere and there is nothing to trash. -->
+          <div id="rules-actions" class="tools-actions" hidden>
+            <span id="rules-summary" class="selection-summary"></span>
+            <div class="tools-buttons">
+              <button id="btn-rules-delete" class="btn btn--ghost btn--xs btn--danger">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
+                  />
+                </svg>
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <main id="rules" class="senders">
+          <div id="rule-head" class="rule-head">
+            <label class="sender-tick sender-tick--head">
+              <input type="checkbox" id="rules-select-all" aria-label="Select every destination listed" />
+            </label>
+            <span class="col-head col-head--static">
+              <span class="col-label">Destination</span>
+              <span id="rules-count" class="col-count"></span>
+            </span>
+            <span class="col-head col-head--static col-num">
+              <span class="col-label">Rules</span>
+            </span>
+          </div>
+          <div id="rule-rows"></div>
+        </main>
+      </section>
+
+      <!-- ── One destination's rules ─────────────────────────────── -->
+      <section id="screen-rule-detail" class="screen" hidden>
+        <header class="detail-head">
+          <button id="btn-rules-back" class="icon-btn" aria-label="Back to rules">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M9.5 3.5L5 8l4.5 4.5" />
+            </svg>
+          </button>
+          <h1 class="detail-name">
+            <span id="rule-detail-label"></span>
+            <span id="rule-detail-total" class="detail-total"></span>
+          </h1>
+        </header>
+
+        <div class="detail-tools">
+          <div id="rule-detail-filters" class="tools-filters">
+            <span id="rule-detail-scope" class="selection-summary"></span>
+          </div>
+
+          <div id="rule-detail-actions" class="tools-actions" hidden>
+            <span id="rule-detail-summary" class="selection-summary"></span>
+            <div class="tools-buttons">
+              <button id="btn-rule-delete" class="btn btn--ghost btn--xs btn--danger">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <path
+                    d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
+                  />
+                </svg>
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <main id="rule-detail" class="senders">
+          <div id="rule-detail-head" class="rule-head rule-head--single">
+            <label class="sender-tick sender-tick--head">
+              <input type="checkbox" id="rule-select-all" aria-label="Select every rule listed" />
+            </label>
+            <span class="col-head col-head--static">
+              <span class="col-label">Rule</span>
+            </span>
+          </div>
+          <div id="rule-detail-rows"></div>
+        </main>
+      </section>
 
       <footer id="footer" class="footer"></footer>
+
+      <!-- ── The two tabs ────────────────────────────────────────── -->
+      <!-- Fixed under every signed-in screen, the way the identity bar is fixed
+           over them, with the status line between the two. Each tab remembers
+           where it was left: coming back to Home from Rules lands on the
+           breakdown that was open, not back at the folder list. -->
+      <nav id="navbar" class="navbar" aria-label="Sections">
+        <button class="nav-btn" data-tab="home" aria-current="page">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M2.4 6.6 8 2.4l5.6 4.2v6.1a.9.9 0 0 1-.9.9H3.3a.9.9 0 0 1-.9-.9z" />
+          </svg>
+          <span>Home</span>
+        </button>
+        <button class="nav-btn" data-tab="rules">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M2.6 4.4h10.8M2.6 8h10.8M2.6 11.6h10.8" />
+            <circle cx="6" cy="4.4" r="1.5" />
+            <circle cx="10.4" cy="11.6" r="1.5" />
+          </svg>
+          <span>Rules</span>
+        </button>
+      </nav>
     </div>
 
     <script type="module" src="sidepanel.js"></script>

@@ -29,16 +29,31 @@ export const CLIENT_ID = 'YOUR_CLIENT_ID.apps.googleusercontent.com';
 // Both are restricted scopes, so this pair does not change the review tier —
 // and the client-only design still keeps CASA Tier 2 out of it.
 //
+// gmail.settings.basic is what rules cost. `users.settings.filters` is a
+// settings surface and gmail.modify does not reach it, however much mail it can
+// move, so there is no narrower option. Restricted too, so the same argument
+// holds.
+//
 // userinfo.* carries the avatar and the signed-in address. Sourcing identity
 // here rather than from Gmail keeps the top bar populated even when the Gmail
 // API itself is refusing requests. Both are non-sensitive scopes, so unlike the
 // Gmail pair they add nothing to the verification burden.
 //
-// These must match the scopes added under "Data access" in Google Cloud
-// Console. Asking here for one that is not registered there fails the sign-in.
+// **This list is what actually grants permission**, not the one under "Data
+// access" in Cloud Console. The authorization request carries these, and while
+// the project is in Testing, Google issues a grant for a scope the consent
+// screen configuration does not list — verified 2026-08-31 by adding
+// gmail.settings.basic here alone and finding it granted. `auth.js` checks every
+// scope back out of the redirect and refuses a token missing any, so a sign-in
+// that completes is proof the whole list was given.
+//
+// The Cloud Console list still matters, for two things: it is what the consent
+// screen is built from, and it is what gets reviewed at publish. A restricted
+// scope missing there will block verification even though it works today.
 export const SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
   'https://www.googleapis.com/auth/gmail.modify',
+  'https://www.googleapis.com/auth/gmail.settings.basic',
   'https://www.googleapis.com/auth/userinfo.profile',
   'https://www.googleapis.com/auth/userinfo.email',
 ];

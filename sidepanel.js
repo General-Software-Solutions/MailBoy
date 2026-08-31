@@ -56,6 +56,7 @@ import {
   unpatchMessages,
 } from './src/mailbox.js';
 import { clearMessages, dayOf, reloadMessages, resetMessages, sizeOf } from './src/messages.js';
+import { MAX_RULES, createRules, deleteRules, listRules, sameRule } from './src/rules.js';
 import { trace } from './src/trace.js';
 
 // Both live in the signed-in account's namespace — see src/account.js. Bare
@@ -96,7 +97,7 @@ const el = {
   refresh: document.getElementById('btn-refresh'),
   refreshIcon: document.getElementById('refresh-icon'),
   stopIcon: document.getElementById('stop-icon'),
-  refreshLabel: document.getElementById('refresh-label'),
+  navbar: document.getElementById('navbar'),
   welcomeError: document.getElementById('welcome-error'),
   account: document.getElementById('account'),
   avatarPhoto: document.getElementById('avatar-photo'),
@@ -143,6 +144,22 @@ const el = {
   moveConfirm: document.getElementById('btn-move-confirm'),
   moveCancel: document.getElementById('btn-move-cancel'),
 
+  // The two rule boxes, in each of the dialogs that offers them.
+  ruleSenderRow: document.getElementById('rule-sender-row'),
+  ruleSender: document.getElementById('rule-sender'),
+  ruleSenderLabel: document.getElementById('rule-sender-label'),
+  ruleSubjectRow: document.getElementById('rule-subject-row'),
+  ruleSubject: document.getElementById('rule-subject'),
+  ruleSubjectLabel: document.getElementById('rule-subject-label'),
+  ruleHint: document.getElementById('rule-hint'),
+  trashRuleSenderRow: document.getElementById('trash-rule-sender-row'),
+  trashRuleSender: document.getElementById('trash-rule-sender'),
+  trashRuleSenderLabel: document.getElementById('trash-rule-sender-label'),
+  trashRuleSubjectRow: document.getElementById('trash-rule-subject-row'),
+  trashRuleSubject: document.getElementById('trash-rule-subject'),
+  trashRuleSubjectLabel: document.getElementById('trash-rule-subject-label'),
+  trashRuleHint: document.getElementById('trash-rule-hint'),
+
   // One sender's mail.
   mailsScreen: document.getElementById('screen-mails'),
   mailsBack: document.getElementById('btn-mails-back'),
@@ -174,6 +191,34 @@ const el = {
   messageTrash: document.getElementById('btn-message-trash'),
   messageRestore: document.getElementById('btn-message-restore'),
   messageView: document.getElementById('message-view'),
+
+  // Rules, grouped by where they send mail.
+  rulesScreen: document.getElementById('screen-rules'),
+  rulesTotal: document.getElementById('rules-total'),
+  rulesSpinner: document.getElementById('rules-spinner'),
+  rulesFilters: document.getElementById('rules-filters'),
+  rulesActions: document.getElementById('rules-actions'),
+  rulesScope: document.getElementById('rules-scope'),
+  rulesSummary: document.getElementById('rules-summary'),
+  rulesDelete: document.getElementById('btn-rules-delete'),
+  rulesHead: document.getElementById('rule-head'),
+  rulesCount: document.getElementById('rules-count'),
+  rulesSelectAll: document.getElementById('rules-select-all'),
+  ruleRows: document.getElementById('rule-rows'),
+
+  // One destination's rules.
+  ruleDetailScreen: document.getElementById('screen-rule-detail'),
+  rulesBack: document.getElementById('btn-rules-back'),
+  ruleDetailLabel: document.getElementById('rule-detail-label'),
+  ruleDetailTotal: document.getElementById('rule-detail-total'),
+  ruleDetailFilters: document.getElementById('rule-detail-filters'),
+  ruleDetailActions: document.getElementById('rule-detail-actions'),
+  ruleDetailScope: document.getElementById('rule-detail-scope'),
+  ruleDetailSummary: document.getElementById('rule-detail-summary'),
+  ruleDelete: document.getElementById('btn-rule-delete'),
+  ruleDetailHead: document.getElementById('rule-detail-head'),
+  ruleSelectAll: document.getElementById('rule-select-all'),
+  ruleDetailRows: document.getElementById('rule-detail-rows'),
 };
 
 let loading = false;
@@ -201,24 +246,107 @@ function showWelcome(message) {
 }
 
 /**
- * The signed-in screens, in the order you reach them: folders → who is filling
- * one → that sender's mail → one message. Only ever one is up, so they are
- * switched as a set rather than each hiding the others itself — four screens is
- * where hand-rolled pairs of `hidden` assignments start missing one.
+ * The signed-in screens. Only ever one is up, so they are switched as a set
+ * rather than each hiding the others itself — six screens is well past where
+ * hand-rolled pairs of `hidden` assignments start missing one.
+ *
+ * They fall into two stacks, which is what the tab bar is: Home is folders →
+ * who is filling one → that sender's mail → one message, and Rules is
+ * destinations → the rules that send mail there.
  */
 const SCREENS = {
   main: () => el.main,
   detail: () => el.detail,
   mails: () => el.mailsScreen,
   message: () => el.messageScreen,
+  rules: () => el.rulesScreen,
+  ruleDetail: () => el.ruleDetailScreen,
 };
+
+/**
+ * Which tab each screen belongs to.
+ *
+ * The bar is painted *from* this rather than set alongside a screen change, so
+ * there is no way to end up on a screen with the other tab lit.
+ */
+const TAB_OF = {
+  main: 'home',
+  detail: 'home',
+  mails: 'home',
+  message: 'home',
+  rules: 'rules',
+  ruleDetail: 'rules',
+};
+
+/** Where each tab was left, so switching back does not lose someone's place. */
+const lastScreen = { home: 'main', rules: 'rules' };
+
+let currentScreen = 'main';
 
 function showScreen(which) {
   el.boot.hidden = true;
   el.welcome.hidden = true;
   el.app.hidden = false;
   for (const [name, node] of Object.entries(SCREENS)) node().hidden = name !== which;
+
+  currentScreen = which;
+  lastScreen[TAB_OF[which]] = which;
+  paintTabs();
+
   setNotice(el.welcomeError, null);
+}
+
+function paintTabs() {
+  const tab = TAB_OF[currentScreen];
+  for (const button of el.navbar.querySelectorAll('.nav-btn')) {
+    if (button.dataset.tab === tab) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+}
+
+/** Unwind the Home stack to the folder list, one screen at a time so each one
+ *  lets go of what it was holding. */
+function toHomeRoot() {
+  if (!el.messageScreen.hidden) closeMessage();
+  if (!el.mailsScreen.hidden) closeMails();
+  if (!el.detail.hidden) closeBreakdown();
+}
+
+/**
+ * Switch tabs, or — pressing the tab already showing — go back to the top of
+ * it, which is the one gesture a bar like this is expected to answer.
+ *
+ * Rules re-reads on every arrival, including that one. It is a single quota unit
+ * for every filter on the account, so there is no cheaper thing to do and
+ * nothing to decide about staleness.
+ */
+function showTab(tab) {
+  if (TAB_OF[currentScreen] === tab) {
+    if (tab === 'home') toHomeRoot();
+    else closeRuleGroup();
+  } else {
+    showScreen(rootedScreen(lastScreen[tab]));
+  }
+
+  if (tab === 'rules') void loadRules();
+}
+
+/**
+ * The remembered screen, or the top of its tab where what it was about has gone.
+ *
+ * Every one of these is *about* something held in memory — a folder, a sender,
+ * an open message, a destination — and an account switch drops all of it. Coming
+ * back to a screen with nothing behind it is how you get a blank list with a
+ * heading over it.
+ */
+function rootedScreen(which) {
+  const orphaned =
+    (which === 'detail' && !openLabel) ||
+    (which === 'mails' && !openSender) ||
+    (which === 'message' && !openMessageId) ||
+    (which === 'ruleDetail' && !openRuleGroup);
+  if (!orphaned) return which;
+  return TAB_OF[which] === 'rules' ? 'rules' : 'main';
 }
 
 function showMain() {
@@ -421,6 +549,11 @@ function renderSkeleton(groups) {
   if (editor && !editor.box.isConnected) editor = null;
 
   markWorkingRows();
+
+  // Rule rows are named after the folder they point at, so a rebuilt folder
+  // list is a reason to redraw them — most visibly on the first load, where the
+  // Rules tab can be reached before there are any names to draw with.
+  if (!el.rulesScreen.hidden || !el.ruleDetailScreen.hidden) renderRules();
 }
 
 /**
@@ -563,10 +696,13 @@ function setBusy(running) {
   busy = running;
 
   // The one button does both jobs: it is how you start a refresh and the only
-  // way to call one off, so it is never disabled.
+  // way to call one off, so it is never disabled. Icon-only since it moved to
+  // the top bar, so what it says lives in the label and the tooltip.
+  const says = running ? 'Stop refreshing' : 'Refresh current data';
   el.refreshIcon.hidden = running;
   el.stopIcon.hidden = !running;
-  el.refreshLabel.textContent = running ? 'Stop refreshing' : 'Refresh current data';
+  el.refresh.setAttribute('aria-label', says);
+  el.refresh.title = says;
   el.detailSpinner.hidden = !running;
   paintProgress();
   setFooter();
@@ -586,6 +722,9 @@ function setBusy(running) {
 function refreshOpenLists() {
   if (openSender && !el.mailsScreen.hidden) renderMails();
   else if (openLabel && !el.detail.hidden) renderBreakdown();
+  // Not derived from sizes at all — but a rule row is named after the folder it
+  // sends mail to, and those names come from the folder list a load rebuilds.
+  else if (!el.rulesScreen.hidden || !el.ruleDetailScreen.hidden) renderRules();
 }
 
 /**
@@ -835,6 +974,10 @@ function selectionFacts() {
   const rows = listedSenders.filter((sender) => selected.has(senderKey(sender)));
   return {
     keys: rows.map(senderKey),
+    // Only the ones with a real address. A sender bucketed under a display name
+    // has nothing a `from:` rule could be written against, so it can be moved
+    // but not ruled about — see `ruleMaterial`.
+    addresses: rows.map((sender) => sender.address).filter(Boolean),
     senders: rows.length,
     messages: rows.reduce((sum, sender) => sum + sender.count, 0),
     bytes: rows.reduce((sum, sender) => sum + sender.bytes, 0),
@@ -1997,9 +2140,11 @@ function paintDeleteHint() {
 }
 
 /**
+ * @param {number} doomedRules how many rules send mail to this folder, and so
+ *   will be deleted alongside it
  * @returns {Promise<{trash: boolean} | null>} null if it was called off
  */
-function askDelete(target, children, messages) {
+function askDelete(target, children, messages, doomedRules = 0) {
   // showModal throws on an already-open dialog, which a second click would be.
   if (el.deleteDialog.open) return Promise.resolve(null);
 
@@ -2008,11 +2153,26 @@ function askDelete(target, children, messages) {
   const inside = children.length === 1 ? 'the folder inside it' : `the ${children.length} folders inside it`;
   const holds = messages ? `Together they hold ${emails(messages)}.` : 'Neither holds any email.';
 
-  el.deleteText.textContent = children.length
-    ? `This also deletes ${inside}. ${holds}`
-    : messages
-      ? `It holds ${emails(messages)}.`
-      : 'It holds no email.';
+  const says = [
+    children.length
+      ? `This also deletes ${inside}. ${holds}`
+      : messages
+        ? `It holds ${emails(messages)}.`
+        : 'It holds no email.',
+  ];
+
+  // A rule pointing at a folder that has gone can only ever fail, so it goes
+  // with it — and a delete that quietly removed standing instructions the user
+  // set up would be the worst kind of surprise, hence saying so here.
+  if (doomedRules) {
+    says.push(
+      `${ruleCount(doomedRules)} send${doomedRules === 1 ? 's' : ''} mail ` +
+        `${children.length ? 'to these folders' : 'here'}, and ` +
+        `${doomedRules === 1 ? 'it will be deleted' : 'they will be deleted'} too.`
+    );
+  }
+
+  el.deleteText.textContent = says.join(' ');
 
   // Nothing to move means there is no choice to offer.
   const movable = messages > 0;
@@ -2043,7 +2203,18 @@ function askDelete(target, children, messages) {
   });
 }
 
+/**
+ * Whether a delete is between the bin being pressed and its dialog being up.
+ *
+ * There is a round trip in that gap now — one `filters.list`, so the dialog can
+ * say what happens to any rules pointing at the folder — and `askDelete`'s own
+ * guard cannot cover it: two clicks in that window would both find the dialog
+ * closed, and the second `showModal` would throw.
+ */
+let askingDelete = false;
+
 async function confirmDelete(labelId) {
+  if (askingDelete || el.deleteDialog.open) return;
   if (jobRunning()) {
     flash('MailBoy is still finishing the last job.');
     return;
@@ -2065,10 +2236,35 @@ async function confirmDelete(labelId) {
   // overstates the mailbox.
   const messages = family.reduce((sum, row) => sum + (painted[row.id]?.count ?? 0), 0);
 
-  const choice = await askDelete(target, children, messages);
+  // One quota unit, spent before the dialog so it can say what happens to any
+  // rules pointing here. Comes back empty on a failure, which costs the sentence
+  // and never the delete.
+  const familyIds = family.map((row) => row.id);
+
+  askingDelete = true;
+  let choice;
+  let doomedRules;
+  try {
+    doomedRules = await rulesForFolders(familyIds);
+    choice = await askDelete(target, children, messages, doomedRules.length);
+  } finally {
+    askingDelete = false;
+  }
   if (!choice) return;
 
-  deleteState = { ids: family.map((row) => row.id), name: target.name };
+  // The rules go first, and deliberately: a trash pass over a large folder runs
+  // for minutes, and a rule left standing through it would file newly arrived
+  // mail into a folder that is about to be deleted out from under it. Awaited,
+  // because the whole point is that it happens before the job starts; a failure
+  // is logged inside deleteRules and must not stop the delete.
+  if (doomedRules.length) {
+    const ids = doomedRules.map((rule) => rule.id);
+    const { deleted } = await deleteRules(ids).catch(() => ({ deleted: [] }));
+    const gone = new Set(deleted);
+    rules = rules.filter((rule) => !gone.has(rule.id));
+  }
+
+  deleteState = { ids: familyIds, name: target.name };
   markWorkingRows();
   setAction(`Deleting “${target.name}”…`);
 
@@ -2081,7 +2277,6 @@ async function confirmDelete(labelId) {
   // The inbox path takes the folder's own rows as what it vacates rather than
   // `shedding`, because that is all it does — mail keeps every other folder it
   // is in, which is what makes it a rescue rather than a filing decision.
-  const familyIds = family.map((row) => row.id);
   projectAction(
     family.flatMap((row) => idsIn(row.id)),
     choice.trash
@@ -2442,21 +2637,53 @@ function dispatchBulk(job, { total, action, target, status }) {
 }
 
 /**
- * The one dialog both target-less actions use. Each is a single sentence with
+ * The one dialog every target-less action uses. Each is a single sentence with
  * the count in the middle, so only the parts around it change.
  *
- * @returns {Promise<boolean>} whether it was confirmed
+ * `countText` is for the things being counted that are not emails — rules, most
+ * of them. Without it the emphasised middle of a rule dialog would read "3
+ * emails", which is precisely what a rule delete does *not* touch.
+ *
+ * `rule` turns on the pair of rule boxes, and only Delete passes it: a rule that
+ * restored future mail would mean nothing, and the dialog is also what confirms
+ * deleting rules themselves, where offering to make one would be absurd. The
+ * boxes are reset on every open regardless, so a dialog that does not ask for
+ * them cannot inherit a tick from one that did.
+ *
+ * @param {{senders: string[], subject: string | null} | null} [rule]
+ * @returns {Promise<{ok: boolean, specs: object[]}>} `specs` is what the boxes
+ *   were asking for at the moment the button was pressed — read here rather than
+ *   by the caller afterwards, so nothing can come between the click and the read.
  */
-function askConfirm({ verb, count, where, text, button, destructive = false }) {
+function askConfirm({
+  verb,
+  count,
+  countText,
+  where,
+  text,
+  button,
+  destructive = false,
+  rule = null,
+}) {
   // showModal throws on an already-open dialog, which a second click would be.
-  if (el.confirmDialog.open) return Promise.resolve(false);
+  if (el.confirmDialog.open) return Promise.resolve({ ok: false, specs: [] });
+
+  // Held for as long as the dialog is up, so ticking a box can recount what it
+  // is asking for. Null on a dialog that offers no rules, which is what keeps
+  // the hint off there.
+  confirmRule = rule;
 
   el.confirmVerb.textContent = verb;
-  el.confirmCount.textContent = emails(count);
+  el.confirmCount.textContent = countText ?? emails(count);
   el.confirmWhere.textContent = where;
   el.confirmText.textContent = text;
   el.confirmOk.textContent = button;
   el.confirmOk.classList.toggle('dialog-destructive', destructive);
+
+  resetRuleBoxes(TRASH_RULE_BOXES);
+  if (rule) {
+    paintRuleBoxes(TRASH_RULE_BOXES, rule, { to: 'Trash', hint: TRASH_RULE_HINT });
+  }
 
   // Escape leaves the previous choice in place, so a second open would read as
   // a confirmation of the first.
@@ -2465,12 +2692,29 @@ function askConfirm({ verb, count, where, text, button, destructive = false }) {
   return new Promise((resolve) => {
     el.confirmDialog.addEventListener(
       'close',
-      () => resolve(el.confirmDialog.returnValue === 'go'),
+      () => {
+        const ok = el.confirmDialog.returnValue === 'go';
+        resolve({
+          ok,
+          specs: ok && rule ? ruleSpecs(TRASH_RULE_BOXES, rule, 'TRASH') : [],
+        });
+      },
       { once: true }
     );
     el.confirmDialog.showModal();
   });
 }
+
+/**
+ * What the open confirm dialog could write a rule about, held while it is up.
+ *
+ * The move dialog keeps the same thing in `moveRule`. Both exist so that ticking
+ * a box can recount what is being asked for without the count being passed back
+ * through the event.
+ *
+ * @type {{senders: string[], subject: string | null} | null}
+ */
+let confirmRule = null;
 
 /**
  * Whether an action can be started at all — one long job at a time, and there
@@ -2510,8 +2754,17 @@ function resolveSelection() {
   }
 
   const who = facts.senders === 1 ? 'one sender' : `${facts.senders.toLocaleString()} senders`;
-  return { ids, line: `From ${who} in ${departing()}${periodClause()}.` };
+  return {
+    ids,
+    line: `From ${who} in ${departing()}${periodClause()}.`,
+    // No subject: a breakdown row is a sender, and the messages behind it carry
+    // as many different subjects as they like.
+    rule: { senders: facts.addresses, subject: null },
+  };
 }
+
+/** The subject of one message, as the mail list already has it in memory. */
+const subjectOf = (id) => mailMeta.get(id)?.subject || null;
 
 /**
  * The same thing for the mail list, where the ticks are message ids already —
@@ -2530,7 +2783,17 @@ function resolveMailSelection() {
   }
 
   const who = openSender.address || openSender.name || 'this sender';
-  return { ids, line: `From “${who}” in ${departing()}${periodClause()}.` };
+  return {
+    ids,
+    line: `From “${who}” in ${departing()}${periodClause()}.`,
+    // A subject rule is only offered for a single message, because that is the
+    // only case where "this subject" names one thing. Ticking twenty messages
+    // and getting twenty rules is not what the wording promises.
+    rule: {
+      senders: openSender.address ? [openSender.address] : [],
+      subject: ids.length === 1 ? subjectOf(ids[0]) : null,
+    },
+  };
 }
 
 /**
@@ -2544,19 +2807,25 @@ function resolveMailSelection() {
 function resolveOpenMessage() {
   if (!canAct() || !openMessageId) return null;
 
-  const subject = mailMeta.get(openMessageId)?.subject || el.messageSubject.textContent;
+  const subject = subjectOf(openMessageId) || el.messageSubject.textContent;
   return {
     ids: [openMessageId],
     line: subject ? `“${subject}” in ${departing()}.` : `This email, in ${departing()}.`,
+    // The one place both rules are on offer: there is exactly one sender and
+    // exactly one subject on screen.
+    rule: {
+      senders: openSender?.address ? [openSender.address] : [],
+      subject: subject || null,
+    },
   };
 }
 
 /** @param {{ids: string[], line: string} | null} picked */
 async function startTrash(picked) {
   if (!picked) return;
-  const { ids, line } = picked;
+  const { ids, line, rule } = picked;
 
-  const confirmed = await askConfirm({
+  const { ok, specs } = await askConfirm({
     verb: 'Move',
     count: ids.length,
     where: 'to Trash',
@@ -2566,8 +2835,12 @@ async function startTrash(picked) {
       'the background, so you can close the panel.',
     button: 'Move to Trash',
     destructive: true,
+    // Trash is a destination like any other to a rule, so the same two boxes
+    // are on offer here as in the move dialog — the delete handles the mail
+    // that is here, a rule handles what arrives.
+    rule: rule ?? null,
   });
-  if (!confirmed) return;
+  if (!ok) return;
 
   dispatchBulk(
     { action: 'trash', ids, target: 'Trash', source: openLabel.name },
@@ -2578,6 +2851,11 @@ async function startTrash(picked) {
       status: `Moving ${emails(ids.length)} to Trash…`,
     }
   );
+
+  // After the dispatch, for the same reason a move's rules are: the projection
+  // is what makes the button look like it worked, and a refused filter must not
+  // read as the delete having failed.
+  if (specs.length) void applyRules(specs, 'Trash');
 }
 
 /**
@@ -2593,14 +2871,16 @@ async function startRestore(picked) {
   if (!picked) return;
   const { ids, line } = picked;
 
-  const confirmed = await askConfirm({
+  // No rule boxes: "restore all future mail from this sender" describes nothing
+  // — mail does not arrive in Trash.
+  const { ok } = await askConfirm({
     verb: 'Restore',
     count: ids.length,
     where: 'to your inbox',
     text: `${line} They keep any folders they were in when they were deleted.`,
     button: 'Restore to inbox',
   });
-  if (!confirmed) return;
+  if (!ok) return;
 
   dispatchBulk(
     { action: 'restore', ids, add: ['INBOX'], remove: ['TRASH'], target: 'Inbox' },
@@ -2689,6 +2969,18 @@ let moveIds = null;
 let moveTarget = null;
 
 /**
+ * What the open move dialog could write a rule about: the senders behind the
+ * selection, and the one subject if the selection is one message.
+ *
+ * Resolved with the ids and held for the same reason they are — the dialog stays
+ * open while folders are made in it, and a measuring pass keeps moving the
+ * ground underneath.
+ *
+ * @type {{senders: string[], subject: string | null} | null}
+ */
+let moveRule = null;
+
+/**
  * Show which destination is picked, and let `Move here` act only once one is.
  *
  * `aria-current` rather than `aria-pressed`: this is the current item of a set,
@@ -2700,11 +2992,158 @@ function paintMoveTarget() {
     else row.removeAttribute('aria-current');
   }
   el.moveConfirm.disabled = !moveTarget;
+  // The boxes name the destination once there is one, so picking a folder
+  // rewords them. Before a folder is picked there is nothing to name, and "this
+  // folder" is still true — the list is right there.
+  paintRuleBoxes(MOVE_RULE_BOXES, moveRule, {
+    to: moveTarget ? `“${moveTarget.name}”` : 'this folder',
+    hint: MOVE_RULE_HINT,
+  });
+}
+
+/**
+ * The two rule boxes, as they appear in one dialog.
+ *
+ * There are two sets of them — the move dialog's and the delete confirmation's —
+ * and they behave identically. Only the destination they name and the
+ * consequence they warn about differ, so both are passed in rather than the
+ * whole thing being written twice and drifting.
+ */
+const MOVE_RULE_BOXES = {
+  senderRow: () => el.ruleSenderRow,
+  sender: () => el.ruleSender,
+  senderLabel: () => el.ruleSenderLabel,
+  subjectRow: () => el.ruleSubjectRow,
+  subject: () => el.ruleSubject,
+  subjectLabel: () => el.ruleSubjectLabel,
+  hint: () => el.ruleHint,
+};
+
+const TRASH_RULE_BOXES = {
+  senderRow: () => el.trashRuleSenderRow,
+  sender: () => el.trashRuleSender,
+  senderLabel: () => el.trashRuleSenderLabel,
+  subjectRow: () => el.trashRuleSubjectRow,
+  subject: () => el.trashRuleSubject,
+  subjectLabel: () => el.trashRuleSubjectLabel,
+  hint: () => el.trashRuleHint,
+};
+
+/**
+ * Both dialogs warn about the same thing first — a rule is about mail that has
+ * not arrived — and then about what is particular to where it sends it.
+ */
+const MOVE_RULE_HINT =
+  'Rules only act on mail as it arrives. Gmail cannot apply one to messages ' +
+  'you already have — that is what the move itself does.';
+
+/**
+ * Trash earns a longer one. This is the only rule MailBoy can make that ends in
+ * mail being destroyed, it happens without the mail ever being seen, and Gmail
+ * does the destroying on its own schedule.
+ */
+const TRASH_RULE_HINT =
+  'Rules only act on mail as it arrives, so this will not touch anything you ' +
+  'already have. Mail it catches goes straight to Trash without appearing in ' +
+  'your inbox — and Gmail deletes trashed mail for good after 30 days.';
+
+/**
+ * Paint one dialog's pair.
+ *
+ * Each box is shown only where its wording is true. "This sender" needs an
+ * address — a sender bucketed under a display name has nothing a `from:` rule
+ * could be written against — and "this subject" needs there to be exactly one,
+ * which is only ever the case for a single message.
+ *
+ * @param {object} boxes MOVE_RULE_BOXES or TRASH_RULE_BOXES
+ * @param {{senders: string[], subject: string | null} | null} material
+ * @param {{to: string, hint: string}} copy `to` is the destination as it reads
+ *   in the sentence — a quoted folder name, or `Trash`
+ */
+function paintRuleBoxes(boxes, material, copy) {
+  const senders = material?.senders ?? [];
+  const subject = material?.subject ?? null;
+
+  boxes.senderRow().hidden = senders.length === 0;
+  boxes.senderLabel().textContent =
+    senders.length > 1
+      ? `Move all future mails from these ${senders.length.toLocaleString()} senders to ${copy.to}`
+      : `Move all future mails from this sender to ${copy.to}`;
+
+  boxes.subjectRow().hidden = !subject;
+  boxes.subjectLabel().textContent = `Move all future mails with this subject to ${copy.to}`;
+
+  paintRuleHint(boxes, material, copy);
+}
+
+/**
+ * What ticking a box actually signs someone up for.
+ *
+ * Only shown once something is ticked: the distinction between mail that is here
+ * and mail that is not is the whole of what these boxes add, and it is noise
+ * against a dialog nobody has ticked anything in.
+ */
+function paintRuleHint(boxes, material, copy) {
+  // The destination is beside the point here — only how many rules are being
+  // asked for, which is what the boxes decide.
+  const wanted = ruleSpecs(boxes, material, '');
+  if (!wanted.length) {
+    boxes.hint().hidden = true;
+    return;
+  }
+
+  const lines = [copy.hint];
+  // Gmail's ceiling is 1,000 filters across everything the account has ever
+  // made, so a selection of a few hundred senders is worth saying out loud
+  // before it is spent rather than after.
+  if (wanted.length > 25) {
+    lines.push(
+      `This adds ${wanted.length.toLocaleString()} rules; Gmail allows ${MAX_RULES.toLocaleString()} in total.`
+    );
+  }
+
+  boxes.hint().textContent = lines.join(' ');
+  boxes.hint().hidden = false;
+}
+
+/**
+ * The rules the ticked boxes ask for, as specs `createRules` takes.
+ *
+ * The boxes are read here rather than remembered, so what is created is what is
+ * ticked at the moment the dialog's own button is pressed.
+ */
+function ruleSpecs(boxes, material, destination) {
+  const specs = [];
+
+  if (boxes.sender().checked && !boxes.senderRow().hidden) {
+    for (const address of material?.senders ?? []) {
+      specs.push({ kind: 'sender', match: address, destination });
+    }
+  }
+  if (boxes.subject().checked && !boxes.subjectRow().hidden && material?.subject) {
+    specs.push({ kind: 'subject', match: material.subject, destination });
+  }
+
+  return specs;
+}
+
+/** Untick and hide a pair, so no dialog ever opens carrying a previous yes. */
+function resetRuleBoxes(boxes) {
+  boxes.sender().checked = false;
+  boxes.subject().checked = false;
+  boxes.senderRow().hidden = true;
+  boxes.subjectRow().hidden = true;
+  boxes.hint().hidden = true;
 }
 
 function closeMoveDialog() {
   moveIds = null;
   moveTarget = null;
+  moveRule = null;
+  // Never carried between opens. A rule outlives the action that made it, so a
+  // box remembering a previous yes would quietly file mail nobody asked it to —
+  // the same reasoning the folder delete's Trash box is cleared under.
+  resetRuleBoxes(MOVE_RULE_BOXES);
   // The editor lives inside the dialog; leaving it open would strand a field
   // nobody can see, still holding a half-typed name.
   closeEditor();
@@ -2722,17 +3161,20 @@ function startMove(picked) {
     return;
   }
 
-  const { ids, line } = picked;
+  const { ids, line, rule } = picked;
 
   moveIds = ids;
   // Never inherited from a previous open: the dialog opens with nothing picked
   // and `Move here` disabled, whatever was chosen last time.
   moveTarget = null;
+  moveRule = rule ?? null;
+  resetRuleBoxes(MOVE_RULE_BOXES);
   el.moveCount.textContent = emails(ids.length);
   el.moveText.textContent =
     `${line} They move out of every folder they are in now — your inbox ` +
     'included — and into the one you pick.';
 
+  // renderMoveList paints the boxes on its way through paintMoveTarget.
   renderMoveList();
   el.moveDialog.showModal();
 }
@@ -2757,6 +3199,9 @@ function confirmMove() {
   const name = moveTarget?.name ?? '';
   if (!openLabel || !labelId || !ids?.length) return;
 
+  // Read before the dialog is torn down, since closing it clears the boxes.
+  const specs = ruleSpecs(MOVE_RULE_BOXES, moveRule, labelId);
+
   closeMoveDialog();
 
   dispatchBulk(
@@ -2775,6 +3220,65 @@ function confirmMove() {
       status: `Moving ${emails(ids.length)} to “${name}”…`,
     }
   );
+
+  // After the dispatch, not before it: the projection is what makes the button
+  // look like it worked, and it should not queue behind a settings write. The
+  // rules are a second, independent thing — a refused filter must not read as
+  // the move having failed, which is why nothing here is awaited or thrown.
+  if (specs.length) void applyRules(specs, `“${name}”`);
+}
+
+/**
+ * Create the rules a move was ticked for.
+ *
+ * The list is re-read first, for one quota unit, and that buys two things worth
+ * more than the unit: an existing rule saying the same thing is not made twice,
+ * and Gmail's 1,000-filter ceiling is checked against the account's real total
+ * rather than against what MailBoy happens to remember.
+ *
+ * The outcome is a flash, which a long move's status line will sit on top of
+ * (see `setFooter`) — the Rules tab is the durable answer either way.
+ */
+async function applyRules(specs, where) {
+  try {
+    const { rules: existing, filters } = await listRules();
+    rules = existing;
+    rulesLoaded = true;
+
+    const fresh = specs.filter((spec) => !existing.some((rule) => sameRule(rule, spec)));
+    if (!fresh.length) {
+      flash(`Already had ${specs.length === 1 ? 'that rule' : 'those rules'}.`);
+      return;
+    }
+
+    const room = MAX_RULES - filters;
+    if (room <= 0) {
+      flash(`Gmail is full at ${MAX_RULES.toLocaleString()} filters — no rule was added.`);
+      return;
+    }
+
+    const wanted = fresh.slice(0, room);
+    const { created, failed } = await createRules(wanted);
+    rules = [...rules, ...created];
+    renderRules();
+
+    const parts = [];
+    if (created.length) {
+      parts.push(
+        created.length === 1
+          ? `Rule added — future mail goes to ${where}.`
+          : `${created.length.toLocaleString()} rules added, all sending mail to ${where}.`
+      );
+    }
+    if (fresh.length > wanted.length) {
+      parts.push(`${(fresh.length - wanted.length).toLocaleString()} would not fit in Gmail's limit.`);
+    }
+    if (failed.length) parts.push(`${failed.length.toLocaleString()} could not be added.`);
+    flash(parts.join(' '));
+  } catch (err) {
+    console.error('[MailBoy] could not add the rule:', err);
+    flash("The emails are moving, but the rule couldn't be added.");
+  }
 }
 
 // ── Reporting a selection job ────────────────────────────────────
@@ -3029,6 +3533,467 @@ async function adoptPendingDelete() {
   markWorkingRows();
   setAction(`Deleting “${deleteState.name}”…`);
   folderChannel();
+}
+
+// ── Rules ────────────────────────────────────────────────────────
+//
+// The other tab. Only the filters MailBoy made — the mark in `src/rules.js` is
+// what separates those from whatever else the account has accumulated — and
+// always grouped by where they send mail, because "everything from these six
+// senders goes to Receipts" is the decision someone actually made. Which sender
+// triggers which rule is the detail inside that, so it is a screen down.
+//
+// **Read on arrival, held in memory, never written down.** `filters.list` hands
+// back every filter on the account for one quota unit with no paging, so there
+// is nothing an incremental flow could save and no staleness to reason about —
+// which is why none of this touches the snapshot, the membership record or the
+// change-log bookmark. It is also the only honest option: a subject rule carries
+// a real mail subject, and *What is on disk* says those are never stored.
+
+/** Every rule MailBoy manages, as of the last visit to the tab. */
+let rules = [];
+
+/** Whether that list has ever been read, as opposed to being empty. */
+let rulesLoaded = false;
+let rulesLoading = false;
+
+/** @type {Error | null} */
+let rulesError = null;
+
+/** Destination label ids ticked on the Rules screen. */
+let selectedDestinations = new Set();
+
+/** Rule ids ticked in a destination's drill-down. */
+let selectedRules = new Set();
+
+/** Which destination the drill-down is showing. @type {{id: string, name: string | null} | null} */
+let openRuleGroup = null;
+
+/** What the last render listed — which is what "select all" is allowed to mean. */
+let listedGroups = [];
+let listedRules = [];
+
+const ruleCount = (n) => `${n.toLocaleString()} rule${n === 1 ? '' : 's'}`;
+
+/**
+ * The folder a rule sends mail to, by name.
+ *
+ * Null means MailBoy shows no folder with that id — almost always a folder
+ * deleted in Gmail's own settings, since a delete here takes its rules with it.
+ * Only ever asked once the folder list exists; before that every rule would look
+ * orphaned, which is why `renderRuleGroups` checks first.
+ */
+function folderNameOf(labelId) {
+  const row = allRows().find((row) => row.id === labelId);
+  return row ? (row.fullName ?? row.name) : null;
+}
+
+/** The rules, gathered under the folders they send mail to. */
+function ruleGroups() {
+  const byDestination = new Map();
+  for (const rule of rules) {
+    const list = byDestination.get(rule.destination);
+    if (list) list.push(rule);
+    else byDestination.set(rule.destination, [rule]);
+  }
+
+  return [...byDestination.entries()]
+    .map(([id, list]) => ({ id, name: folderNameOf(id), rules: list }))
+    .sort(
+      (a, b) => b.rules.length - a.rules.length || (a.name ?? '').localeCompare(b.name ?? '')
+    );
+}
+
+/**
+ * Re-read every rule on the account.
+ *
+ * Runs on every arrival at the tab, including pressing Rules while already on
+ * it — one quota unit is cheaper than any scheme for deciding whether it is
+ * worth spending.
+ */
+async function loadRules() {
+  if (rulesLoading) return;
+
+  rulesLoading = true;
+  rulesError = null;
+  el.rulesSpinner.hidden = false;
+  renderRules();
+
+  try {
+    const { rules: found } = await listRules();
+    rules = found;
+    rulesLoaded = true;
+
+    // A tick names a rule that may have been deleted elsewhere since.
+    const live = new Set(rules.map((rule) => rule.id));
+    selectedRules = new Set([...selectedRules].filter((id) => live.has(id)));
+    const destinations = new Set(rules.map((rule) => rule.destination));
+    selectedDestinations = new Set(
+      [...selectedDestinations].filter((id) => destinations.has(id))
+    );
+
+    // The folder this drill-down is about has no rules left pointing at it.
+    if (openRuleGroup && !destinations.has(openRuleGroup.id)) closeRuleGroup();
+  } catch (err) {
+    rulesError = err;
+    console.error('[MailBoy] could not read your rules:', err);
+  } finally {
+    rulesLoading = false;
+    el.rulesSpinner.hidden = true;
+    renderRules();
+  }
+}
+
+/** Whichever of the two rule screens is up. */
+function renderRules() {
+  if (!el.rulesScreen.hidden) renderRuleGroups();
+  else if (!el.ruleDetailScreen.hidden) renderRuleDetail();
+}
+
+/** The tick, as a stretched label — the same target the sender rows use. */
+function ruleTick(checked, label) {
+  const cell = document.createElement('label');
+  cell.className = 'sender-tick';
+
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = checked;
+  box.setAttribute('aria-label', label);
+
+  cell.append(box);
+  return cell;
+}
+
+/** What a list says when it has nothing to list, and why. */
+function ruleNote() {
+  if (rulesError) return 'MailBoy could not read your rules. Try again in a moment.';
+  if (!rulesLoaded) return 'Reading your rules…';
+  return (
+    'No rules yet. When you move mail, tick “Move all future mails…” in the ' +
+    'move window and the rule will appear here.'
+  );
+}
+
+function renderRuleGroups() {
+  // Before the folder list exists every destination would render as a folder
+  // that no longer exists, which is a much more alarming thing to say than
+  // "still reading". The load calls back in through renderSkeleton.
+  if (!currentGroups) {
+    listedGroups = [];
+    el.rulesHead.hidden = true;
+    el.ruleRows.replaceChildren(emptyNote('Reading your folders…'));
+    paintRuleSelection();
+    return;
+  }
+
+  const groups = ruleGroups();
+  listedGroups = groups;
+
+  el.rulesTotal.textContent = rules.length ? `(${ruleCount(rules.length)})` : '';
+  el.rulesCount.textContent = groups.length ? `· ${groups.length.toLocaleString()}` : '';
+  el.rulesScope.textContent = 'Rules MailBoy manages';
+
+  el.rulesHead.hidden = !groups.length;
+  if (!groups.length) {
+    el.ruleRows.replaceChildren(emptyNote(ruleNote()));
+    paintRuleSelection();
+    return;
+  }
+
+  // Preserved for the same reason the breakdown preserves it: a re-render
+  // arriving under someone mid-list should not throw them back to the top.
+  const scroll = el.ruleRows.parentElement.scrollTop;
+  el.ruleRows.replaceChildren(...groups.map(renderRuleGroupRow));
+  el.ruleRows.parentElement.scrollTop = scroll;
+
+  paintRuleSelection();
+}
+
+function renderRuleGroupRow(group) {
+  const row = document.createElement('div');
+  // Trash reads "Move to Trash" like any other destination — which is exactly
+  // what it does — but it is the one row here that ends in mail being
+  // destroyed, so it is coloured for it rather than left to be read carefully.
+  row.className =
+    group.id === 'TRASH' ? 'rule rule--group rule--danger' : 'rule rule--group';
+  row.dataset.destination = group.id;
+  // It navigates, so it answers the keyboard like the folder and sender rows do.
+  // Not a <button>: the row is a grid of its own.
+  row.setAttribute('role', 'button');
+  row.tabIndex = 0;
+
+  const what = document.createElement('span');
+  what.className = 'rule-what';
+
+  const name = document.createElement('span');
+  name.className = group.name ? 'rule-name' : 'rule-name rule-name--orphan';
+
+  const lead = document.createElement('span');
+  lead.className = 'rule-lead';
+  lead.textContent = 'Move to ';
+  name.append(lead, group.name ?? 'a folder that no longer exists');
+
+  what.append(name);
+
+  if (!group.name) {
+    const why = document.createElement('span');
+    why.className = 'rule-kind';
+    why.textContent = 'The folder was removed outside MailBoy. Delete to tidy up.';
+    what.append(why);
+  }
+
+  const count = document.createElement('span');
+  count.className = 'rule-count';
+  count.textContent = group.rules.length.toLocaleString();
+
+  row.append(
+    ruleTick(selectedDestinations.has(group.id), `Select rules moving to ${group.name ?? 'a deleted folder'}`),
+    what,
+    count
+  );
+  return row;
+}
+
+/** How a single rule reads. The two kinds are one sentence each, deliberately. */
+function ruleSentence(rule) {
+  return rule.kind === 'sender'
+    ? { lead: 'All mails from ', body: rule.match }
+    : { lead: 'All mails having subject ', body: `“${rule.match}”` };
+}
+
+function renderRuleDetail() {
+  if (!openRuleGroup) return;
+
+  const mine = rules.filter((rule) => rule.destination === openRuleGroup.id);
+  listedRules = mine;
+
+  const name = folderNameOf(openRuleGroup.id) ?? openRuleGroup.name;
+  el.ruleDetailLabel.textContent = `Move to ${name ?? 'a deleted folder'}`;
+  el.ruleDetailTotal.textContent = mine.length ? `(${ruleCount(mine.length)})` : '';
+  el.ruleDetailScope.textContent = 'Rules MailBoy manages';
+
+  // The head carries the select-all, and there is nothing to select.
+  el.ruleDetailHead.hidden = !mine.length;
+  if (!mine.length) {
+    el.ruleDetailRows.replaceChildren(emptyNote(ruleNote()));
+    paintRuleSelection();
+    return;
+  }
+
+  const scroll = el.ruleDetailRows.parentElement.scrollTop;
+  el.ruleDetailRows.replaceChildren(...mine.map(renderRuleRow));
+  el.ruleDetailRows.parentElement.scrollTop = scroll;
+
+  paintRuleSelection();
+}
+
+function renderRuleRow(rule) {
+  const row = document.createElement('div');
+  row.className = 'rule rule--single';
+  row.dataset.rule = rule.id;
+
+  const what = document.createElement('span');
+  what.className = 'rule-what';
+
+  const name = document.createElement('span');
+  name.className = 'rule-name rule-name--wrap';
+
+  const { lead, body } = ruleSentence(rule);
+  const prefix = document.createElement('span');
+  prefix.className = 'rule-lead';
+  prefix.textContent = lead;
+  name.append(prefix, body);
+
+  what.append(name);
+  row.append(ruleTick(selectedRules.has(rule.id), `Select ${lead}${body}`), what);
+  return row;
+}
+
+/**
+ * The same tools-row swap the breakdown makes, on whichever rule screen is up.
+ * One button, because a rule cannot be moved anywhere and there is nothing about
+ * one to trash.
+ */
+function paintRuleSelection() {
+  const onGroups = !el.rulesScreen.hidden;
+  const picked = onGroups
+    ? listedGroups.filter((group) => selectedDestinations.has(group.id))
+    : listedRules.filter((rule) => selectedRules.has(rule.id));
+
+  const filters = onGroups ? el.rulesFilters : el.ruleDetailFilters;
+  const actions = onGroups ? el.rulesActions : el.ruleDetailActions;
+  const summary = onGroups ? el.rulesSummary : el.ruleDetailSummary;
+  const box = onGroups ? el.rulesSelectAll : el.ruleSelectAll;
+  const listed = onGroups ? listedGroups : listedRules;
+
+  const any = picked.length > 0;
+  filters.hidden = any;
+  actions.hidden = !any;
+
+  box.checked = any && picked.length === listed.length;
+  box.indeterminate = any && picked.length < listed.length;
+
+  if (!any) return;
+
+  // A destination row stands for every rule under it, so the summary counts
+  // rules either way — that is what a delete would actually remove.
+  const total = onGroups
+    ? picked.reduce((sum, group) => sum + group.rules.length, 0)
+    : picked.length;
+  summary.textContent = ruleCount(total);
+  summary.title = onGroups
+    ? `${picked.length.toLocaleString()} destinations · ${ruleCount(total)}`
+    : ruleCount(total);
+}
+
+function toggleDestination(id, on) {
+  if (id === undefined) return;
+  if (on) selectedDestinations.add(id);
+  else selectedDestinations.delete(id);
+  syncRuleRows(el.ruleRows, '.rule', 'destination', selectedDestinations);
+}
+
+function toggleRule(id, on) {
+  if (id === undefined) return;
+  if (on) selectedRules.add(id);
+  else selectedRules.delete(id);
+  syncRuleRows(el.ruleDetailRows, '.rule', 'rule', selectedRules);
+}
+
+/** Paint the ticks from the set rather than trusting the boxes, exactly as the
+ *  sender list does — these rows are rebuilt whenever the folder list is. */
+function syncRuleRows(container, selector, key, chosen) {
+  for (const row of container.querySelectorAll(selector)) {
+    const on = chosen.has(row.dataset[key]);
+    row.classList.toggle('rule--picked', on);
+    const box = row.querySelector('input[type="checkbox"]');
+    if (box && box.checked !== on) box.checked = on;
+  }
+  paintRuleSelection();
+}
+
+function openRuleGroupFor(destination) {
+  const group = listedGroups.find((group) => group.id === destination);
+  if (!group) return;
+
+  openRuleGroup = { id: group.id, name: group.name };
+  // Ticks belong to the screen they were made on: a destination ticked in the
+  // list behind is not the same choice as a rule ticked in here.
+  selectedRules = new Set();
+
+  showScreen('ruleDetail');
+  el.rulesBack.focus();
+  renderRuleDetail();
+}
+
+function closeRuleGroup() {
+  if (!openRuleGroup) return;
+
+  const previous = openRuleGroup.id;
+  openRuleGroup = null;
+  selectedRules = new Set();
+
+  showScreen('rules');
+  renderRuleGroups();
+
+  const row = el.ruleRows.querySelector(`[data-destination="${CSS.escape(previous)}"]`);
+  if (row) row.focus();
+}
+
+/**
+ * Confirm, then remove.
+ *
+ * The consequences are the whole point of the dialog, and they are not the ones
+ * a delete usually has: no mail moves, nothing that was filed comes back, and
+ * the only thing that changes is what happens to mail that has not arrived. The
+ * irreversible part is the rule itself — Gmail has no way to restore a filter.
+ */
+async function confirmRuleDelete(doomed, where) {
+  if (!doomed.length) return;
+  if (jobRunning()) {
+    flash('MailBoy is still finishing the last job.');
+    return;
+  }
+
+  const { ok } = await askConfirm({
+    verb: 'Delete',
+    countText: ruleCount(doomed.length),
+    where,
+    text:
+      'Mail that has already been filed stays exactly where it is — a rule only ' +
+      'ever acts on mail as it arrives. New mail that would have matched will land ' +
+      'in your inbox instead, as it did before the rule was made. Gmail cannot ' +
+      'restore a deleted filter, so it would have to be made again.',
+    button: doomed.length === 1 ? 'Delete rule' : 'Delete rules',
+    destructive: true,
+  });
+  if (!ok) return;
+
+  setAction(`Deleting ${ruleCount(doomed.length)}…`);
+
+  try {
+    const { deleted, failed } = await deleteRules(doomed.map((rule) => rule.id));
+    const gone = new Set(deleted);
+    rules = rules.filter((rule) => !gone.has(rule.id));
+    selectedDestinations = new Set();
+    selectedRules = new Set();
+
+    setAction(null);
+
+    // The drill-down was about a folder nothing points at any more.
+    const destinations = new Set(rules.map((rule) => rule.destination));
+    if (openRuleGroup && !destinations.has(openRuleGroup.id)) closeRuleGroup();
+    else renderRules();
+
+    flash(
+      failed.length
+        ? `${ruleCount(deleted.length)} deleted. ${failed.length.toLocaleString()} could not be.`
+        : `${ruleCount(deleted.length)} deleted.`
+    );
+  } catch (err) {
+    console.error('[MailBoy] could not delete those rules:', err);
+    setAction(null);
+    flash("Couldn't delete those rules.");
+    // Whatever did or did not go, the list on screen is now a guess.
+    void loadRules();
+  }
+}
+
+/** Delete every rule under the ticked destinations. */
+function deletePickedGroups() {
+  const groups = listedGroups.filter((group) => selectedDestinations.has(group.id));
+  const doomed = groups.flatMap((group) => group.rules);
+  const where =
+    groups.length === 1
+      ? `moving mail to “${groups[0].name ?? 'a deleted folder'}”`
+      : `moving mail to ${groups.length.toLocaleString()} folders`;
+  void confirmRuleDelete(doomed, where);
+}
+
+/** Delete the ticked rules within one destination. */
+function deletePickedRules() {
+  const doomed = listedRules.filter((rule) => selectedRules.has(rule.id));
+  const name = folderNameOf(openRuleGroup?.id ?? '') ?? openRuleGroup?.name;
+  void confirmRuleDelete(doomed, `moving mail to “${name ?? 'a deleted folder'}”`);
+}
+
+/**
+ * Which rules point at the folders a delete is about to remove.
+ *
+ * One quota unit, spent before the delete dialog opens so it can say what will
+ * happen to them. A failure here costs the sentence and never the delete.
+ */
+async function rulesForFolders(labelIds) {
+  const wanted = new Set(labelIds);
+  try {
+    const { rules: found } = await listRules();
+    rules = found;
+    rulesLoaded = true;
+    return found.filter((rule) => wanted.has(rule.destination));
+  } catch (err) {
+    console.warn('[MailBoy] could not check which rules point at this folder:', err);
+    return [];
+  }
 }
 
 // ── Error state ──────────────────────────────────────────────────
@@ -3595,12 +4560,29 @@ function forgetMailbox() {
   projected = false;
   pendingProjection = null;
   setAction(null);
+  // Rules belong to the mailbox that made them, and a subject rule carries a
+  // real mail subject — the same reason the mail screens are cleared. Nothing
+  // here was on disk, so letting go of it is the whole of forgetting it.
+  rules = [];
+  rulesLoaded = false;
+  rulesError = null;
+  openRuleGroup = null;
+  listedGroups = [];
+  listedRules = [];
+  selectedDestinations = new Set();
+  selectedRules = new Set();
   el.senderRows.replaceChildren();
   el.mailRows.replaceChildren();
   el.messageView.replaceChildren();
+  el.ruleRows.replaceChildren();
+  el.ruleDetailRows.replaceChildren();
   el.groups.replaceChildren();
   setProgress(null);
   setFooter(null);
+  // Back to the folder list, and the other tab back to its own top: what each
+  // one was left on describes the mailbox being left.
+  lastScreen.rules = 'rules';
+  showScreen('main');
 }
 
 async function paintIdentityCache() {
@@ -3962,6 +4944,87 @@ el.mailTrash.addEventListener('click', () => void startTrash(resolveMailSelectio
 el.mailRestore.addEventListener('click', () => void startRestore(resolveMailSelection()));
 el.mailMove.addEventListener('click', () => startMove(resolveMailSelection()));
 
+// ── Rules ────────────────────────────────────────────────────────
+
+el.navbar.addEventListener('click', (event) => {
+  const tab = event.target.closest('.nav-btn');
+  if (tab) showTab(tab.dataset.tab);
+});
+
+el.rulesBack.addEventListener('click', closeRuleGroup);
+
+// The box inside the label toggles itself, so this covers that half.
+el.ruleRows.addEventListener('change', (event) => {
+  const box = event.target.closest('input[type="checkbox"]');
+  const row = box?.closest('.rule');
+  if (row) toggleDestination(row.dataset.destination, box.checked);
+});
+
+el.ruleRows.addEventListener('click', (event) => {
+  // The label already toggled its own box and fired `change` above. The rest of
+  // the row opens what is inside it — the same split the sender rows make.
+  if (event.target.closest('.sender-tick')) return;
+
+  const row = event.target.closest('.rule');
+  if (!row) return;
+  // A drag that ended in a text selection is somebody copying a folder name.
+  if (!window.getSelection()?.isCollapsed) return;
+
+  openRuleGroupFor(row.dataset.destination);
+});
+
+el.ruleRows.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  if (event.target.closest('.sender-tick')) return;
+
+  const row = event.target.closest('.rule');
+  if (!row) return;
+  event.preventDefault(); // Space would scroll the list.
+  openRuleGroupFor(row.dataset.destination);
+});
+
+el.ruleDetailRows.addEventListener('change', (event) => {
+  const box = event.target.closest('input[type="checkbox"]');
+  const row = box?.closest('.rule');
+  if (row) toggleRule(row.dataset.rule, box.checked);
+});
+
+// Exactly what is listed. On the destinations screen that is every rule on the
+// account; inside one, every rule sending mail there.
+el.rulesSelectAll.addEventListener('change', () => {
+  selectedDestinations = el.rulesSelectAll.checked
+    ? new Set(listedGroups.map((group) => group.id))
+    : new Set();
+  syncRuleRows(el.ruleRows, '.rule', 'destination', selectedDestinations);
+});
+
+el.ruleSelectAll.addEventListener('change', () => {
+  selectedRules = el.ruleSelectAll.checked
+    ? new Set(listedRules.map((rule) => rule.id))
+    : new Set();
+  syncRuleRows(el.ruleDetailRows, '.rule', 'rule', selectedRules);
+});
+
+el.rulesDelete.addEventListener('click', deletePickedGroups);
+el.ruleDelete.addEventListener('click', deletePickedRules);
+
+// The hint appears only once something is ticked, in whichever dialog is up.
+// The wording is already right — only the hint has to react.
+for (const box of [el.ruleSender, el.ruleSubject]) {
+  box.addEventListener('change', () =>
+    paintRuleHint(MOVE_RULE_BOXES, moveRule, {
+      to: moveTarget ? `“${moveTarget.name}”` : 'this folder',
+      hint: MOVE_RULE_HINT,
+    })
+  );
+}
+
+for (const box of [el.trashRuleSender, el.trashRuleSubject]) {
+  box.addEventListener('change', () =>
+    paintRuleHint(TRASH_RULE_BOXES, confirmRule, { to: 'Trash', hint: TRASH_RULE_HINT })
+  );
+}
+
 // ── One message ──────────────────────────────────────────────────
 
 el.messageBack.addEventListener('click', closeMessage);
@@ -4041,12 +5104,15 @@ document.addEventListener('keydown', (event) => {
     // about that rather than about the screen it is on.
     closeEditor();
   } else if (!el.messageScreen.hidden) {
-    // One step back per press, down the same path the screens were opened on.
+    // One step back per press, down the same path the screens were opened on —
+    // and within the tab they were opened in, never across the two.
     closeMessage();
   } else if (!el.mailsScreen.hidden) {
     closeMails();
   } else if (!el.detail.hidden) {
     closeBreakdown();
+  } else if (!el.ruleDetailScreen.hidden) {
+    closeRuleGroup();
   }
 });
 

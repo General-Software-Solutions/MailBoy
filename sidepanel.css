@@ -275,6 +275,16 @@ body {
   min-width: 0;
 }
 
+/* Refresh and Log out. Refresh is icon-only because the pair has to fit beside
+   an email address on a panel the user can drag as narrow as they like, and of
+   the two it is the one whose glyph needs no word. */
+.topbar-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 /* Avatar height is the reference the two text lines are sized against. */
 .avatar {
   flex: 0 0 auto;
@@ -752,6 +762,13 @@ body {
   gap: 6px;
   padding: 9px var(--pad-x) 9px 8px;
   border-bottom: 1px solid var(--border);
+}
+
+/* The narrowed left padding above is room for a back button. A screen reached
+   from the tab bar rather than from another screen has none, so it takes the
+   ordinary inset and its heading lines up with the rows beneath it. */
+.detail-head--flush {
+  padding-left: var(--pad-x);
 }
 
 .icon-btn {
@@ -1272,6 +1289,116 @@ body {
 /* Ten at a time, so the list is a page rather than a scroll with no end. The
    window is the current page plus the next four; the arrows are what reach
    anything outside it. */
+/* ── Rules ───────────────────────────────────────────────────── */
+/* Two levels, one grid rule each, header and rows sharing it — the same
+   discipline .sender-head/.sender keep, and for the same reason: defining the
+   columns twice is how a header drifts away from what is under it.
+
+   Fixed tracks rather than shares here. There are only two columns of content
+   and the right-hand one holds a small integer, so a share would give it far
+   more room than "12 rules" can fill. */
+.rule-head,
+.rule {
+  display: grid;
+  grid-template-columns: var(--col-tick) minmax(0, 1fr) minmax(0, 62px);
+  gap: var(--col-gap);
+  align-items: center;
+  padding: 0 var(--pad-x);
+}
+
+.rule-head--single,
+.rule--single {
+  grid-template-columns: var(--col-tick) minmax(0, 1fr);
+}
+
+.rule-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.rule {
+  padding-top: 7px;
+  padding-bottom: 7px;
+  min-height: var(--row-h);
+}
+
+/* Only a destination row goes anywhere; a rule row is the end of the road, so
+   it does not pretend to be a control. */
+.rule--group {
+  cursor: pointer;
+}
+
+.rule--group:hover {
+  background: var(--surface);
+}
+
+.rule--picked {
+  background: var(--accent-soft);
+}
+
+.rule-what {
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* "Move to" and "All mails from" are the frame; the folder and the sender are
+   what is actually being read, so the frame is the quieter of the two. */
+.rule-lead {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rule-name {
+  font-size: 13px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A subject can be a whole sentence and an address can be long. Two lines, then
+   ellipsis: enough to recognise a rule by, never enough to push the tick out of
+   reach of the next one. */
+.rule-name--wrap {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-weight: 500;
+}
+
+.rule-kind {
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.rule-count {
+  text-align: center;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* The one destination that destroys mail. It reads "Move to Trash" like any
+   other row, because that is what it does — the colour is so it is not read
+   like any other row. */
+.rule--danger .rule-name {
+  color: var(--danger);
+}
+
+/* A destination whose folder has gone — deleted in Gmail, most likely, since a
+   delete here takes its rules with it. Still listed, because the only thing to
+   do about one is delete it and that has to be reachable. */
+.rule-name--orphan {
+  color: var(--faint);
+  font-style: italic;
+  font-weight: 500;
+}
+
 .pager {
   display: flex;
   align-items: center;
@@ -1503,6 +1630,23 @@ body {
   cursor: pointer;
 }
 
+/* The rule boxes in the move dialog are not the danger colour: they add a
+   standing instruction rather than send anything to Trash, and colouring them
+   like the folder delete's box would misdescribe what ticking them does. */
+.checkbox--rule {
+  margin-bottom: 8px;
+}
+
+.checkbox--rule input {
+  accent-color: var(--accent);
+}
+
+/* The move dialog's list is directly above these, and without a gap the first
+   box reads as part of it. */
+.checkbox--rule:first-of-type {
+  margin-top: 2px;
+}
+
 .checkbox-hint {
   margin: 0 0 16px;
   padding-left: 23px;
@@ -1643,30 +1787,83 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* ── Footer ──────────────────────────────────────────────────── */
+/* ── Footer and tabs ─────────────────────────────────────────── */
 /* Not a Material Symbols glyph: the font is subsetted to the icons in use, so
    a one-off square is cheaper drawn than re-subsetted. */
-.stop-icon {
+/* Qualified so it outranks `.icon-btn svg`, which paints strokes rather than
+   fills — the refresh button holds both this and a Material Symbols glyph. */
+svg.stop-icon {
   flex: 0 0 auto;
   width: 15px;
   height: 15px;
   fill: currentColor;
+  stroke: none;
 }
 
-/* Pinned below the scroll area: the list ends above the button, not under it. */
-.actions-bar {
-  flex: 0 0 auto;
-  display: flex;
-  justify-content: center;
-  padding: 8px var(--pad-x) 6px;
-  border-top: 1px solid var(--border);
-}
-
-/* The bar above already separates this from the list, so no second rule. */
+/* Between the list and the tab bar, and pinned like both. It used to sit under
+   a refresh bar that gave it its separating rule; refresh has moved to the top
+   bar, so it carries its own now. */
 .footer {
   flex: 0 0 auto;
-  padding: 0 var(--pad-x) 9px;
+  padding: 6px var(--pad-x) 5px;
+  border-top: 1px solid var(--border);
   font-size: 11px;
   color: var(--faint);
   text-align: center;
+  min-height: 24px;
+}
+
+/* ── The two tabs ────────────────────────────────────────────── */
+/* Fixed under every signed-in screen, the way .topbar is fixed over them.
+   Padding-bottom carries a little more than the top so the bar does not read as
+   sitting on the very edge of the panel. */
+.navbar {
+  flex: 0 0 auto;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.nav-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 7px 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 550;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+}
+
+.nav-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav-btn:hover {
+  color: var(--text);
+}
+
+/* aria-current is the state, so it is also the selector — the accessible
+   answer and the visible one cannot then drift apart. */
+.nav-btn[aria-current] {
+  color: var(--accent);
+}
+
+.nav-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 8px;
 }

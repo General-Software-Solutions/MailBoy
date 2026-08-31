@@ -413,6 +413,61 @@ export async function modifyMessages(ids, { add = [], remove = [] } = {}, stoppe
   return moved;
 }
 
+// ── Filters ──────────────────────────────────────────────────────
+//
+// The cheapest corner of the whole API, and cheap in the way that matters:
+// `filters.list` hands back **every** filter on the account in one response, for
+// one quota unit, with no paging and no cursor. There is nothing for an
+// incremental update flow to be incremental about — refetching the lot costs
+// less than half a `history.list` — which is why rules stay out of the snapshot,
+// the membership record and the change-log bookmark entirely.
+//
+//   filters.list      1 unit   all of them
+//   filters.create    5 units  one rule
+//   filters.delete    5 units  one rule
+//
+// Two things Gmail does not offer, both load-bearing upstream: there is **no
+// update method** (changing a filter is delete-then-create), and a filter can
+// only ever act on mail as it arrives — the API has no equivalent of the "also
+// apply to matching conversations" box in Gmail's own settings.
+
+/**
+ * Every filter on the account.
+ *
+ * @returns {Promise<object[]>} raw Filter resources, MailBoy's and Gmail's alike
+ */
+export async function listFilters() {
+  const { filter = [] } = await call('/settings/filters');
+  return filter;
+}
+
+/**
+ * Create one filter.
+ *
+ * @param {{criteria: object, action: object}} filter
+ * @returns {Promise<object>} the created resource, carrying its new `id`
+ */
+export function createFilter(filter) {
+  return request(`${BASE}/settings/filters`, {}, {
+    units: UNIT_COST.write,
+    method: 'POST',
+    body: filter,
+  });
+}
+
+/**
+ * Remove one filter. Deletes no mail and moves none: a filter is a standing
+ * instruction about future deliveries, so removing it only stops the next one
+ * being acted on.
+ */
+export async function deleteFilter(id) {
+  await request(
+    `${BASE}/settings/filters/${encodeURIComponent(id)}`,
+    {},
+    { units: UNIT_COST.write, method: 'DELETE' }
+  );
+}
+
 // ── Message sizes ────────────────────────────────────────────────
 
 /** Gmail's own ceiling on sub-requests in one batch. */

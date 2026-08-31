@@ -12,6 +12,7 @@
 // silently via prompt=none while the user has a live Google session.
 
 import { CLIENT_ID, SCOPES } from './config.js';
+import { trace } from './trace.js';
 
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke';
@@ -150,7 +151,21 @@ async function authorize(interactive) {
 
   const granted = (params.get('scope') ?? '').split(' ');
   const missing = SCOPES.filter((scope) => !granted.includes(scope));
+
+  // What Google actually handed over, which is the only authority on it — the
+  // scope list configured in Cloud Console is about the consent screen and about
+  // verification, not about what a token carries. Worth tracing because a token
+  // cached in session storage from before a scope was added keeps working and
+  // skips the check below entirely, so "it works" can mean either thing.
+  trace('auth', 'token granted', {
+    granted: granted.length,
+    // Names, not the token: which permissions were given is exactly the
+    // question, and none of this is mail data.
+    scopes: granted.map((scope) => scope.replace(/^https:\/\/www\.googleapis\.com\/auth\//, '')),
+  });
+
   if (missing.length) {
+    console.error('[MailBoy] Google withheld scopes:', missing);
     throw new AuthError('MailBoy needs permission to read your mail to show folder counts.');
   }
 
