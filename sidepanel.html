@@ -652,12 +652,18 @@
       </section>
 
       <!-- ── Rules ───────────────────────────────────────────────── -->
-      <!-- Only the filters MailBoy made, and only ever grouped by where they
-           send mail: "Move to Receipts" is the thing a person decided, and the
-           sender or subject that triggers it is the detail inside that. Read
-           fresh on every visit — one quota unit for every filter on the account
-           — and held in memory only, because a subject-based rule carries a
-           real mail subject and those are never written to disk. -->
+      <!-- Every filter that files mail into a folder by sender or subject, in
+           two sections — the ones MailBoy made, then the ones already on the
+           account. Both are drawn by the same code and look the same, because
+           they do the same thing; the mark in src/rules.js only decides which
+           section a filter lands in.
+
+           Always grouped by where they send mail: "Move to Receipts" is the
+           thing a person decided, and the sender or subject that triggers it is
+           the detail inside that. Read fresh on every visit — one quota unit for
+           every filter on the account — and held in memory only, because a
+           subject-based rule carries a real mail subject and those are never
+           written to disk. -->
       <section id="screen-rules" class="screen" hidden>
         <header class="detail-head detail-head--flush">
           <h1 class="detail-name">

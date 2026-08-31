@@ -2258,10 +2258,11 @@ async function confirmDelete(labelId) {
   // because the whole point is that it happens before the job starts; a failure
   // is logged inside deleteRules and must not stop the delete.
   if (doomedRules.length) {
-    const ids = doomedRules.map((rule) => rule.id);
+    // Filter ids, deduplicated: one filter can be several rows here.
+    const ids = [...new Set(doomedRules.map((rule) => rule.filterId))];
     const { deleted } = await deleteRules(ids).catch(() => ({ deleted: [] }));
     const gone = new Set(deleted);
-    rules = rules.filter((rule) => !gone.has(rule.id));
+    rules = rules.filter((rule) => !gone.has(rule.filterId));
   }
 
   deleteState = { ids: familyIds, name: target.name };
@@ -3236,6 +3237,11 @@ function confirmMove() {
  * and Gmail's 1,000-filter ceiling is checked against the account's real total
  * rather than against what MailBoy happens to remember.
  *
+ * "Saying the same thing" now includes a filter the user made in Gmail, since
+ * those are read too. That is the answer worth having: a second filter doing
+ * what one already does is clutter and one more against the ceiling, and the
+ * mail lands where it was going to land either way.
+ *
  * The outcome is a flash, which a long move's status line will sit on top of
  * (see `setFooter`) — the Rules tab is the durable answer either way.
  */
@@ -3537,11 +3543,22 @@ async function adoptPendingDelete() {
 
 // ── Rules ────────────────────────────────────────────────────────
 //
-// The other tab. Only the filters MailBoy made — the mark in `src/rules.js` is
-// what separates those from whatever else the account has accumulated — and
-// always grouped by where they send mail, because "everything from these six
+// The other tab. Every filter on the account that files mail into a folder by
+// sender or subject, in two sections — the ones MailBoy made, then the ones it
+// found — because a filter someone wrote in Gmail years ago is doing exactly
+// what a MailBoy rule does, and a screen showing only half of them would be
+// describing half a mailbox. The mark in `src/rules.js` is what tells the two
+// apart, and it decides nothing else: both sections are read, drawn, grouped and
+// deleted by the same code, which is what keeps them looking the same.
+//
+// Always grouped by where they send mail, because "everything from these six
 // senders goes to Receipts" is the decision someone actually made. Which sender
 // triggers which rule is the detail inside that, so it is a screen down.
+//
+// **A row is not a filter.** Gmail lets one filter add several labels, and each
+// destination is its own row here — see the Rule typedef. Deleting any of them
+// deletes the filter, so it takes the others with it, and `confirmRuleDelete`
+// says so before it happens.
 //
 // **Read on arrival, held in memory, never written down.** `filters.list` hands
 // back every filter on the account for one quota unit with no paging, so there
@@ -3560,13 +3577,16 @@ let rulesLoading = false;
 /** @type {Error | null} */
 let rulesError = null;
 
-/** Destination label ids ticked on the Rules screen. */
+/** Destination rows ticked on the Rules screen, by `<origin>:<labelId>` key. */
 let selectedDestinations = new Set();
 
-/** Rule ids ticked in a destination's drill-down. */
+/** Rule row ids ticked in a destination's drill-down. */
 let selectedRules = new Set();
 
-/** Which destination the drill-down is showing. @type {{id: string, name: string | null} | null} */
+/**
+ * Which destination the drill-down is showing.
+ * @type {{key: string, id: string, name: string | null, origin: string} | null}
+ */
 let openRuleGroup = null;
 
 /** What the last render listed — which is what "select all" is allowed to mean. */
@@ -3588,17 +3608,63 @@ function folderNameOf(labelId) {
   return row ? (row.fullName ?? row.name) : null;
 }
 
-/** The rules, gathered under the folders they send mail to. */
-function ruleGroups() {
+/**
+ * The two sections, in the order they are shown.
+ *
+ * MailBoy's own first: they are the ones this panel made, the ones it explains
+ * how to make, and the only ones a folder delete tidies up after. Everything
+ * else is the account's own and is listed rather than managed.
+ *
+ * Nothing but the wording lives here. Both sections render through the same
+ * row, tick, drill-down and delete, which is the point.
+ */
+const RULE_SECTIONS = [
+  {
+    origin: 'mailboy',
+    title: 'MailBoy filters',
+    scope: 'Rules MailBoy manages',
+    empty:
+      'None yet. When you move mail, tick “Move all future mails…” in the ' +
+      'move window and the rule will appear here.',
+  },
+  {
+    origin: 'existing',
+    title: 'Existing filters',
+    scope: 'Filters already on your account',
+    empty:
+      'None. MailBoy lists the filters you made in Gmail that send mail to a ' +
+      'folder by sender or by subject; anything wider stays in Gmail’s settings.',
+  },
+];
+
+const sectionOf = (origin) => RULE_SECTIONS.find((section) => section.origin === origin);
+
+/**
+ * The key a destination row is ticked and addressed by.
+ *
+ * Not the label id on its own: the same folder can be the destination of a
+ * MailBoy rule and of one made in Gmail, which is two rows in two sections.
+ */
+const groupKeyOf = (rule) => `${rule.origin}:${rule.destination}`;
+
+/** One section's rules, gathered under the folders they send mail to. */
+function ruleGroups(origin) {
   const byDestination = new Map();
   for (const rule of rules) {
+    if (rule.origin !== origin) continue;
     const list = byDestination.get(rule.destination);
     if (list) list.push(rule);
     else byDestination.set(rule.destination, [rule]);
   }
 
   return [...byDestination.entries()]
-    .map(([id, list]) => ({ id, name: folderNameOf(id), rules: list }))
+    .map(([id, list]) => ({
+      key: `${origin}:${id}`,
+      origin,
+      id,
+      name: folderNameOf(id),
+      rules: list,
+    }))
     .sort(
       (a, b) => b.rules.length - a.rules.length || (a.name ?? '').localeCompare(b.name ?? '')
     );
@@ -3627,13 +3693,13 @@ async function loadRules() {
     // A tick names a rule that may have been deleted elsewhere since.
     const live = new Set(rules.map((rule) => rule.id));
     selectedRules = new Set([...selectedRules].filter((id) => live.has(id)));
-    const destinations = new Set(rules.map((rule) => rule.destination));
+    const groups = new Set(rules.map(groupKeyOf));
     selectedDestinations = new Set(
-      [...selectedDestinations].filter((id) => destinations.has(id))
+      [...selectedDestinations].filter((key) => groups.has(key))
     );
 
     // The folder this drill-down is about has no rules left pointing at it.
-    if (openRuleGroup && !destinations.has(openRuleGroup.id)) closeRuleGroup();
+    if (openRuleGroup && !groups.has(openRuleGroup.key)) closeRuleGroup();
   } catch (err) {
     rulesError = err;
     console.error('[MailBoy] could not read your rules:', err);
@@ -3664,14 +3730,29 @@ function ruleTick(checked, label) {
   return cell;
 }
 
-/** What a list says when it has nothing to list, and why. */
+/**
+ * What a list says when it has nothing at all to list, and why.
+ *
+ * Only for the case where *neither* section has anything — a section that is
+ * empty on its own says so under its own heading, so the structure stays legible
+ * rather than collapsing to one sentence that describes the wrong half.
+ */
 function ruleNote() {
   if (rulesError) return 'MailBoy could not read your rules. Try again in a moment.';
   if (!rulesLoaded) return 'Reading your rules…';
   return (
-    'No rules yet. When you move mail, tick “Move all future mails…” in the ' +
-    'move window and the rule will appear here.'
+    'No rules yet, and no filters in Gmail that send mail to a folder. When you ' +
+    'move mail, tick “Move all future mails…” in the move window and the rule ' +
+    'will appear here.'
   );
+}
+
+/** A section's heading, sitting between the rows rather than in the sticky head. */
+function ruleSectionHead(title) {
+  const head = document.createElement('h2');
+  head.className = 'rule-section';
+  head.textContent = title;
+  return head;
 }
 
 function renderRuleGroups() {
@@ -3686,12 +3767,19 @@ function renderRuleGroups() {
     return;
   }
 
-  const groups = ruleGroups();
+  const sections = RULE_SECTIONS.map((section) => ({
+    ...section,
+    groups: ruleGroups(section.origin),
+  }));
+
+  // Flat and in section order, because that is what "select all" and the
+  // indeterminate state are about: everything listed, whichever half it is in.
+  const groups = sections.flatMap((section) => section.groups);
   listedGroups = groups;
 
   el.rulesTotal.textContent = rules.length ? `(${ruleCount(rules.length)})` : '';
   el.rulesCount.textContent = groups.length ? `· ${groups.length.toLocaleString()}` : '';
-  el.rulesScope.textContent = 'Rules MailBoy manages';
+  el.rulesScope.textContent = 'Filters that file mail into a folder';
 
   el.rulesHead.hidden = !groups.length;
   if (!groups.length) {
@@ -3703,7 +3791,17 @@ function renderRuleGroups() {
   // Preserved for the same reason the breakdown preserves it: a re-render
   // arriving under someone mid-list should not throw them back to the top.
   const scroll = el.ruleRows.parentElement.scrollTop;
-  el.ruleRows.replaceChildren(...groups.map(renderRuleGroupRow));
+  el.ruleRows.replaceChildren(
+    // Both headings stand whether or not their section has anything under them:
+    // an empty half saying so is information, where a heading that comes and
+    // goes makes the list look like it is showing something different.
+    ...sections.flatMap((section) => [
+      ruleSectionHead(section.title),
+      ...(section.groups.length
+        ? section.groups.map(renderRuleGroupRow)
+        : [emptyNote(section.empty)]),
+    ])
+  );
   el.ruleRows.parentElement.scrollTop = scroll;
 
   paintRuleSelection();
@@ -3716,7 +3814,9 @@ function renderRuleGroupRow(group) {
   // destroyed, so it is coloured for it rather than left to be read carefully.
   row.className =
     group.id === 'TRASH' ? 'rule rule--group rule--danger' : 'rule rule--group';
-  row.dataset.destination = group.id;
+  // The key, not the label id: the same folder can be a destination in both
+  // sections, and those are two rows that tick independently.
+  row.dataset.destination = group.key;
   // It navigates, so it answers the keyboard like the folder and sender rows do.
   // Not a <button>: the row is a grid of its own.
   row.setAttribute('role', 'button');
@@ -3747,7 +3847,10 @@ function renderRuleGroupRow(group) {
   count.textContent = group.rules.length.toLocaleString();
 
   row.append(
-    ruleTick(selectedDestinations.has(group.id), `Select rules moving to ${group.name ?? 'a deleted folder'}`),
+    ruleTick(
+      selectedDestinations.has(group.key),
+      `Select rules moving to ${group.name ?? 'a deleted folder'}`
+    ),
     what,
     count
   );
@@ -3764,13 +3867,17 @@ function ruleSentence(rule) {
 function renderRuleDetail() {
   if (!openRuleGroup) return;
 
-  const mine = rules.filter((rule) => rule.destination === openRuleGroup.id);
+  // Scoped by section as well as by folder: a drill-down opened from "Existing
+  // filters" must not quietly list MailBoy's own rules to the same place.
+  const mine = rules.filter(
+    (rule) => rule.origin === openRuleGroup.origin && rule.destination === openRuleGroup.id
+  );
   listedRules = mine;
 
   const name = folderNameOf(openRuleGroup.id) ?? openRuleGroup.name;
   el.ruleDetailLabel.textContent = `Move to ${name ?? 'a deleted folder'}`;
   el.ruleDetailTotal.textContent = mine.length ? `(${ruleCount(mine.length)})` : '';
-  el.ruleDetailScope.textContent = 'Rules MailBoy manages';
+  el.ruleDetailScope.textContent = sectionOf(openRuleGroup.origin)?.scope ?? '';
 
   // The head carries the select-all, and there is nothing to select.
   el.ruleDetailHead.hidden = !mine.length;
@@ -3817,7 +3924,7 @@ function renderRuleRow(rule) {
 function paintRuleSelection() {
   const onGroups = !el.rulesScreen.hidden;
   const picked = onGroups
-    ? listedGroups.filter((group) => selectedDestinations.has(group.id))
+    ? listedGroups.filter((group) => selectedDestinations.has(group.key))
     : listedRules.filter((rule) => selectedRules.has(rule.id));
 
   const filters = onGroups ? el.rulesFilters : el.ruleDetailFilters;
@@ -3846,10 +3953,10 @@ function paintRuleSelection() {
     : ruleCount(total);
 }
 
-function toggleDestination(id, on) {
-  if (id === undefined) return;
-  if (on) selectedDestinations.add(id);
-  else selectedDestinations.delete(id);
+function toggleDestination(key, on) {
+  if (key === undefined) return;
+  if (on) selectedDestinations.add(key);
+  else selectedDestinations.delete(key);
   syncRuleRows(el.ruleRows, '.rule', 'destination', selectedDestinations);
 }
 
@@ -3872,11 +3979,11 @@ function syncRuleRows(container, selector, key, chosen) {
   paintRuleSelection();
 }
 
-function openRuleGroupFor(destination) {
-  const group = listedGroups.find((group) => group.id === destination);
+function openRuleGroupFor(key) {
+  const group = listedGroups.find((group) => group.key === key);
   if (!group) return;
 
-  openRuleGroup = { id: group.id, name: group.name };
+  openRuleGroup = { key: group.key, id: group.id, name: group.name, origin: group.origin };
   // Ticks belong to the screen they were made on: a destination ticked in the
   // list behind is not the same choice as a rule ticked in here.
   selectedRules = new Set();
@@ -3889,7 +3996,7 @@ function openRuleGroupFor(destination) {
 function closeRuleGroup() {
   if (!openRuleGroup) return;
 
-  const previous = openRuleGroup.id;
+  const previous = openRuleGroup.key;
   openRuleGroup = null;
   selectedRules = new Set();
 
@@ -3907,6 +4014,14 @@ function closeRuleGroup() {
  * a delete usually has: no mail moves, nothing that was filed comes back, and
  * the only thing that changes is what happens to mail that has not arrived. The
  * irreversible part is the rule itself — Gmail has no way to restore a filter.
+ *
+ * **A row is not a filter, and that shows up here.** Gmail cannot remove part of
+ * a filter, so deleting a row belonging to one that files into several folders
+ * takes its other rows with it — including rows in the list behind, which nobody
+ * ticked. `alsoGoing` is that set, and it is counted rather than assumed so the
+ * dialog can name it before the button is pressed.
+ *
+ * @param {object[]} doomed the ticked rows — `Rule`s, not filters
  */
 async function confirmRuleDelete(doomed, where) {
   if (!doomed.length) return;
@@ -3915,40 +4030,57 @@ async function confirmRuleDelete(doomed, where) {
     return;
   }
 
+  const ticked = new Set(doomed.map((rule) => rule.id));
+  const filterIds = new Set(doomed.map((rule) => rule.filterId));
+  const alsoGoing = rules.filter(
+    (rule) => filterIds.has(rule.filterId) && !ticked.has(rule.id)
+  );
+  const total = doomed.length + alsoGoing.length;
+
   const { ok } = await askConfirm({
     verb: 'Delete',
-    countText: ruleCount(doomed.length),
+    countText: ruleCount(total),
     where,
     text:
       'Mail that has already been filed stays exactly where it is — a rule only ' +
       'ever acts on mail as it arrives. New mail that would have matched will land ' +
       'in your inbox instead, as it did before the rule was made. Gmail cannot ' +
-      'restore a deleted filter, so it would have to be made again.',
-    button: doomed.length === 1 ? 'Delete rule' : 'Delete rules',
+      'restore a deleted filter, so it would have to be made again.' +
+      (alsoGoing.length
+        ? ` One of these files mail into more than one folder, and Gmail cannot ` +
+          `remove part of a filter — so ${ruleCount(alsoGoing.length)} sending mail ` +
+          `elsewhere ${alsoGoing.length === 1 ? 'goes' : 'go'} as well.`
+        : ''),
+    button: total === 1 ? 'Delete rule' : 'Delete rules',
     destructive: true,
   });
   if (!ok) return;
 
-  setAction(`Deleting ${ruleCount(doomed.length)}…`);
+  setAction(`Deleting ${ruleCount(total)}…`);
 
   try {
-    const { deleted, failed } = await deleteRules(doomed.map((rule) => rule.id));
+    const { deleted, failed } = await deleteRules([...filterIds]);
     const gone = new Set(deleted);
-    rules = rules.filter((rule) => !gone.has(rule.id));
+    const stuck = new Set(failed);
+    // Rows, not filters: what someone counted on screen and what Gmail was
+    // addressed about are different units, and the report is about the rows.
+    const removed = rules.filter((rule) => gone.has(rule.filterId)).length;
+    const kept = rules.filter((rule) => stuck.has(rule.filterId)).length;
+    rules = rules.filter((rule) => !gone.has(rule.filterId));
     selectedDestinations = new Set();
     selectedRules = new Set();
 
     setAction(null);
 
     // The drill-down was about a folder nothing points at any more.
-    const destinations = new Set(rules.map((rule) => rule.destination));
-    if (openRuleGroup && !destinations.has(openRuleGroup.id)) closeRuleGroup();
+    const groups = new Set(rules.map(groupKeyOf));
+    if (openRuleGroup && !groups.has(openRuleGroup.key)) closeRuleGroup();
     else renderRules();
 
     flash(
-      failed.length
-        ? `${ruleCount(deleted.length)} deleted. ${failed.length.toLocaleString()} could not be.`
-        : `${ruleCount(deleted.length)} deleted.`
+      kept
+        ? `${ruleCount(removed)} deleted. ${ruleCount(kept)} could not be.`
+        : `${ruleCount(removed)} deleted.`
     );
   } catch (err) {
     console.error('[MailBoy] could not delete those rules:', err);
@@ -3961,7 +4093,7 @@ async function confirmRuleDelete(doomed, where) {
 
 /** Delete every rule under the ticked destinations. */
 function deletePickedGroups() {
-  const groups = listedGroups.filter((group) => selectedDestinations.has(group.id));
+  const groups = listedGroups.filter((group) => selectedDestinations.has(group.key));
   const doomed = groups.flatMap((group) => group.rules);
   const where =
     groups.length === 1
@@ -3978,10 +4110,17 @@ function deletePickedRules() {
 }
 
 /**
- * Which rules point at the folders a delete is about to remove.
+ * Which of MailBoy's own rules point at the folders a delete is about to remove.
  *
  * One quota unit, spent before the delete dialog opens so it can say what will
  * happen to them. A failure here costs the sentence and never the delete.
+ *
+ * **Only MailBoy's.** A filter the user made in Gmail is theirs, and taking one
+ * away as a side effect of deleting a folder is a bigger liberty than tidying up
+ * after ourselves — the more so since one filter can file into several folders,
+ * and Gmail offers no way to remove just the doomed one. Those are left to show
+ * up in the Rules tab as pointing at a folder that no longer exists, where
+ * deleting them is a deliberate act.
  */
 async function rulesForFolders(labelIds) {
   const wanted = new Set(labelIds);
@@ -3989,7 +4128,7 @@ async function rulesForFolders(labelIds) {
     const { rules: found } = await listRules();
     rules = found;
     rulesLoaded = true;
-    return found.filter((rule) => wanted.has(rule.destination));
+    return found.filter((rule) => rule.origin === 'mailboy' && wanted.has(rule.destination));
   } catch (err) {
     console.warn('[MailBoy] could not check which rules point at this folder:', err);
     return [];
@@ -4990,10 +5129,10 @@ el.ruleDetailRows.addEventListener('change', (event) => {
 });
 
 // Exactly what is listed. On the destinations screen that is every rule on the
-// account; inside one, every rule sending mail there.
+// account, both sections; inside one, every rule sending mail there.
 el.rulesSelectAll.addEventListener('change', () => {
   selectedDestinations = el.rulesSelectAll.checked
-    ? new Set(listedGroups.map((group) => group.id))
+    ? new Set(listedGroups.map((group) => group.key))
     : new Set();
   syncRuleRows(el.ruleRows, '.rule', 'destination', selectedDestinations);
 });

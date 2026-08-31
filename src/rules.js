@@ -4,6 +4,24 @@
 // from one sender goes to one folder, or everything with one subject does. Both
 // are the same shape underneath: match, add the destination, take away INBOX.
 //
+// ── Filters MailBoy did not make ─────────────────────────────────
+//
+// The Rules tab lists those too, in a section of their own, because a filter
+// somebody made in Gmail files mail into the same folders and a screen that
+// pretended otherwise would be describing half a mailbox. Only the ones MailBoy
+// can state in one honest sentence are shown: the criteria has to be a sender or
+// a subject and *nothing else* (`matchers` is the check), and the action has to
+// put mail in a place MailBoy shows (`isFolder`).
+//
+// Anything wider — a filter matching a phrase in the body, or one that only
+// stars mail — is left to Gmail's own settings rather than drawn as a row whose
+// sentence would be a lie about what it catches.
+//
+// **One filter can be several rows.** Gmail lets a filter add any number of
+// labels, so "from foo → Receipts *and* Work" is one filter and two of the rows
+// this screen is organised by. `readFilter` fans those out, which is also why a
+// row's `id` is not Gmail's filter id — see the Rule typedef.
+//
 // Trash is a destination like any other here, which is what lets the delete
 // confirmation offer the same two boxes the move dialog does. It is the one
 // destination whose action differs — see `actionFor` — and the one whose
@@ -63,11 +81,58 @@ export const MAX_RULES = 1000;
 
 /**
  * @typedef {object} Rule
- * @property {string} id Gmail's filter id — what a delete is addressed to
+ * @property {string} id the row's own key, `<filterId>#<destination>` — *not*
+ *   what a delete is addressed to. One filter can send mail to several folders
+ *   and each is a row, so the filter id alone would not tell two of them apart.
+ * @property {string} filterId Gmail's filter id — what a delete is addressed to
+ * @property {'mailboy' | 'existing'} origin which section of the tab it belongs
+ *   to: made here, or found on the account
  * @property {'sender' | 'subject'} kind
  * @property {string} match the address, or the subject, as typed into the filter
- * @property {string} destination the label id mail is being sent to
+ * @property {string} destination the label id this row is about
+ * @property {string[]} destinations every folder the parent filter files into.
+ *   More than one means deleting this row takes the others with it — Gmail has
+ *   no way to remove part of a filter.
  */
+
+/**
+ * Label ids that are not places mail can sit, so not destinations a "move to"
+ * rule can be about.
+ *
+ * The same call *Folders, not labels* makes: `UNREAD`, `STARRED` and `IMPORTANT`
+ * are states a message carries while sitting somewhere else, and the five
+ * `CATEGORY_*` rows are Gmail's to assign. `INBOX` is excluded because adding it
+ * is not a move — mail arrives there. `SPAM` and `TRASH` are kept: both are
+ * folders MailBoy shows, and Gmail's own "Delete it" action is `TRASH`.
+ */
+const NOT_A_FOLDER = new Set(['INBOX', 'UNREAD', 'STARRED', 'IMPORTANT', 'SENT', 'DRAFT', 'CHAT']);
+
+const isFolder = (id) =>
+  typeof id === 'string' && id !== '' && !id.startsWith('CATEGORY_') && !NOT_A_FOLDER.has(id);
+
+/**
+ * Which of a filter's criteria fields actually narrow what it catches.
+ *
+ * A row reads "All mails from foo@bar.com", and that sentence is only true if
+ * the sender is the *whole* of what the filter matches on. A filter carrying
+ * `from` and `hasTheWord` as well would be drawn as something wider than it is,
+ * which is worse than not drawing it — so this is what the strictness in
+ * `readFilter` is checked against rather than a bare `criteria.from` test.
+ *
+ * `size` and `hasAttachment` are compared against their unset values rather than
+ * merely being present: Gmail returns `size: 0` and `sizeComparison:
+ * 'unspecified'` on filters that say nothing about size.
+ */
+function matchers(criteria) {
+  const narrowing = [];
+  for (const key of ['from', 'to', 'subject', 'query', 'negatedQuery', 'hasAttachment', 'excludeChats', 'size']) {
+    const value = criteria[key];
+    if (value !== undefined && value !== null && value !== '' && value !== false && value !== 0) {
+      narrowing.push(key);
+    }
+  }
+  return narrowing;
+}
 
 /**
  * What a rule does to a matched message.
@@ -133,48 +198,81 @@ export function subjectRule(subject, labelId) {
 const unquote = (value) => value.replace(/^"|"$/g, '');
 
 /**
- * Read one raw filter as a rule, or null if it is not one of ours.
+ * Read one raw filter as the rows it stands for — none, if it is not something
+ * the Rules tab can state in one sentence.
  *
- * Deliberately strict about shape as well as about the mark. A filter carrying
- * the mark but no destination cannot be drawn on a screen organised by
- * destination, and guessing at what it was meant to do would be worse than
- * leaving it to Gmail's own settings.
+ * Deliberately strict about shape, and strict in the same way for both origins.
+ * A filter carrying the mark but no destination cannot be drawn on a screen
+ * organised by destination, and guessing at what it was meant to do would be
+ * worse than leaving it to Gmail's own settings; an unmarked filter that matches
+ * on more than a sender or a subject would be drawn as something wider than it
+ * is, which is the same fault from the other side.
  *
- * @returns {Rule | null}
+ * The mark decides only *which section* a filter lands in — see `MARK`. Nothing
+ * else about the reading differs, so a rule made here and the identical one made
+ * in Gmail render as the same row.
+ *
+ * @returns {Rule[]} one per folder the filter files into
  */
-export function readRule(filter) {
-  if (filter?.criteria?.negatedQuery !== MARK) return null;
+export function readFilter(filter) {
+  const criteria = filter?.criteria;
+  if (!criteria) return [];
 
-  const destination = filter.action?.addLabelIds?.[0];
-  if (!destination) {
-    console.warn('[MailBoy] a marked filter has no destination; leaving it alone', filter.id);
-    return null;
+  const ours = criteria.negatedQuery === MARK;
+  // The mark is bookkeeping rather than a condition anybody wrote, so it does
+  // not count against the "sender or subject and nothing else" test.
+  const narrowing = matchers(criteria).filter((key) => !(ours && key === 'negatedQuery'));
+  if (narrowing.length !== 1) {
+    if (ours) console.warn('[MailBoy] a marked filter matches on more than one thing', filter.id);
+    return [];
   }
 
-  const { from, subject } = filter.criteria;
-  if (from) return { id: filter.id, kind: 'sender', match: from, destination };
-  if (subject) return { id: filter.id, kind: 'subject', match: unquote(subject), destination };
+  const [on] = narrowing;
+  if (on !== 'from' && on !== 'subject') {
+    if (ours) console.warn('[MailBoy] a marked filter matches on neither sender nor subject', filter.id);
+    return [];
+  }
 
-  console.warn('[MailBoy] a marked filter matches on neither sender nor subject', filter.id);
-  return null;
+  const destinations = (filter.action?.addLabelIds ?? []).filter(isFolder);
+  if (!destinations.length) {
+    if (ours) console.warn('[MailBoy] a marked filter has no destination; leaving it alone', filter.id);
+    return [];
+  }
+
+  const shared = {
+    filterId: filter.id,
+    origin: ours ? 'mailboy' : 'existing',
+    kind: on === 'from' ? 'sender' : 'subject',
+    match: on === 'from' ? criteria.from : unquote(criteria.subject),
+    destinations,
+  };
+
+  return destinations.map((destination) => ({
+    ...shared,
+    id: `${filter.id}#${destination}`,
+    destination,
+  }));
 }
 
 /**
- * Every rule MailBoy manages, and how many filters the account holds in total.
+ * Every rule the Rules tab can draw — MailBoy's and the account's own — and how
+ * many filters the account holds in total.
  *
  * One quota unit for all of it — `filters.list` does not paginate. The total is
  * the account's, not ours: the 1,000-filter ceiling is shared with every filter
  * the user ever made in Gmail itself, so it is the only number worth checking a
- * bulk create against.
+ * bulk create against. It also counts filters no row here stands for, which is
+ * right — they take up the same allowance.
  *
  * @returns {Promise<{rules: Rule[], filters: number}>}
  */
 export async function listRules() {
   const filters = await listFilters();
-  const rules = filters.map(readRule).filter(Boolean);
+  const rules = filters.flatMap(readFilter);
   trace('rules', 'read every filter on the account', {
     filters: filters.length,
-    ours: rules.length,
+    ours: rules.filter((rule) => rule.origin === 'mailboy').length,
+    existing: rules.filter((rule) => rule.origin === 'existing').length,
     units: 1,
   });
   return { rules, filters: filters.length };
@@ -213,7 +311,13 @@ export async function createRules(specs) {
 
     try {
       const filter = await createFilter(body);
-      created.push({ id: filter.id, ...spec });
+      created.push({
+        ...spec,
+        id: `${filter.id}#${spec.destination}`,
+        filterId: filter.id,
+        origin: 'mailboy',
+        destinations: [spec.destination],
+      });
     } catch (err) {
       console.error('[MailBoy] could not create a rule for', spec.match, err);
       failed.push({ match: spec.match, message: err?.message ?? '' });
@@ -225,7 +329,11 @@ export async function createRules(specs) {
 }
 
 /**
- * Remove rules, one call each.
+ * Remove filters, one call each.
+ *
+ * These are **filter ids, not row ids** — `Rule.filterId`, deduplicated by the
+ * caller. A filter filing into two folders is two rows here and one filter to
+ * Gmail, and there is no way to remove half of it.
  *
  * A 404 counts as removed: the filter is gone, which is what was asked for, and
  * the likeliest way to see one is a rule deleted in Gmail's settings since this

@@ -1383,6 +1383,32 @@ body {
   color: var(--muted);
 }
 
+/* Which half of the tab a run of rows is: the ones MailBoy made, then the ones
+   it found. Same type as the folder list's group titles — the two lists are
+   doing the same job, and a heading that looked different would suggest the rows
+   under it work differently, which is exactly what is not true here.
+
+   Not part of the sticky head: there are two of them and the head is one row. */
+.rule-section {
+  margin: 0;
+  padding: 14px var(--pad-x) 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.rule-section:first-child {
+  padding-top: 8px;
+}
+
+/* A section with nothing in it says so under its own heading, rather than the
+   heading vanishing — see renderRuleGroups. */
+.rule-section + .empty {
+  padding-top: 2px;
+}
+
 /* The one destination that destroys mail. It reads "Move to Trash" like any
    other row, because that is what it does — the colour is so it is not read
    like any other row. */
