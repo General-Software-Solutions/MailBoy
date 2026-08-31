@@ -1,4 +1,5 @@
 import { AuthError, getToken, invalidateToken } from './auth.js';
+import { trace } from './trace.js';
 
 const BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const BATCH = 'https://gmail.googleapis.com/batch/gmail/v1';
@@ -332,7 +333,10 @@ export async function listHistory(startHistoryId, stopped) {
 
   try {
     for (let page = 0; page < MAX_PAGES; page++) {
-      if (stopped?.()) return { records, expired: false };
+      if (stopped?.()) {
+        trace('sync', 'change-log walk stopped partway — no bookmark taken', { pages: page });
+        return { records, expired: false };
+      }
 
       const data = await call(
         '/history',
@@ -347,10 +351,14 @@ export async function listHistory(startHistoryId, stopped) {
       historyId = data.historyId ?? historyId;
 
       pageToken = data.nextPageToken;
-      if (!pageToken) return { records, historyId, expired: false };
+      if (!pageToken) {
+        trace('sync', 'change-log walk finished', { pages: page + 1, units: (page + 1) * 2 });
+        return { records, historyId, expired: false };
+      }
     }
   } catch (err) {
     if (err instanceof GmailError && err.status === 404) {
+      trace('sync', '404 — the bookmark has aged out of Gmail’s log');
       return { records: [], expired: true };
     }
     throw err;

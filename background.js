@@ -28,6 +28,7 @@ import { clearBulkJob, readBulkJob, runBulkJob, saveBulkJob } from './src/bulk.j
 import { clearDeleteJob, readDeleteJob, runDeleteJob, saveDeleteJob } from './src/folders.js';
 import { buildQueue } from './src/mailbox.js';
 import { ensureMeta, flushMessages } from './src/messages.js';
+import { trace } from './src/trace.js';
 
 const PORT_NAME = 'measure';
 const ALARM = 'measure';
@@ -191,6 +192,9 @@ async function measure(order) {
     chrome.alarms.create(ALARM, { periodInMinutes: RESUME_MINUTES });
 
     const queue = order ?? (await buildQueue());
+    trace('measure', order ? 'started on the panel’s queue' : 'started, building its own queue', {
+      messages: queue.length,
+    });
 
     await ensureMeta(
       queue,
@@ -204,6 +208,7 @@ async function measure(order) {
     // Whatever was read before the stop is still worth keeping.
     await flushMessages(new Set(queue));
     progress = null;
+    trace('measure', stopping ? 'stopped' : 'finished');
     broadcast({ type: stopping ? 'stopped' : 'done' });
     await chrome.alarms.clear(ALARM);
   } catch (err) {
@@ -290,11 +295,18 @@ async function runDelete(job) {
     if (!outcome.complete) {
       // Stopped, not finished. The record stays and the alarm above is gone, so
       // nothing resumes until the panel asks again — which is what a stop means.
+      trace('job', 'folder delete stopped', outcome);
       broadcast({ type: 'delete-stopped', ...outcome, name }, folderPorts);
       return;
     }
 
     await clearDeleteJob();
+    trace('job', `folder delete finished — ${job.trash ? 'to Trash' : 'to the inbox'}`, {
+      trashed: outcome.trashed,
+      restored: outcome.restored,
+      refused: outcome.failed.length,
+      folders: job.labels.length,
+    });
     broadcast({ type: 'delete-done', ...outcome, name, labels: job.labels }, folderPorts);
   } catch (err) {
     console.error('[MailBoy] deleting folder failed:', err);
@@ -370,11 +382,18 @@ async function runBulk(job) {
     if (!outcome.complete) {
       // Stopped, not finished. The record stays and the alarm is gone, so
       // nothing resumes until the panel asks again — which is what a stop means.
+      trace('job', `${job.action} stopped`, outcome);
       broadcast({ type: 'bulk-stopped', ...outcome, ...shape }, folderPorts);
       return;
     }
 
     await clearBulkJob();
+    trace('job', `${job.action} finished`, {
+      moved: outcome.moved,
+      trashed: outcome.trashed,
+      refused: outcome.failed.length,
+      of: job.ids.length,
+    });
     broadcast({ type: 'bulk-done', ...outcome, ...shape }, folderPorts);
   } catch (err) {
     console.error('[MailBoy] selection job failed:', err);

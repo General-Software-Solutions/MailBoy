@@ -56,6 +56,7 @@ import {
   unpatchMessages,
 } from './src/mailbox.js';
 import { clearMessages, dayOf, reloadMessages, resetMessages, sizeOf } from './src/messages.js';
+import { trace } from './src/trace.js';
 
 // Both live in the signed-in account's namespace — see src/account.js. Bare
 // names, scoped at the point of use.
@@ -2286,6 +2287,13 @@ function projectAction(ids, { action, from, destination = null }) {
   pendingProjection = { action, ids: [...ids], destination, removed };
   projected = true;
 
+  trace('action', `${action} dispatched — showing the mail leaving`, {
+    messages: ids.length,
+    leaving: touched,
+    // Nothing appears here until the job reports back. That is the point.
+    destination: destination ?? '(unknowable — will need a listing)',
+  });
+
   paintPatched(touched);
   // The freshness gate means the next open may run no load at all, so a
   // projection that lives only in memory would be undone by closing the panel.
@@ -2303,6 +2311,12 @@ function completeProjection(landed, stranded) {
   const destination = pendingProjection?.destination;
   const removed = pendingProjection?.removed ?? {};
   const touched = new Set();
+
+  trace('action', 'settled from the job’s own outcome — no listing', {
+    landed: landed.length,
+    putBack: stranded.length,
+    destination,
+  });
 
   if (destination && landed.length) {
     for (const rowId of patchMessages(landed, { add: [destination] }).touched) {
@@ -2355,13 +2369,18 @@ function completeProjection(landed, stranded) {
  *
  * @param {{landed?: string[], stranded?: string[], listing?: boolean}} outcome
  */
-function resolveAction({ landed, stranded, listing = false }) {
-  if (!projected && !listing) return;
+function resolveAction({ landed, stranded, listing = false, why }) {
+  if (!projected && !listing) {
+    trace('action', 'nothing to settle');
+    return;
+  }
 
   if (!listing && pendingProjection) {
     completeProjection(landed ?? [], stranded ?? []);
     return;
   }
+
+  trace('action', `settling by listing the mailbox — ${why ?? 'nothing to settle from'}`);
 
   pendingProjection = null;
   projected = false;
@@ -2867,7 +2886,7 @@ function onFolderMessage(message) {
     setAction(null);
     flash(`Stopped deleting “${name}”. The folder is still there.`);
     // Some of the mail moved and some did not, and the job does not say which.
-    resolveAction({ listing: true });
+    resolveAction({ listing: true, why: 'the delete was stopped partway' });
     return;
   }
 
@@ -2877,7 +2896,7 @@ function onFolderMessage(message) {
     markWorkingRows();
     setAction(null);
     flash(`Couldn't finish deleting “${name}”.`);
-    resolveAction({ listing: true });
+    resolveAction({ listing: true, why: 'the delete failed outright' });
     return;
   }
 
@@ -2912,7 +2931,7 @@ function onFolderMessage(message) {
     setAction(null);
     flash("Couldn't finish moving those emails.");
     // The rows are showing mail gone from somewhere it may never have left.
-    resolveAction({ listing: true });
+    resolveAction({ listing: true, why: 'the selection job failed outright' });
   }
 }
 
@@ -2935,13 +2954,17 @@ function onFolderMessage(message) {
  * - **A restore** has no destination to settle *into*, whatever it reports.
  */
 function settlementOf(message, stopped = false) {
-  if (!pendingProjection) return { listing: true };
+  if (!pendingProjection) {
+    return { listing: true, why: 'this panel adopted the job and never projected it' };
+  }
 
   const { action, ids } = pendingProjection;
-  if (action === 'restore') return { listing: true };
+  if (action === 'restore') {
+    return { listing: true, why: 'a restore lands in folders nothing here can know' };
+  }
 
   if (action === 'trash') {
-    if (stopped) return { listing: true };
+    if (stopped) return { listing: true, why: 'a stopped trash does not report which went' };
     const refused = new Set(message.failed ?? []);
     return {
       landed: ids.filter((id) => !refused.has(id)),
@@ -3248,11 +3271,13 @@ async function measureNewMail(ids) {
   stopRequested = false;
   setBusy(true);
   setProgress('measuring', 0, ids.length);
+  trace('measure', 'sizing mail the change log turned up', { messages: ids.length });
 
   try {
     await measureInWorker(ids, (_found, done, total) => setProgress('measuring', done, total));
     // The worker did the writing, so this copy is behind.
     await reloadMessages();
+    trace('measure', 'done');
 
     // Every row, not just the ones that gained mail: a message read here counts
     // towards each row that holds it, and dedup means one read settles several.
@@ -3282,9 +3307,23 @@ async function isFresh() {
     // did. It is never a base to patch from, however recent — the panel that
     // promised it may have been closed before the job reported back, and the
     // listing is what makes that honest again.
-    if (cached?.projected) return false;
+    if (cached?.projected) {
+      trace('open', 'the snapshot is an unsettled action — listing');
+      return false;
+    }
 
-    return Boolean(cached?.counts) && Date.now() - cached.generatedAt < REFRESH_AFTER_MS;
+    if (!cached?.counts) {
+      trace('open', 'no snapshot to patch from — listing');
+      return false;
+    }
+
+    const age = Date.now() - cached.generatedAt;
+    if (age >= REFRESH_AFTER_MS) {
+      trace('open', 'snapshot past its week — listing', { days: Math.round(age / 864e5) });
+      return false;
+    }
+
+    return true;
   } catch {
     return false;
   }
@@ -3315,7 +3354,14 @@ async function jobOutstanding() {
 
   try {
     const [remainingDelete, remainingBulk] = await Promise.all([readDeleteJob(), readBulkJob()]);
-    return Boolean(remainingDelete || remainingBulk);
+    const pending = Boolean(remainingDelete || remainingBulk);
+    if (pending) {
+      trace('job', 'a record was left behind by a previous open', {
+        delete: Boolean(remainingDelete),
+        bulk: Boolean(remainingBulk),
+      });
+    }
+    return pending;
   } catch (err) {
     console.warn('[MailBoy] could not check for a pending job:', err);
     return false;
@@ -3341,6 +3387,8 @@ async function syncFromHistory() {
   paintPatched(changed);
   refreshOpenLists();
 
+  trace('open', 'up to date from the change log — no listing needed');
+
   // New mail has nothing cached about it, so its rows would count it and never
   // size it. Not awaited — a first sight of a big thread is minutes, and the
   // counts above are already on screen.
@@ -3353,10 +3401,12 @@ async function syncFromHistory() {
  * A complete load's snapshot. No `projected` flag — these numbers are Gmail's
  * own, which is exactly what makes the next open able to patch from them.
  */
-async function writeSnapshot(generatedAt, groups, counts) {
+async function writeSnapshot(generatedAt, groups, counts, when) {
   try {
     const key = await scopedKey(CACHE_NAME);
-    if (key) await chrome.storage.local.set({ [key]: { generatedAt, groups, counts } });
+    if (!key) return;
+    await chrome.storage.local.set({ [key]: { generatedAt, groups, counts } });
+    trace('snapshot', `saved — ${when}`);
   } catch (err) {
     console.warn('[MailBoy] could not cache this pass:', err);
   }
@@ -3369,8 +3419,11 @@ async function writeSnapshot(generatedAt, groups, counts) {
 async function load({ force = false } = {}) {
   if (loading) return;
 
+  trace('open', force ? 'asked for a full listing' : 'deciding how to catch up');
+
   // Before either path, and it blocks both. See `jobOutstanding`.
   if (await jobOutstanding()) {
+    trace('open', 'a job is still moving mail — reading nothing');
     membershipReady = restoreMembership();
     // Someone who pressed the button is owed an answer; an open that quietly
     // skipped its sync is not worth interrupting for.
@@ -3437,7 +3490,7 @@ async function load({ force = false } = {}) {
         // the worker keeps measuring whether the panel is open or not.
         if (!countsSettled) {
           countsSettled = true;
-          void writeSnapshot(generatedAt, groups, records);
+          void writeSnapshot(generatedAt, groups, records, 'counts final, sizes still coming');
         }
       },
       measure: measureInWorker,
@@ -3455,7 +3508,7 @@ async function load({ force = false } = {}) {
       projected = false;
       pendingProjection = null;
       countsSettled = true;
-      await writeSnapshot(generatedAt, groups, counts);
+      await writeSnapshot(generatedAt, groups, counts, 'pass complete');
     }
   } catch (err) {
     setProgress(null);
@@ -3723,6 +3776,7 @@ el.refresh.addEventListener('click', () => (busy ? stopLoad() : load({ force: tr
  * costs the progress and nothing else.
  */
 addEventListener('pagehide', () => {
+  trace('snapshot', countsSettled ? 'panel closing — flushing' : 'panel closing mid-count — not flushing');
   if (countsSettled) void saveSnapshot();
 });
 

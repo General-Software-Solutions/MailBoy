@@ -15,6 +15,7 @@ import {
   listMessageIds,
 } from './gmail.js';
 import { buildGroups } from './labels.js';
+import { trace } from './trace.js';
 import {
   bySender,
   idsForSenders,
@@ -189,6 +190,7 @@ export async function stampHistoryId(historyId) {
 
     bookmark = historyId;
     await chrome.storage.local.set({ [key]: { ...stored, historyId } });
+    trace('bookmark', 'moved on past a settled action', { to: historyId });
   } catch (err) {
     // The next open replays from the old bookmark instead. Harmless.
     console.warn('[MailBoy] could not move the change-log bookmark:', err);
@@ -394,10 +396,24 @@ export function unpatchMessages(removed) {
  */
 export async function syncHistory(groups, stopped) {
   await restoreMembership();
-  if (!counts.size || !bookmark) return { synced: false };
+
+  if (!counts.size || !bookmark) {
+    trace('sync', 'refused — nothing to patch from', {
+      rows: counts.size,
+      bookmark,
+    });
+    return { synced: false };
+  }
+
+  trace('sync', 'asking the change log what has changed', { since: bookmark });
 
   const { records, historyId, expired } = await listHistory(bookmark, stopped);
-  if (expired) return { synced: false };
+  if (expired) {
+    trace('sync', 'refused — Gmail has forgotten this bookmark, or the log is too long');
+    return { synced: false };
+  }
+
+  trace('sync', `${records.length} record(s)`, { since: bookmark, now: historyId });
 
   // ── What each touched message now carries ──────────────────────
   //
@@ -451,6 +467,7 @@ export async function syncHistory(groups, stopped) {
   // so loudly is what turns this from a silent drift into something findable.
   if (unreadable) {
     console.warn(`[MailBoy] ${unreadable} change-log records carried no label set; listing instead`);
+    trace('sync', 'refused — records without a label set', { unreadable });
     return { synced: false };
   }
 
@@ -508,6 +525,14 @@ export async function syncHistory(groups, stopped) {
   // bookmark stands and the next open replays. The work above is not wasted:
   // every change applies as a set operation, so seeing it twice changes nothing.
   await saveMembership(counts, historyId);
+
+  trace('sync', changed.size ? 'patched' : 'nothing moved', {
+    messages: labelsById.size,
+    deleted: gone.size,
+    rows: [...changed],
+    unmeasured: added.length,
+    bookmark: historyId ?? `${bookmark} (kept — walk did not finish)`,
+  });
 
   return { synced: true, changed: [...changed], added };
 }
@@ -740,7 +765,16 @@ export async function collect(groups, hooks = {}) {
     // This enumeration is Gmail's own answer, so it supersedes anything an
     // action projected before it ran.
     patched = new Set();
-    void bookmarkAt.then((historyId) => saveMembership(counted, historyId));
+    void bookmarkAt.then((historyId) => {
+      trace('listing', 'enumerated every row', {
+        rows: counted.size,
+        messages: [...counted.values()].reduce((sum, ids) => sum + ids.length, 0),
+        bookmark: historyId ?? '(unchanged — no profile for this pass)',
+      });
+      return saveMembership(counted, historyId);
+    });
+  } else {
+    trace('listing', 'stopped partway — membership and bookmark left alone');
   }
 
   await provisional;
