@@ -26,6 +26,7 @@ import {
   GmailError,
   fetchMessageHeaders,
   getMessage,
+  getProfile,
   getUserInfo,
   listLabels,
 } from './src/gmail.js';
@@ -50,8 +51,11 @@ import {
   recountRows,
   resetMembership,
   restoreMembership,
+  stampHistoryId,
+  syncHistory,
+  unpatchMessages,
 } from './src/mailbox.js';
-import { clearMessages, dayOf, resetMessages, sizeOf } from './src/messages.js';
+import { clearMessages, dayOf, reloadMessages, resetMessages, sizeOf } from './src/messages.js';
 
 // Both live in the signed-in account's namespace — see src/account.js. Bare
 // names, scoped at the point of use.
@@ -59,13 +63,19 @@ const CACHE_NAME = 'snapshot';
 const IDENTITY_NAME = 'identity';
 
 /**
- * How stale the numbers may get before an open re-reads them.
+ * How long a snapshot may stand before an open re-lists the whole mailbox.
  *
- * Enumeration costs a few seconds of listing every time, and a mailbox does not
- * change enough between openings of a side panel to be worth paying that on
- * each one. "Refresh current data" is there for when it does.
+ * A week, not a day, because an open no longer chooses between "stale" and
+ * "seconds of listing": it patches membership from Gmail's change log for two
+ * quota units, so the numbers are current either way. What the full listing is
+ * still for is the drift a change log cannot fix — the log only says what
+ * changed, so anything already wrong stays wrong — and Gmail keeps roughly a
+ * week of log, past which there is nothing to patch from anyway.
+ *
+ * "Refresh current data" forces one at any time, and remains the only way to
+ * correct membership that has gone wrong.
  */
-const REFRESH_AFTER_MS = 24 * 60 * 60 * 1000;
+const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 const el = {
   boot: document.getElementById('screen-boot'),
@@ -2061,13 +2071,21 @@ async function confirmDelete(labelId) {
   markWorkingRows();
   setAction(`Deleting “${target.name}”…`);
 
-  // What happens to the mail shows straight away, the same as it does for a
-  // selection: the folder empties as it is trashed, or the inbox grows as it is
-  // handed back. The rows themselves stay until the job says the labels are
-  // gone — a folder being emptied is not yet a folder that has been deleted.
+  // The folder empties straight away, the same as it does for a selection —
+  // and, the same as a selection, the mail does not turn up where it is going
+  // until the job says it has arrived. The rows themselves stay until the job
+  // says the labels are gone: a folder being emptied is not yet a folder that
+  // has been deleted.
+  //
+  // The inbox path takes the folder's own rows as what it vacates rather than
+  // `shedding`, because that is all it does — mail keeps every other folder it
+  // is in, which is what makes it a rescue rather than a filing decision.
+  const familyIds = family.map((row) => row.id);
   projectAction(
     family.flatMap((row) => idsIn(row.id)),
-    choice.trash ? landing('trash') : { add: ['INBOX'] }
+    choice.trash
+      ? { action: 'trash', from: shedding('TRASH'), destination: 'TRASH' }
+      : { action: 'restore-folder', from: familyIds, destination: 'INBOX' }
   );
 
   folderChannel().postMessage({
@@ -2162,30 +2180,62 @@ const jobRunning = () => Boolean(deleteState || bulkState);
  *   it was there: they are states a message carries, not places it sits. A move
  *   must not silently mark things read or drop your stars.
  */
+/** Every row on screen — Google's folders and yours — as `shedding` counts them. */
+const allRows = () => [...defaultsOf(currentGroups ?? {}), ...folderRows()];
+
 function shedding(targetId) {
-  const rows = [...defaultsOf(currentGroups ?? {}), ...folderRows()];
-  return rows.map((row) => row.id).filter((id) => id !== targetId);
+  return allRows()
+    .map((row) => row.id)
+    .filter((id) => id !== targetId);
 }
 
 // ── Showing an action before Gmail has done it ───────────────────
 //
 // A trash over a large selection is minutes, and every number on screen used to
 // go on describing where the mail was for the whole of it — the row it left,
-// the breakdown behind it, the mail list it was ticked in. The action itself is
-// the one thing that knows where the mail is going, so the panel patches
-// membership with it and repaints, and the load that runs when the job reports
-// back replaces the projection with what Gmail actually did.
+// the breakdown behind it, the mail list it was ticked in. Pressing Delete and
+// watching nothing move reads as the button not working.
+//
+// **Only the leaving is shown.** The mail drops out of the folder it is going
+// from the instant the action is dispatched, and does not appear at its
+// destination until the job has actually finished putting it there. So for the
+// length of the job it is in no row at all — which is the point: a destination
+// row that grew early would invite someone to select that mail and act on it
+// while it is still in flight. The status line is what accounts for the
+// difference in the meantime.
 //
 // This is a promise the panel makes on the job's behalf, so it has to be
-// unmade honestly: `reconcile` runs on every ending, not just a successful one.
+// settled honestly on every ending — see `resolveAction`.
 
 /** Whether the rows are showing an action's intent rather than a real load. */
 let projected = false;
 
 /**
- * Where an action leaves the mail, **in the rows MailBoy shows.** That is not
- * the list of labels the job sends Gmail, and the gap between the two is the
- * whole of what this has to get right:
+ * Whether the counts on screen are a finished enumeration.
+ *
+ * Only true counts are worth flushing when the panel closes. Mid-enumeration the
+ * rows hold a partial pass, and writing those under the previous snapshot's
+ * timestamp would leave the next open patching the change log onto numbers that
+ * were never right.
+ */
+let countsSettled = true;
+
+/**
+ * The projection outstanding, kept so the ending can complete it or undo it.
+ *
+ * `removed` is what came out of which row, which is the only way to put back the
+ * part of a job that never ran. Memory only: a panel that adopted a job from a
+ * previous open has none of this, and takes the full listing instead.
+ *
+ * @type {{action: string, ids: string[], destination: string | null,
+ *   removed: Record<string, string[]>} | null}
+ */
+let pendingProjection = null;
+
+/**
+ * Which rows an action takes the mail **out of**, in the rows MailBoy shows.
+ * That is not the list of labels the job sends Gmail, and the gap between the
+ * two is the whole of what this has to get right:
  *
  * - A **move** sheds exactly what the job sheds, so those two agree by
  *   construction.
@@ -2195,55 +2245,125 @@ let projected = false;
  *   label but Trash (see `includeSpamTrash` in gmail.js). So a folder's number
  *   drops even though its label is still on the mail, which is exactly what
  *   the next enumeration will find.
- * - A **restore** is the one that cannot be projected in full. The mail comes
- *   back into whatever folders it still carries, and nothing here knows which
- *   those were — membership dropped them when it was trashed. Inbox is the
- *   part that is certain; the rest undercounts until the load that follows.
+ * - A **restore** leaves Trash and nothing else. Where it lands is unknowable
+ *   from here — the mail comes back into whatever folders it still carries, and
+ *   membership dropped those when it was trashed — which is why a restore is
+ *   the one ending that always pays for a real listing.
  *
  * @param {'trash' | 'move' | 'restore'} action
  * @param {string} [targetId] where a move is going
+ * @returns {string[]}
  */
-function landing(action, targetId) {
-  if (action === 'trash') return { add: ['TRASH'], remove: shedding('TRASH') };
-  if (action === 'restore') return { add: ['INBOX'], remove: ['TRASH'] };
-  return { add: [targetId], remove: shedding(targetId) };
+function vacating(action, targetId) {
+  if (action === 'trash') return shedding('TRASH');
+  if (action === 'restore') return ['TRASH'];
+  return shedding(targetId);
 }
 
-/**
- * Patch membership, repaint the rows it changed, and remember that the panel
- * now owes a real load.
- *
- * @param {string[]} ids
- * @param {{add?: string[], remove?: string[]}} where
- */
-function projectAction(ids, where) {
-  const touched = patchMessages(ids, where);
+/** Rows carry over whatever `settled` they had: a measuring pass in flight still
+ *  owes them sizes, and saying otherwise stops a spinner early over a figure
+ *  that is still filling in. */
+function paintPatched(touched) {
   if (!touched.length) return;
 
   const records = recountRows(touched);
   for (const [id, record] of Object.entries(records)) {
-    // A patched row is exactly as settled as it was. A measuring pass in
-    // flight still owes it sizes, and saying otherwise here would stop its
-    // spinner early over a figure that is still filling in.
     record.settled = painted[id]?.settled ?? false;
   }
-
-  projected = true;
   paintRecords(records);
+}
+
+/**
+ * Take the mail out of the rows it is leaving, and remember enough to finish the
+ * job off when the worker reports back.
+ *
+ * @param {string[]} ids
+ * @param {{action: string, from: string[], destination?: string | null}} where
+ */
+function projectAction(ids, { action, from, destination = null }) {
+  const { touched, removed } = patchMessages(ids, { remove: from });
+
+  pendingProjection = { action, ids: [...ids], destination, removed };
+  projected = true;
+
+  paintPatched(touched);
   // The freshness gate means the next open may run no load at all, so a
   // projection that lives only in memory would be undone by closing the panel.
   void saveSnapshot();
 }
 
 /**
- * Put Gmail's own numbers back over the projection, however the job ended.
+ * Finish a projection off: put the mail that landed into its destination, put
+ * back whatever never moved, and move the change-log bookmark past the job.
  *
- * @param {boolean} moved whether the job itself reports having touched mail —
- *   which matters for a panel that adopted the job from a previous open and so
- *   never projected anything.
+ * @param {string[]} landed ids Gmail confirmed it moved
+ * @param {string[]} stranded ids it did not
  */
-function reconcile(moved) {
-  if (!projected && !moved) return;
+function completeProjection(landed, stranded) {
+  const destination = pendingProjection?.destination;
+  const removed = pendingProjection?.removed ?? {};
+  const touched = new Set();
+
+  if (destination && landed.length) {
+    for (const rowId of patchMessages(landed, { add: [destination] }).touched) {
+      touched.add(rowId);
+    }
+  }
+
+  if (stranded.length) {
+    // Only the rows these actually came out of, so a message that was never in
+    // a row does not get invented into one.
+    const back = {};
+    const missing = new Set(stranded);
+    for (const [rowId, ids] of Object.entries(removed)) {
+      const mine = ids.filter((id) => missing.has(id));
+      if (mine.length) back[rowId] = mine;
+    }
+    for (const rowId of unpatchMessages(back)) touched.add(rowId);
+  }
+
+  pendingProjection = null;
+  projected = false;
+
+  paintPatched([...touched]);
+  void saveSnapshot();
+
+  // Membership now describes the mailbox after the job, so the log up to here is
+  // accounted for and replaying it next open would be work for nothing.
+  //
+  // The cost is anything *else* that happened while the job ran — new mail, a
+  // change made in Gmail on another device — which is skipped until the weekly
+  // listing. Milliseconds for a move; minutes for a large trash.
+  void getProfile()
+    .then((profile) => stampHistoryId(profile.historyId))
+    .catch((err) => console.warn('[MailBoy] could not move the bookmark on:', err));
+}
+
+/**
+ * Settle the projection however the job ended.
+ *
+ * **The full listing is the fallback, not the rule.** It used to run on every
+ * ending, which meant a clean move of three messages re-listed every row in the
+ * mailbox to confirm something the job had already reported. Where the outcome
+ * says exactly which messages landed and the panel knows where they were going,
+ * that is the answer — no re-read can improve on it.
+ *
+ * What is left needing a listing is what is genuinely unknown: a restore, whose
+ * destinations were lost when the mail was trashed; a stopped trash, which does
+ * not report which of its messages went; and any hard failure, whose extent
+ * nothing describes.
+ *
+ * @param {{landed?: string[], stranded?: string[], listing?: boolean}} outcome
+ */
+function resolveAction({ landed, stranded, listing = false }) {
+  if (!projected && !listing) return;
+
+  if (!listing && pendingProjection) {
+    completeProjection(landed ?? [], stranded ?? []);
+    return;
+  }
+
+  pendingProjection = null;
   projected = false;
 
   // A load already running is on its way to those numbers; starting a second
@@ -2278,10 +2398,19 @@ function dispatchBulk(job, { total, action, target, status }) {
   bulkState = { action, total, target };
   setAction(status);
 
-  // Say what the action does to the rows now. The job takes minutes, and the
-  // three re-renders below would otherwise redraw the mail exactly where it
-  // was — including in the folder it is being taken out of.
-  projectAction(job.ids, landing(action, job.add?.[0]));
+  // Take the mail out of the rows it is leaving, now. The job takes minutes, and
+  // the three re-renders below would otherwise redraw it exactly where it was —
+  // including in the folder it is being taken out of. Where it is *going* waits
+  // for the job to say it got there.
+  projectAction(job.ids, {
+    action,
+    // `target` here is the folder's display name; the id is what a row is keyed
+    // on and what `shedding` compares against.
+    from: vacating(action, job.add?.[0]),
+    // A restore's destinations were lost when the mail was trashed, so there is
+    // nothing to complete it with and its ending pays for a listing.
+    destination: action === 'trash' ? 'TRASH' : action === 'move' ? job.add?.[0] : null,
+  });
 
   clearSelection();
   clearMailSelection();
@@ -2724,11 +2853,11 @@ function onFolderMessage(message) {
     removeFolders(ids);
     flash(summariseDelete(message, name));
 
-    // Trashing mail and restoring it both change what other folders hold, so
-    // the numbers still on screen for those are now wrong — and where the panel
-    // projected the move at the click, they are wrong in the other direction
-    // too. An empty folder changes nothing and is not worth a re-read.
-    reconcile(Boolean(message.trashed || message.restored));
+    // Both paths have a destination the panel knows — Trash, or the inbox — so
+    // a completed one settles from the outcome. The job lists its own labels
+    // rather than taking the ids the panel projected, so the two sets can differ
+    // slightly where mail arrived mid-job; the weekly listing squares that up.
+    resolveAction(settlementOf(message));
     return;
   }
 
@@ -2737,8 +2866,8 @@ function onFolderMessage(message) {
     markWorkingRows();
     setAction(null);
     flash(`Stopped deleting “${name}”. The folder is still there.`);
-    // Some of the mail moved and some did not, and only a load can say which.
-    reconcile(false);
+    // Some of the mail moved and some did not, and the job does not say which.
+    resolveAction({ listing: true });
     return;
   }
 
@@ -2748,7 +2877,7 @@ function onFolderMessage(message) {
     markWorkingRows();
     setAction(null);
     flash(`Couldn't finish deleting “${name}”.`);
-    reconcile(false);
+    resolveAction({ listing: true });
     return;
   }
 
@@ -2773,11 +2902,7 @@ function onFolderMessage(message) {
         : summariseBulk(message, action, target)
     );
 
-    // Mail that has moved changes what every other folder holds, so the numbers
-    // still on screen for those are now wrong. A stop is the case that most
-    // needs this: the rows are showing the whole selection as moved, and only
-    // some of it was.
-    reconcile(Boolean(message.trashed || message.moved));
+    resolveAction(settlementOf(message, stopped));
     return;
   }
 
@@ -2786,9 +2911,57 @@ function onFolderMessage(message) {
     bulkState = null;
     setAction(null);
     flash("Couldn't finish moving those emails.");
-    // The rows are showing mail somewhere it never went.
-    reconcile(false);
+    // The rows are showing mail gone from somewhere it may never have left.
+    resolveAction({ listing: true });
   }
+}
+
+/**
+ * Read a job's outcome as a settlement: which of the projected messages landed,
+ * which did not, and whether the answer is knowable at all.
+ *
+ * The panel already receives everything this needs and used to discard it. What
+ * it can work out depends on the call the job was built from:
+ *
+ * - **`batchModify`** — a move, and the folder delete's hand-back to the inbox.
+ *   It runs in chunks of a thousand, in order, and a chunk either succeeds
+ *   whole or throws (see `modifyMessages` in gmail.js). So `moved` names a
+ *   prefix of the ids, exactly: everything before it landed, everything after
+ *   it did not.
+ * - **`messages.trash`** — one call per message, and it reports the ids it would
+ *   not move. On a completed run everything except those landed. **Stopped is
+ *   the exception**: its batches run three at a time, so which ones got through
+ *   is not a prefix and is not reported, and there is nothing to settle from.
+ * - **A restore** has no destination to settle *into*, whatever it reports.
+ */
+function settlementOf(message, stopped = false) {
+  if (!pendingProjection) return { listing: true };
+
+  const { action, ids } = pendingProjection;
+  if (action === 'restore') return { listing: true };
+
+  if (action === 'trash') {
+    if (stopped) return { listing: true };
+    const refused = new Set(message.failed ?? []);
+    return {
+      landed: ids.filter((id) => !refused.has(id)),
+      stranded: [...refused],
+    };
+  }
+
+  // The folder delete's hand-back to the inbox. It only ever reaches here having
+  // completed — a stop or a failure takes the listing above — so all of it
+  // landed. Deliberately **not** sliced by `restored`: that figure counts what
+  // the job's own re-listing found, which has no relationship to the order or
+  // the length of the ids the panel projected, so slicing by it would strand an
+  // arbitrary handful.
+  if (action === 'restore-folder') return { landed: ids, stranded: [] };
+
+  // A move. `batchModify` runs chunks of a thousand in order over this very
+  // array, and a chunk either succeeds whole or throws, so `moved` is an exact
+  // prefix of it.
+  const moved = Number.isFinite(message.moved) ? message.moved : ids.length;
+  return { landed: ids.slice(0, moved), stranded: ids.slice(moved) };
 }
 
 /**
@@ -2798,13 +2971,27 @@ function onFolderMessage(message) {
  * Without this the panel would look idle while folders quietly disappeared out
  * from under it, and the rows involved would invite a second delete.
  */
+/**
+ * Whether the pending job records have been read and turned into panel state.
+ *
+ * Until they have, `jobOutstanding` has to fall back to the records themselves;
+ * afterwards it must not, since a record outlives the stop that ended its job.
+ */
+let jobsAdopted = false;
+
 /** Housekeeping at boot, so a failure here costs the dimming, never the panel. */
 function watchPendingJobs() {
-  adoptPendingDelete().catch((err) => {
-    console.warn('[MailBoy] could not pick up the pending delete:', err);
-  });
-  adoptPendingBulk().catch((err) => {
-    console.warn('[MailBoy] could not pick up the pending selection job:', err);
+  const adopted = Promise.all([
+    adoptPendingDelete().catch((err) => {
+      console.warn('[MailBoy] could not pick up the pending delete:', err);
+    }),
+    adoptPendingBulk().catch((err) => {
+      console.warn('[MailBoy] could not pick up the pending selection job:', err);
+    }),
+  ]);
+
+  void adopted.then(() => {
+    jobsAdopted = true;
   });
 }
 
@@ -3045,9 +3232,45 @@ async function measureInWorker(order, onBatch) {
   }
 }
 
+/**
+ * Size and sender for mail the change log has just turned up.
+ *
+ * A sync patches counts without reading a single message, so a row that gains
+ * new mail counts it immediately and knows nothing about it — its size would sit
+ * short until the weekly listing. This is the piece that closes that, and it is
+ * a gain over the old behaviour rather than a cost: new mail used to go
+ * unmeasured for as long as the freshness gate held, which was a whole day.
+ *
+ * Safe to call while the worker is already measuring: `measure()` there returns
+ * early if a pass is running, and its own queue picks these up on the next wake.
+ */
+async function measureNewMail(ids) {
+  stopRequested = false;
+  setBusy(true);
+  setProgress('measuring', 0, ids.length);
+
+  try {
+    await measureInWorker(ids, (_found, done, total) => setProgress('measuring', done, total));
+    // The worker did the writing, so this copy is behind.
+    await reloadMessages();
+
+    // Every row, not just the ones that gained mail: a message read here counts
+    // towards each row that holds it, and dedup means one read settles several.
+    paintPatched(allRows().map((row) => row.id));
+    refreshOpenLists();
+  } catch (err) {
+    console.warn('[MailBoy] could not measure the new mail:', err);
+  } finally {
+    setProgress(null);
+    // A load started while this ran owns the chrome now, and clearing it here
+    // would leave that load with no card and a button reading "Refresh".
+    if (!loading) setBusy(false);
+  }
+}
+
 // ── Loading ──────────────────────────────────────────────────────
 
-/** Whether the snapshot on screen is recent enough to stand on its own. */
+/** Whether the snapshot on screen can stand as the base for a change-log sync. */
 async function isFresh() {
   try {
     const key = await scopedKey(CACHE_NAME);
@@ -3056,8 +3279,9 @@ async function isFresh() {
     const { [key]: cached } = await chrome.storage.local.get(key);
 
     // A projected snapshot is what an action was asked to do, not what Gmail
-    // did. It is never fresh, however recent — the panel that promised it may
-    // have been closed before the job reported back.
+    // did. It is never a base to patch from, however recent — the panel that
+    // promised it may have been closed before the job reported back, and the
+    // listing is what makes that honest again.
     if (cached?.projected) return false;
 
     return Boolean(cached?.counts) && Date.now() - cached.generatedAt < REFRESH_AFTER_MS;
@@ -3067,17 +3291,106 @@ async function isFresh() {
 }
 
 /**
- * @param {{force?: boolean}} [options] `force` skips the freshness check —
+ * Whether a job the worker owns is still moving mail about.
+ *
+ * Nothing reads the mailbox while one is: a listing would enumerate a mailbox
+ * that is changing under it, so its numbers would be wrong on arrival, and it
+ * would stamp the change-log bookmark at a position membership does not
+ * describe — the one failure the sync cannot detect afterwards. It would also be
+ * spending quota against the job it is racing.
+ *
+ * **`deleteState`/`bulkState` are the signal, not the job records.** A record
+ * outlives a stop by design, so that the alarm or the next open can resume it —
+ * reading records here would mean one stopped job blocked every load for the
+ * next 24 hours. The panel's own state is set on dispatch and on adoption and
+ * cleared on every ending, which is exactly the question being asked.
+ *
+ * The records are consulted for the one moment that state cannot cover: the
+ * first load of a session, which runs before `watchPendingJobs` has had a
+ * chance to adopt anything.
+ */
+async function jobOutstanding() {
+  if (jobRunning()) return true;
+  if (jobsAdopted) return false;
+
+  try {
+    const [remainingDelete, remainingBulk] = await Promise.all([readDeleteJob(), readBulkJob()]);
+    return Boolean(remainingDelete || remainingBulk);
+  } catch (err) {
+    console.warn('[MailBoy] could not check for a pending job:', err);
+    return false;
+  }
+}
+
+/**
+ * Bring the numbers up to date from Gmail's change log rather than by listing
+ * every folder — two quota units against several thousand.
+ *
+ * @returns {Promise<boolean>} whether it worked. A `false` is ordinary: no
+ *   bookmark yet, or one Gmail has forgotten. The caller lists instead.
+ */
+async function syncFromHistory() {
+  const labels = await listLabels();
+  const groups = buildGroups(labels);
+
+  const { synced, changed = [], added = [] } = await syncHistory(groups);
+  if (!synced) return false;
+
+  renderSkeleton(groups);
+  repaint();
+  paintPatched(changed);
+  refreshOpenLists();
+
+  // New mail has nothing cached about it, so its rows would count it and never
+  // size it. Not awaited — a first sight of a big thread is minutes, and the
+  // counts above are already on screen.
+  if (added.length) void measureNewMail(added);
+
+  return true;
+}
+
+/**
+ * A complete load's snapshot. No `projected` flag — these numbers are Gmail's
+ * own, which is exactly what makes the next open able to patch from them.
+ */
+async function writeSnapshot(generatedAt, groups, counts) {
+  try {
+    const key = await scopedKey(CACHE_NAME);
+    if (key) await chrome.storage.local.set({ [key]: { generatedAt, groups, counts } });
+  } catch (err) {
+    console.warn('[MailBoy] could not cache this pass:', err);
+  }
+}
+
+/**
+ * @param {{force?: boolean}} [options] `force` skips straight to a full listing —
  *   what the refresh button and the error-state retry both want.
  */
 async function load({ force = false } = {}) {
   if (loading) return;
 
-  if (!force && (await isFresh())) {
-    // Nothing to re-read. Put the last enumeration's ids back in memory,
-    // though, so a breakdown works without having listed anything.
+  // Before either path, and it blocks both. See `jobOutstanding`.
+  if (await jobOutstanding()) {
     membershipReady = restoreMembership();
+    // Someone who pressed the button is owed an answer; an open that quietly
+    // skipped its sync is not worth interrupting for.
+    if (force) flash('MailBoy is still finishing the last job.');
     return;
+  }
+
+  if (!force && (await isFresh())) {
+    // Put the last enumeration's ids back in memory first — the sync patches
+    // them, and a breakdown aggregates over them.
+    membershipReady = restoreMembership();
+
+    try {
+      if (await syncFromHistory()) return;
+    } catch (err) {
+      // Never fatal: the listing below is what this was trying to avoid, not
+      // something it has replaced. An auth problem simply surfaces there, where
+      // it is already handled.
+      console.warn('[MailBoy] change-log sync failed; listing instead:', err);
+    }
   }
 
   // The previous enumeration's ids, so a breakdown opened during this pass has
@@ -3099,6 +3412,7 @@ async function load({ force = false } = {}) {
     repaint();
 
     const generatedAt = Date.now();
+    countsSettled = false;
 
     const counts = await collect(groups, {
       // Deliberately not stamping the timestamp here: counts land in stages,
@@ -3113,6 +3427,18 @@ async function load({ force = false } = {}) {
         // are final and worth stamping — sizes carry on in the card.
         setFooter(generatedAt);
         setProgress('measuring', done, total);
+
+        // And worth *saving*, at that same first firing. The size pass that
+        // follows runs for minutes, and writing the snapshot only at the end of
+        // it meant closing the panel mid-measure threw away a finished
+        // enumeration — `collect` has already stored the membership and the
+        // bookmark by now, so the next open would re-list a mailbox it had just
+        // read. Nothing here claims the sizes are done: rows keep spinning, and
+        // the worker keeps measuring whether the panel is open or not.
+        if (!countsSettled) {
+          countsSettled = true;
+          void writeSnapshot(generatedAt, groups, records);
+        }
       },
       measure: measureInWorker,
       stopped: () => stopRequested,
@@ -3124,15 +3450,12 @@ async function load({ force = false } = {}) {
     setFooter(generatedAt);
 
     // Enumeration has replaced whatever an action projected, so the panel is no
-    // longer owed a reconciling load. A stopped pass is partial and settles
-    // nothing.
-    if (!stopRequested) projected = false;
-
-    const key = await scopedKey(CACHE_NAME);
-    if (key && !stopRequested) {
-      await chrome.storage.local.set({
-        [key]: { generatedAt, groups, counts },
-      });
+    // longer owed a resolution. A stopped pass is partial and settles nothing.
+    if (!stopRequested) {
+      projected = false;
+      pendingProjection = null;
+      countsSettled = true;
+      await writeSnapshot(generatedAt, groups, counts);
     }
   } catch (err) {
     setProgress(null);
@@ -3212,8 +3535,12 @@ function forgetMailbox() {
   // letting go of them.
   deleteState = null;
   bulkState = null;
+  // The next mailbox has its own pending jobs, and they have not been looked
+  // for yet — so the records have to be consulted again on its first load.
+  jobsAdopted = false;
   // Nothing on screen is a projection any more, because nothing is on screen.
   projected = false;
+  pendingProjection = null;
   setAction(null);
   el.senderRows.replaceChildren();
   el.mailRows.replaceChildren();
@@ -3378,6 +3705,26 @@ async function handleLogout() {
 el.logout.addEventListener('click', () => handleLogout());
 
 el.refresh.addEventListener('click', () => (busy ? stopLoad() : load({ force: true })));
+
+/**
+ * Keep what the panel has worked out when it is closed.
+ *
+ * A size pass runs for minutes and the sizes land in `painted` a second at a
+ * time, so closing the panel halfway used to drop all of it back to the last
+ * saved snapshot. This costs one write and means reopening carries on from where
+ * it was rather than from where it started.
+ *
+ * **Only counts that are finished**, hence `countsSettled` — a partial
+ * enumeration written under the previous snapshot's timestamp is exactly what
+ * the next open would then patch the change log onto. Membership and the
+ * bookmark are untouched: this writes what is on screen, and neither of those is.
+ *
+ * Best effort by nature. The write may not land before the page goes, which
+ * costs the progress and nothing else.
+ */
+addEventListener('pagehide', () => {
+  if (countsSettled) void saveSnapshot();
+});
 
 /**
  * The + on a row nests inside it; the + on the heading makes a top-level

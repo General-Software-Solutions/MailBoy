@@ -22,7 +22,7 @@ const MAX_PAGES = 1000;
  * messages a second however they are batched. Pacing just under the ceiling
  * beats provoking 429s and backing off from them.
  */
-const UNIT_COST = { cheap: 1, list: 5, get: 5, write: 5, batchModify: 50 };
+const UNIT_COST = { cheap: 1, list: 5, get: 5, write: 5, batchModify: 50, history: 2 };
 const UNITS_PER_SECOND = 220;
 
 /** A request Gmail answered and refused, carrying enough to describe why. */
@@ -285,6 +285,81 @@ export async function listMessageIds(labelId, query, stopped) {
   }
 
   return ids;
+}
+
+// ── The change log ───────────────────────────────────────────────
+//
+// Gmail keeps an ordered log of everything that happens to a mailbox, each entry
+// stamped with a sequence number. Hand it the number last seen and it hands back
+// what has changed since — 2 quota units, against the thousands a full listing
+// of every folder costs. That is what lets opening the panel be current instead
+// of either stale or expensive.
+//
+// The log is kept for roughly a week. Past that the sequence number is refused
+// and there is nothing for it but to list the mailbox again.
+
+/**
+ * Where the mailbox is *now*, as a sequence number for `listHistory`.
+ *
+ * Taken before a full listing starts rather than after it finishes: a listing
+ * takes seconds, and stamping the end would silently swallow everything that
+ * changed while it ran.
+ */
+export function getProfile() {
+  return call('/profile');
+}
+
+/**
+ * Everything that has happened since `startHistoryId`.
+ *
+ * **A 404 is not a failure here.** It is Gmail saying the sequence number has
+ * aged out of the log, which is ordinary after a long enough absence and means
+ * only that the caller has to fall back to listing the mailbox. Every other
+ * refusal keeps the usual `GmailError` / `AuthError` behaviour.
+ *
+ * @returns {Promise<{records: object[], historyId?: string, expired: boolean}>}
+ *   `historyId` is the new bookmark, and it is **only present when the walk
+ *   reached the end of the log.** Gmail's id is the mailbox's position *now*,
+ *   not the position after the records on this page, so storing one taken from
+ *   an abandoned walk would skip every record never fetched. A caller left
+ *   without one keeps the bookmark it had and replays next time, which costs a
+ *   repeat and no correctness: every change applies as a set operation.
+ */
+export async function listHistory(startHistoryId, stopped) {
+  const records = [];
+  let pageToken;
+  let historyId;
+
+  try {
+    for (let page = 0; page < MAX_PAGES; page++) {
+      if (stopped?.()) return { records, expired: false };
+
+      const data = await call(
+        '/history',
+        { startHistoryId, maxResults: PAGE_SIZE, pageToken },
+        UNIT_COST.history
+      );
+
+      // Deliberately unfiltered by historyType: membership can change through
+      // any of the four, and asking for a subset would drop the rest silently.
+      for (const record of data.history ?? []) records.push(record);
+
+      historyId = data.historyId ?? historyId;
+
+      pageToken = data.nextPageToken;
+      if (!pageToken) return { records, historyId, expired: false };
+    }
+  } catch (err) {
+    if (err instanceof GmailError && err.status === 404) {
+      return { records: [], expired: true };
+    }
+    throw err;
+  }
+
+  // Ran out of pages rather than out of log — the same runaway guard
+  // `listMessageIds` carries. Not a complete walk, so no bookmark.
+  console.warn('[MailBoy] change log longer than expected; falling back');
+  return { records, expired: true };
 }
 
 // ── Moving messages ──────────────────────────────────────────────

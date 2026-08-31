@@ -6,7 +6,14 @@
 // the labels every time, because that is both exact and nearly free.
 
 import { activeAccount, keyFor } from './account.js';
-import { AuthError, getLabel, listLabels, listMessageIds } from './gmail.js';
+import {
+  AuthError,
+  getLabel,
+  getProfile,
+  listHistory,
+  listLabels,
+  listMessageIds,
+} from './gmail.js';
 import { buildGroups } from './labels.js';
 import {
   bySender,
@@ -25,6 +32,36 @@ const SCOPES = {
   // sent replies to your inbox.
   incoming: '-in:sent -is:draft',
 };
+
+/**
+ * The same question `SCOPES` asks, asked of a label set instead of a search.
+ *
+ * A row's membership is defined by what `messages.list` hands back, and the
+ * change log speaks only in labels — so patching membership from the log means
+ * deciding, from a message's labels alone, whether that row would have listed
+ * it. Three rules, and **every one of them mirrors something above or in
+ * `listMessageIds`.**
+ *
+ * Keep this beside `SCOPES` and change the two together. When the gate in
+ * `collect` and the queue in `ensureMeta` disagreed about what still needed
+ * reading, the backfill silently never ran; a divergence here would be the same
+ * kind of fault, and would show up as counts that drift a little further from
+ * Gmail's every time the panel is opened.
+ */
+function belongsIn(row, labels) {
+  if (!labels.has(row.id)) return false;
+
+  // `messages.list` hides trashed and spam mail from every other label, so a
+  // message keeps a folder's label on the way to Trash but leaves that folder's
+  // number. `includeSpamTrash` is set for exactly these two — see gmail.js.
+  if (row.id !== 'SPAM' && row.id !== 'TRASH' && (labels.has('SPAM') || labels.has('TRASH'))) {
+    return false;
+  }
+
+  if (row.scope === 'inbox') return labels.has('INBOX'); // SCOPES.inbox
+  if (row.scope === 'incoming') return !labels.has('SENT') && !labels.has('DRAFT'); // SCOPES.incoming
+  return true;
+}
 
 /** Listing is paced by the quota reserver, so concurrency only hides latency. */
 const LIST_CONCURRENCY = 8;
@@ -51,6 +88,18 @@ let counts = new Map();
  * @type {Set<string>}
  */
 let patched = new Set();
+
+/**
+ * Where the change log stood when `counts` was last known to be right.
+ *
+ * Kept with membership rather than beside it, because the two are one fact: the
+ * ids *are* the mailbox as of this number. Two keys could disagree, and a
+ * bookmark running ahead of the ids is the one failure this whole path cannot
+ * detect — every change before it would simply never be reported again.
+ *
+ * @type {string | null}
+ */
+let bookmark = null;
 
 const MEMBERSHIP_NAME = 'membership';
 
@@ -97,17 +146,52 @@ export function idsForSelection(labelId, senderKeys, sinceDay = 0) {
  * panel — otherwise a breakdown would have no ids to aggregate on any open that
  * skipped it, which is most of them.
  */
-async function saveMembership(counted) {
+async function saveMembership(counted, historyId = bookmark) {
   try {
+    bookmark = historyId ?? null;
     const account = await activeAccount();
     if (!account) return;
 
     await chrome.storage.local.set({
-      [membershipKey(account)]: { savedAt: Date.now(), ids: Object.fromEntries(counted) },
+      [membershipKey(account)]: {
+        savedAt: Date.now(),
+        historyId: bookmark,
+        ids: Object.fromEntries(counted),
+      },
     });
   } catch (err) {
     // Costs a breakdown until the next enumeration, never the panel.
     console.warn('[MailBoy] membership not saved:', err);
+  }
+}
+
+/**
+ * Move the bookmark on without rewriting the ids.
+ *
+ * What an action resolves to is already in `counts` — it was patched there at
+ * the click and completed when the job reported back — so all that is left is
+ * to say the log has been accounted for up to here. Rewriting the id map to do
+ * that would mean shipping megabytes to storage for a one-field change.
+ *
+ * **Refuses to write a bookmark where there are no ids to bookmark against.**
+ * That pairing is the invariant the whole sync rests on.
+ */
+export async function stampHistoryId(historyId) {
+  if (!historyId) return;
+
+  try {
+    const account = await activeAccount();
+    if (!account) return;
+
+    const key = membershipKey(account);
+    const { [key]: stored } = await chrome.storage.local.get(key);
+    if (!stored?.ids) return;
+
+    bookmark = historyId;
+    await chrome.storage.local.set({ [key]: { ...stored, historyId } });
+  } catch (err) {
+    // The next open replays from the old bookmark instead. Harmless.
+    console.warn('[MailBoy] could not move the change-log bookmark:', err);
   }
 }
 
@@ -128,7 +212,10 @@ export async function restoreMembership() {
 
     const key = membershipKey(account);
     const { [key]: stored } = await chrome.storage.local.get(key);
-    if (stored?.ids) counts = new Map(Object.entries(stored.ids));
+    if (stored?.ids) {
+      counts = new Map(Object.entries(stored.ids));
+      bookmark = stored.historyId ?? null;
+    }
   } catch (err) {
     console.warn('[MailBoy] membership unreadable:', err);
   }
@@ -142,6 +229,10 @@ export async function restoreMembership() {
 export function resetMembership() {
   counts = new Map();
   patched = new Set();
+  // The bookmark describes the ids being dropped, and belongs to the mailbox
+  // being left. Keeping it would point the next account's first sync at a
+  // position in someone else's log.
+  bookmark = null;
 }
 
 /**
@@ -190,8 +281,8 @@ export const idsIn = (labelId) => [...(counts.get(labelId) ?? [])];
  * panel can say so at once and let the reconciling load correct it.
  *
  * This is a projection, not a fact: it says what Gmail was *asked* to do.
- * Whoever calls it owes the user a real load when the job reports back,
- * whether it succeeded, was stopped or failed.
+ * Whoever calls it owes the user a resolution when the job reports back — either
+ * the completing half of the same patch, or a real load.
  *
  * Rows the last enumeration never reached are skipped rather than invented. An
  * absent row means "not known", and seeding one with just these ids would
@@ -200,7 +291,9 @@ export const idsIn = (labelId) => [...(counts.get(labelId) ?? [])];
  * @param {Iterable<string>} ids the messages that are moving
  * @param {{add?: string[], remove?: string[]}} where in MailBoy's rows, which
  *   is not the same list as the labels the job sends Gmail
- * @returns {string[]} the rows whose contents changed
+ * @returns {{touched: string[], removed: Record<string, string[]>}} the rows
+ *   whose contents changed, and exactly what came out of each — which is what a
+ *   job that only half happened needs in order to put the rest back.
  */
 export function patchMessages(ids, { add = [], remove = [] } = {}) {
   const moving = new Set(ids);
@@ -208,9 +301,11 @@ export function patchMessages(ids, { add = [], remove = [] } = {}) {
   // An empty map means `restoreMembership` has not finished — the same trap
   // `patchMembership` guards against, and here it would also save a map of
   // almost nothing over the real one.
-  if (!counts.size || !moving.size) return [];
+  if (!counts.size || !moving.size) return { touched: [], removed: {} };
 
   const touched = new Set();
+  /** @type {Record<string, string[]>} */
+  const removed = {};
 
   for (const rowId of remove) {
     const current = counts.get(rowId);
@@ -219,6 +314,7 @@ export function patchMessages(ids, { add = [], remove = [] } = {}) {
     const kept = current.filter((id) => !moving.has(id));
     if (kept.length === current.length) continue;
 
+    removed[rowId] = current.filter((id) => moving.has(id));
     counts.set(rowId, kept);
     touched.add(rowId);
   }
@@ -239,7 +335,181 @@ export function patchMessages(ids, { add = [], remove = [] } = {}) {
     for (const rowId of touched) patched.add(rowId);
     void saveMembership(counts);
   }
+  return { touched: [...touched], removed };
+}
+
+/**
+ * Put back what a projection took out, for the part of a job that never
+ * happened.
+ *
+ * A projection removes mail from where it was the moment the action is
+ * dispatched. When the job then only half runs — stopped partway, or refused for
+ * some of its messages — the rows are showing all of it as gone. This is the
+ * other half of `patchMessages`, and it is why that one reports what it removed
+ * rather than only which rows it touched.
+ *
+ * @param {Record<string, string[]>} removed as `patchMessages` returned it
+ * @returns {string[]} the rows whose contents changed
+ */
+export function unpatchMessages(removed) {
+  if (!counts.size) return [];
+
+  const touched = new Set();
+
+  for (const [rowId, ids] of Object.entries(removed)) {
+    const current = counts.get(rowId);
+    if (!current || !ids?.length) continue;
+
+    const held = new Set(current);
+    const back = ids.filter((id) => !held.has(id));
+    if (!back.length) continue;
+
+    counts.set(rowId, [...current, ...back]);
+    touched.add(rowId);
+  }
+
+  if (touched.size) {
+    for (const rowId of touched) patched.add(rowId);
+    void saveMembership(counts);
+  }
   return [...touched];
+}
+
+/**
+ * Bring membership up to date from Gmail's change log instead of re-listing.
+ *
+ * Two quota units against the thousands a full pass over every row costs, which
+ * is what makes it affordable to do on every open rather than once a week. It
+ * answers only about messages that actually changed, so a quiet mailbox costs
+ * one request and touches nothing.
+ *
+ * **`{ synced: false }` is an ordinary answer, not an error.** No bookmark, a
+ * bookmark Gmail has forgotten, or a log this cannot read means only that the
+ * caller has to list the mailbox instead.
+ *
+ * @param {{defaults: object[], user: object[]}} groups the rows to place mail in
+ * @returns {Promise<{synced: boolean, changed?: string[], added?: string[]}>}
+ *   `added` are messages now sitting in a row with nothing cached about them —
+ *   what a size pass still owes.
+ */
+export async function syncHistory(groups, stopped) {
+  await restoreMembership();
+  if (!counts.size || !bookmark) return { synced: false };
+
+  const { records, historyId, expired } = await listHistory(bookmark, stopped);
+  if (expired) return { synced: false };
+
+  // ── What each touched message now carries ──────────────────────
+  //
+  // Re-derived from whole label sets rather than accumulated from the deltas.
+  // The log reports a change and the set it left behind, and trusting the set is
+  // self-correcting: a record misread earlier is overwritten by the next one to
+  // mention that message, where a running delta would carry the mistake to the
+  // end.
+
+  /** @type {Map<string, Set<string>>} */
+  const labelsById = new Map();
+  const gone = new Set();
+  let unreadable = 0;
+
+  const track = (message) => {
+    if (!message?.id) return null;
+    if (message.labelIds) {
+      const labels = new Set(message.labelIds);
+      labelsById.set(message.id, labels);
+      gone.delete(message.id);
+      return labels;
+    }
+    return labelsById.get(message.id) ?? null;
+  };
+
+  for (const record of records) {
+    for (const { message } of record.messagesAdded ?? []) track(message);
+
+    for (const { message } of record.messagesDeleted ?? []) {
+      if (!message?.id) continue;
+      labelsById.delete(message.id);
+      gone.add(message.id);
+    }
+
+    for (const entry of record.labelsAdded ?? []) {
+      const labels = track(entry.message);
+      if (!labels) unreadable++;
+      else for (const label of entry.labelIds ?? []) labels.add(label);
+    }
+
+    for (const entry of record.labelsRemoved ?? []) {
+      const labels = track(entry.message);
+      if (!labels) unreadable++;
+      else for (const label of entry.labelIds ?? []) labels.delete(label);
+    }
+  }
+
+  // A record that named a message without saying what it carries leaves that
+  // message unplaceable, and guessing would put a wrong number on a row and
+  // then bookmark past the evidence. Listing is the honest answer, and saying
+  // so loudly is what turns this from a silent drift into something findable.
+  if (unreadable) {
+    console.warn(`[MailBoy] ${unreadable} change-log records carried no label set; listing instead`);
+    return { synced: false };
+  }
+
+  // ── Where that puts them ───────────────────────────────────────
+
+  const rows = rowsOf(groups);
+  const changed = new Set();
+
+  // Sets rather than the stored arrays: every changed message is tested against
+  // every row, and `includes` over a mailbox-sized row would turn an instant
+  // open into a visible stall.
+  const sets = new Map();
+  for (const [rowId, ids] of counts) sets.set(rowId, new Set(ids));
+
+  for (const [id, labels] of labelsById) {
+    for (const row of rows) {
+      const set = sets.get(row.id);
+      // A row the last enumeration never reached is not known, and seeding one
+      // here would claim it holds nothing but this.
+      if (!set) continue;
+
+      const should = belongsIn(row, labels);
+      if (should === set.has(id)) continue;
+
+      if (should) set.add(id);
+      else set.delete(id);
+      changed.add(row.id);
+    }
+  }
+
+  for (const id of gone) {
+    for (const [rowId, set] of sets) if (set.delete(id)) changed.add(rowId);
+  }
+
+  for (const rowId of changed) counts.set(rowId, [...sets.get(rowId)]);
+
+  // Mail that landed somewhere on screen with nothing cached about it. Without
+  // this the row's count would go up and its size would sit short for a week.
+  const added = [];
+  for (const id of labelsById.keys()) {
+    if (isMeasured(id)) continue;
+    for (const rowId of changed) {
+      if (sets.get(rowId)?.has(id)) {
+        added.push(id);
+        break;
+      }
+    }
+  }
+
+  // Gmail's own answer, so it supersedes whatever an action projected — the same
+  // rule `collect` applies after enumerating.
+  patched = new Set();
+
+  // No `historyId` means the walk was abandoned rather than finished, so the old
+  // bookmark stands and the next open replays. The work above is not wasted:
+  // every change applies as a set operation, so seeing it twice changes nothing.
+  await saveMembership(counts, historyId);
+
+  return { synced: true, changed: [...changed], added };
 }
 
 /**
@@ -395,6 +665,22 @@ export async function collect(groups, hooks = {}) {
   // its own wait once the listing is done.
   const cacheReady = loadMessages();
 
+  // Where the change log stands *before* a single label is listed. Enumeration
+  // takes seconds, and a bookmark stamped at the end would quietly swallow
+  // everything that changed while it ran — the one way this can be wrong that
+  // nothing downstream could ever detect. Never fatal: without it the next open
+  // lists again, which is only what happens today.
+  const bookmarkAt = getProfile()
+    .then((profile) => profile.historyId)
+    .catch((err) => {
+      // `undefined`, not `null`: that leaves `saveMembership` on its default and
+      // keeps whatever bookmark is already stored. It is older than the ids this
+      // pass is about to write, so the next sync replays a little — which costs
+      // nothing, where clearing it would cost a whole listing.
+      console.warn('[MailBoy] no change-log position for this pass:', err);
+      return undefined;
+    });
+
   // ── Counts, the fast half ──────────────────────────────────────
   //
   // Enumerating every label takes seconds, and a panel of pulsing placeholders
@@ -454,7 +740,7 @@ export async function collect(groups, hooks = {}) {
     // This enumeration is Gmail's own answer, so it supersedes anything an
     // action projected before it ran.
     patched = new Set();
-    void saveMembership(counted);
+    void bookmarkAt.then((historyId) => saveMembership(counted, historyId));
   }
 
   await provisional;
