@@ -129,6 +129,7 @@ const el = {
   moveCount: document.getElementById('move-count'),
   moveText: document.getElementById('move-text'),
   moveList: document.getElementById('move-list'),
+  moveConfirm: document.getElementById('btn-move-confirm'),
   moveCancel: document.getElementById('btn-move-cancel'),
 
   // One sender's mail.
@@ -1941,11 +1942,16 @@ function addFolder(label) {
   void saveSnapshot();
 
   // The move dialog is a second view of the same list, and a folder made from
-  // inside it is almost certainly where the mail is about to go — so it is
-  // rebuilt too, and it is the copy that takes focus.
+  // inside it is where the mail is about to go — nobody makes one there for any
+  // other reason. So it is rebuilt, and the new row is picked as well as
+  // focused, leaving `Move here` as the only thing left to press. The name comes
+  // off the row rather than from `label`, so it is the leaf a click would have
+  // picked and not the full path.
   if (el.moveDialog.open) {
     renderMoveList();
-    moveRowFor(label.id)?.focus();
+    const row = moveRowFor(label.id);
+    if (row) pickMoveTarget(row.dataset.labelId, row.dataset.labelName);
+    row?.focus();
     return;
   }
 
@@ -2504,6 +2510,9 @@ function renderMoveList() {
   );
 
   el.moveList.replaceChildren(...sections);
+  // The list is rebuilt whenever a folder is created from inside the dialog, so
+  // the pick has to be re-applied rather than living on the element alone.
+  paintMoveTarget();
 }
 
 /**
@@ -2519,8 +2528,35 @@ function renderMoveList() {
  */
 let moveIds = null;
 
+/**
+ * The folder picked in the open dialog, or null while nothing is picked.
+ *
+ * Picking is a selection now, not the confirmation — `Move here` is — so the
+ * choice has to be held somewhere between the two clicks. Held as `{id, name}`
+ * rather than as the row element because the list is rebuilt whenever a folder
+ * is created from inside the dialog, which would strand the reference.
+ *
+ * @type {{ id: string, name: string } | null}
+ */
+let moveTarget = null;
+
+/**
+ * Show which destination is picked, and let `Move here` act only once one is.
+ *
+ * `aria-current` rather than `aria-pressed`: this is the current item of a set,
+ * not a toggle, so clicking the picked folder again leaves it picked.
+ */
+function paintMoveTarget() {
+  for (const row of el.moveList.querySelectorAll('.row')) {
+    if (row.dataset.labelId === moveTarget?.id) row.setAttribute('aria-current', 'true');
+    else row.removeAttribute('aria-current');
+  }
+  el.moveConfirm.disabled = !moveTarget;
+}
+
 function closeMoveDialog() {
   moveIds = null;
+  moveTarget = null;
   // The editor lives inside the dialog; leaving it open would strand a field
   // nobody can see, still holding a half-typed name.
   closeEditor();
@@ -2541,6 +2577,9 @@ function startMove(picked) {
   const { ids, line } = picked;
 
   moveIds = ids;
+  // Never inherited from a previous open: the dialog opens with nothing picked
+  // and `Move here` disabled, whatever was chosen last time.
+  moveTarget = null;
   el.moveCount.textContent = emails(ids.length);
   el.moveText.textContent =
     `${line} They move out of every folder they are in now — your inbox ` +
@@ -2550,9 +2589,24 @@ function startMove(picked) {
   el.moveDialog.showModal();
 }
 
-/** Picking a folder is the confirmation — there is no second step. */
-function chooseMoveTarget(labelId, name) {
+/** Clicking a folder picks it. Nothing moves until `Move here` is pressed. */
+function pickMoveTarget(labelId, name) {
+  if (!labelId) return;
+  moveTarget = { id: labelId, name };
+  paintMoveTarget();
+}
+
+/**
+ * `Move here` — the confirmation.
+ *
+ * A move is definitive and cannot be undone as one action, so the destination
+ * is chosen and then confirmed rather than dispatched on the first click that
+ * lands in a dense list of folder names.
+ */
+function confirmMove() {
   const ids = moveIds;
+  const labelId = moveTarget?.id;
+  const name = moveTarget?.name ?? '';
   if (!openLabel || !labelId || !ids?.length) return;
 
   closeMoveDialog();
@@ -3432,6 +3486,7 @@ el.selectAll.addEventListener('change', () => {
 el.trash.addEventListener('click', () => void startTrash(resolveSelection()));
 el.restore.addEventListener('click', () => void startRestore(resolveSelection()));
 el.move.addEventListener('click', () => startMove(resolveSelection()));
+el.moveConfirm.addEventListener('click', confirmMove);
 el.moveCancel.addEventListener('click', closeMoveDialog);
 
 // ── One sender's mail ────────────────────────────────────────────
@@ -3530,7 +3585,7 @@ el.moveList.addEventListener('click', (event) => {
   }
 
   const row = event.target.closest('.row');
-  if (row) chooseMoveTarget(row.dataset.labelId, row.dataset.labelName);
+  if (row) pickMoveTarget(row.dataset.labelId, row.dataset.labelName);
 });
 
 el.moveList.addEventListener('keydown', (event) => {
@@ -3540,7 +3595,7 @@ el.moveList.addEventListener('keydown', (event) => {
   const row = event.target.closest('.row');
   if (!row) return;
   event.preventDefault(); // Space would scroll the list.
-  chooseMoveTarget(row.dataset.labelId, row.dataset.labelName);
+  pickMoveTarget(row.dataset.labelId, row.dataset.labelName);
 });
 
 el.senderHead.addEventListener('click', (event) => {

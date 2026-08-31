@@ -1531,6 +1531,18 @@ body {
   font-size: 12.5px;
 }
 
+/* The picked destination. Hover cannot carry this on its own now that a second
+   click confirms: the pointer leaves the row on its way to "Move here", and the
+   list would go back to saying nothing about where the mail is going. */
+.move-list .row[aria-current='true'] {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.move-list .row[aria-current='true'] .row-name {
+  font-weight: 550;
+}
+
 .move-list .group + .group {
   margin-top: 4px;
   border-top: 1px solid var(--border);
