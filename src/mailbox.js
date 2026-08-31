@@ -40,6 +40,18 @@ const LIST_CONCURRENCY = 8;
  */
 let counts = new Map();
 
+/**
+ * Rows a projected action has changed since the running load enumerated them.
+ *
+ * A load's records were built by an enumeration that ran before the mail moved,
+ * and it goes on emitting them for as long as measuring takes — which would
+ * repaint the mail exactly where it no longer is, a second after the panel said
+ * otherwise. `snapshot` re-derives these rows on the way out.
+ *
+ * @type {Set<string>}
+ */
+let patched = new Set();
+
 const MEMBERSHIP_NAME = 'membership';
 
 /** The one key a mailbox's membership occupies, for erasing it. */
@@ -129,6 +141,7 @@ export async function restoreMembership() {
  */
 export function resetMembership() {
   counts = new Map();
+  patched = new Set();
 }
 
 /**
@@ -156,6 +169,96 @@ export function patchMembership({ added = [], removed = [] } = {}) {
   for (const id of removed) counts.delete(id);
 
   if (restored) void saveMembership(counts);
+}
+
+/**
+ * The ids behind one row's number, for an action that acts on a whole folder.
+ *
+ * A copy: the caller is about to hand these to a job, and the live array is
+ * what every count on screen is derived from.
+ */
+export const idsIn = (labelId) => [...(counts.get(labelId) ?? [])];
+
+/**
+ * Patch membership for messages an action has just moved, rather than waiting
+ * for the next enumeration to notice.
+ *
+ * Trashing and moving are minutes of background work, and until this existed
+ * every number on screen went on describing where the mail *was* for the whole
+ * of it. What an action does to each row is known at the moment it is
+ * dispatched — it is the same knowledge the job itself is built from — so the
+ * panel can say so at once and let the reconciling load correct it.
+ *
+ * This is a projection, not a fact: it says what Gmail was *asked* to do.
+ * Whoever calls it owes the user a real load when the job reports back,
+ * whether it succeeded, was stopped or failed.
+ *
+ * Rows the last enumeration never reached are skipped rather than invented. An
+ * absent row means "not known", and seeding one with just these ids would
+ * claim the folder holds nothing else.
+ *
+ * @param {Iterable<string>} ids the messages that are moving
+ * @param {{add?: string[], remove?: string[]}} where in MailBoy's rows, which
+ *   is not the same list as the labels the job sends Gmail
+ * @returns {string[]} the rows whose contents changed
+ */
+export function patchMessages(ids, { add = [], remove = [] } = {}) {
+  const moving = new Set(ids);
+
+  // An empty map means `restoreMembership` has not finished — the same trap
+  // `patchMembership` guards against, and here it would also save a map of
+  // almost nothing over the real one.
+  if (!counts.size || !moving.size) return [];
+
+  const touched = new Set();
+
+  for (const rowId of remove) {
+    const current = counts.get(rowId);
+    if (!current) continue;
+
+    const kept = current.filter((id) => !moving.has(id));
+    if (kept.length === current.length) continue;
+
+    counts.set(rowId, kept);
+    touched.add(rowId);
+  }
+
+  for (const rowId of add) {
+    const current = counts.get(rowId);
+    if (!current) continue;
+
+    const held = new Set(current);
+    const gained = [...moving].filter((id) => !held.has(id));
+    if (!gained.length) continue;
+
+    counts.set(rowId, [...current, ...gained]);
+    touched.add(rowId);
+  }
+
+  if (touched.size) {
+    for (const rowId of touched) patched.add(rowId);
+    void saveMembership(counts);
+  }
+  return [...touched];
+}
+
+/**
+ * Count and size for particular rows, from the membership now in memory and
+ * the message cache — no Gmail calls, exactly as a breakdown costs none.
+ *
+ * Same shape `collect` hands the renderer, minus `settled`: whether a row is
+ * still owed sizes is the load's business, not this one's.
+ *
+ * @param {Iterable<string>} rowIds
+ * @returns {Record<string, {count: number, bytes: number, pending: number}>}
+ */
+export function recountRows(rowIds) {
+  const records = {};
+  for (const rowId of rowIds) {
+    const ids = counts.get(rowId);
+    if (ids) records[rowId] = figuresFor(ids);
+  }
+  return records;
 }
 
 /**
@@ -348,6 +451,9 @@ export async function collect(groups, hooks = {}) {
     // Available to a drill-down from here on, before sizes are in: the ids are
     // final, only what is known about each message is still filling in.
     counts = counted;
+    // This enumeration is Gmail's own answer, so it supersedes anything an
+    // action projected before it ran.
+    patched = new Set();
     void saveMembership(counted);
   }
 
@@ -405,22 +511,33 @@ export async function collect(groups, hooks = {}) {
   return snapshot(records, true);
 }
 
+/** One row's number and size, and how much of it is still unread. */
+function figuresFor(ids) {
+  let bytes = 0;
+  let pending = 0;
+  for (const id of ids) {
+    const size = sizeOf(id);
+    if (size === undefined) pending++;
+    else bytes += size;
+  }
+  return { count: ids.length, bytes, pending };
+}
+
 /** Per-row size and how much of it is still unread, straight from the cache. */
 function tally(counted, records) {
-  for (const [rowId, ids] of counted) {
-    let bytes = 0;
-    let pending = 0;
-    for (const id of ids) {
-      const size = sizeOf(id);
-      if (size === undefined) pending++;
-      else bytes += size;
-    }
-    Object.assign(records[rowId], { bytes, pending });
-  }
+  for (const [rowId, ids] of counted) Object.assign(records[rowId], figuresFor(ids));
 }
 
 /** Records get rendered and cached, so hand out copies rather than live state. */
 function snapshot(records, settled = false) {
+  // A row an action has moved mail out of was enumerated before it moved, and
+  // this load will keep emitting that enumeration for as long as measuring
+  // takes. Re-derive those few rows rather than repaint mail where it is not.
+  for (const rowId of patched) {
+    const ids = counts.get(rowId);
+    if (ids && records[rowId]) Object.assign(records[rowId], figuresFor(ids));
+  }
+
   const out = {};
   for (const [id, record] of Object.entries(records)) {
     out[id] = record ? { ...record, settled } : null;

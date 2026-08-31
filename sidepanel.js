@@ -44,7 +44,10 @@ import {
   collect,
   forgetMembership,
   idsForSelection,
+  idsIn,
   patchMembership,
+  patchMessages,
+  recountRows,
   resetMembership,
   restoreMembership,
 } from './src/mailbox.js';
@@ -1738,6 +1741,11 @@ const rowFor = (labelId) => el.groups.querySelector(`[data-label-id="${CSS.escap
  * folder says nothing about how current the *counts* are, and restamping would
  * push the next real load up to a day away. Nothing is written when there is no
  * snapshot yet — the load that is coming will write a complete one.
+ *
+ * `projected` rides along because these numbers may be an action's intent
+ * rather than anything Gmail has confirmed, and the panel that owes the
+ * reconciling load can be closed before the job ends. Flagging it is what makes
+ * the next open pay that debt instead of trusting the projection for a day.
  */
 async function saveSnapshot() {
   try {
@@ -1747,7 +1755,9 @@ async function saveSnapshot() {
     const { [key]: cached } = await chrome.storage.local.get(key);
     if (!cached) return;
 
-    await chrome.storage.local.set({ [key]: { ...cached, groups: currentGroups, counts: painted } });
+    await chrome.storage.local.set({
+      [key]: { ...cached, groups: currentGroups, counts: painted, projected },
+    });
   } catch (err) {
     console.warn('[MailBoy] could not update the cached folder list:', err);
   }
@@ -2045,6 +2055,15 @@ async function confirmDelete(labelId) {
   markWorkingRows();
   setAction(`Deleting “${target.name}”…`);
 
+  // What happens to the mail shows straight away, the same as it does for a
+  // selection: the folder empties as it is trashed, or the inbox grows as it is
+  // handed back. The rows themselves stay until the job says the labels are
+  // gone — a folder being emptied is not yet a folder that has been deleted.
+  projectAction(
+    family.flatMap((row) => idsIn(row.id)),
+    choice.trash ? landing('trash') : { add: ['INBOX'] }
+  );
+
   folderChannel().postMessage({
     type: 'delete',
     job: {
@@ -2142,6 +2161,90 @@ function shedding(targetId) {
   return rows.map((row) => row.id).filter((id) => id !== targetId);
 }
 
+// ── Showing an action before Gmail has done it ───────────────────
+//
+// A trash over a large selection is minutes, and every number on screen used to
+// go on describing where the mail was for the whole of it — the row it left,
+// the breakdown behind it, the mail list it was ticked in. The action itself is
+// the one thing that knows where the mail is going, so the panel patches
+// membership with it and repaints, and the load that runs when the job reports
+// back replaces the projection with what Gmail actually did.
+//
+// This is a promise the panel makes on the job's behalf, so it has to be
+// unmade honestly: `reconcile` runs on every ending, not just a successful one.
+
+/** Whether the rows are showing an action's intent rather than a real load. */
+let projected = false;
+
+/**
+ * Where an action leaves the mail, **in the rows MailBoy shows.** That is not
+ * the list of labels the job sends Gmail, and the gap between the two is the
+ * whole of what this has to get right:
+ *
+ * - A **move** sheds exactly what the job sheds, so those two agree by
+ *   construction.
+ * - A **trash** sends no label list at all — `messages.trash` is its own call,
+ *   and it leaves every user label on the message. In *rows* it is still a
+ *   definitive move, because `messages.list` hides trashed mail from every
+ *   label but Trash (see `includeSpamTrash` in gmail.js). So a folder's number
+ *   drops even though its label is still on the mail, which is exactly what
+ *   the next enumeration will find.
+ * - A **restore** is the one that cannot be projected in full. The mail comes
+ *   back into whatever folders it still carries, and nothing here knows which
+ *   those were — membership dropped them when it was trashed. Inbox is the
+ *   part that is certain; the rest undercounts until the load that follows.
+ *
+ * @param {'trash' | 'move' | 'restore'} action
+ * @param {string} [targetId] where a move is going
+ */
+function landing(action, targetId) {
+  if (action === 'trash') return { add: ['TRASH'], remove: shedding('TRASH') };
+  if (action === 'restore') return { add: ['INBOX'], remove: ['TRASH'] };
+  return { add: [targetId], remove: shedding(targetId) };
+}
+
+/**
+ * Patch membership, repaint the rows it changed, and remember that the panel
+ * now owes a real load.
+ *
+ * @param {string[]} ids
+ * @param {{add?: string[], remove?: string[]}} where
+ */
+function projectAction(ids, where) {
+  const touched = patchMessages(ids, where);
+  if (!touched.length) return;
+
+  const records = recountRows(touched);
+  for (const [id, record] of Object.entries(records)) {
+    // A patched row is exactly as settled as it was. A measuring pass in
+    // flight still owes it sizes, and saying otherwise here would stop its
+    // spinner early over a figure that is still filling in.
+    record.settled = painted[id]?.settled ?? false;
+  }
+
+  projected = true;
+  paintRecords(records);
+  // The freshness gate means the next open may run no load at all, so a
+  // projection that lives only in memory would be undone by closing the panel.
+  void saveSnapshot();
+}
+
+/**
+ * Put Gmail's own numbers back over the projection, however the job ended.
+ *
+ * @param {boolean} moved whether the job itself reports having touched mail —
+ *   which matters for a panel that adopted the job from a previous open and so
+ *   never projected anything.
+ */
+function reconcile(moved) {
+  if (!projected && !moved) return;
+  projected = false;
+
+  // A load already running is on its way to those numbers; starting a second
+  // one would only be turned away.
+  if (!loading) void load({ force: true });
+}
+
 /** How the dialogs name where the mail is coming from. */
 function departing() {
   if (!openLabel) return 'this folder';
@@ -2168,6 +2271,11 @@ function periodClause() {
 function dispatchBulk(job, { total, action, target, status }) {
   bulkState = { action, total, target };
   setAction(status);
+
+  // Say what the action does to the rows now. The job takes minutes, and the
+  // three re-renders below would otherwise redraw the mail exactly where it
+  // was — including in the folder it is being taken out of.
+  projectAction(job.ids, landing(action, job.add?.[0]));
 
   clearSelection();
   clearMailSelection();
@@ -2563,9 +2671,10 @@ function onFolderMessage(message) {
     flash(summariseDelete(message, name));
 
     // Trashing mail and restoring it both change what other folders hold, so
-    // the numbers still on screen for those are now wrong. An empty folder
-    // changes nothing and is not worth a re-read.
-    if (message.trashed || message.restored) void load({ force: true });
+    // the numbers still on screen for those are now wrong — and where the panel
+    // projected the move at the click, they are wrong in the other direction
+    // too. An empty folder changes nothing and is not worth a re-read.
+    reconcile(Boolean(message.trashed || message.restored));
     return;
   }
 
@@ -2574,6 +2683,8 @@ function onFolderMessage(message) {
     markWorkingRows();
     setAction(null);
     flash(`Stopped deleting “${name}”. The folder is still there.`);
+    // Some of the mail moved and some did not, and only a load can say which.
+    reconcile(false);
     return;
   }
 
@@ -2583,6 +2694,7 @@ function onFolderMessage(message) {
     markWorkingRows();
     setAction(null);
     flash(`Couldn't finish deleting “${name}”.`);
+    reconcile(false);
     return;
   }
 
@@ -2608,8 +2720,10 @@ function onFolderMessage(message) {
     );
 
     // Mail that has moved changes what every other folder holds, so the numbers
-    // still on screen for those are now wrong.
-    if (message.trashed || message.moved) void load({ force: true });
+    // still on screen for those are now wrong. A stop is the case that most
+    // needs this: the rows are showing the whole selection as moved, and only
+    // some of it was.
+    reconcile(Boolean(message.trashed || message.moved));
     return;
   }
 
@@ -2618,6 +2732,8 @@ function onFolderMessage(message) {
     bulkState = null;
     setAction(null);
     flash("Couldn't finish moving those emails.");
+    // The rows are showing mail somewhere it never went.
+    reconcile(false);
   }
 }
 
@@ -2884,6 +3000,12 @@ async function isFresh() {
     if (!key) return false;
 
     const { [key]: cached } = await chrome.storage.local.get(key);
+
+    // A projected snapshot is what an action was asked to do, not what Gmail
+    // did. It is never fresh, however recent — the panel that promised it may
+    // have been closed before the job reported back.
+    if (cached?.projected) return false;
+
     return Boolean(cached?.counts) && Date.now() - cached.generatedAt < REFRESH_AFTER_MS;
   } catch {
     return false;
@@ -2946,6 +3068,11 @@ async function load({ force = false } = {}) {
     setProgress(null);
     setBusy(false);
     setFooter(generatedAt);
+
+    // Enumeration has replaced whatever an action projected, so the panel is no
+    // longer owed a reconciling load. A stopped pass is partial and settles
+    // nothing.
+    if (!stopRequested) projected = false;
 
     const key = await scopedKey(CACHE_NAME);
     if (key && !stopRequested) {
@@ -3031,6 +3158,8 @@ function forgetMailbox() {
   // letting go of them.
   deleteState = null;
   bulkState = null;
+  // Nothing on screen is a projection any more, because nothing is on screen.
+  projected = false;
   setAction(null);
   el.senderRows.replaceChildren();
   el.mailRows.replaceChildren();
@@ -3061,6 +3190,11 @@ async function paintCache() {
   renderSkeleton(cached.groups);
   paintRecords(cached.counts ?? {});
   setFooter(cached.generatedAt);
+
+  // These may be an earlier open's projection of an action rather than
+  // anything Gmail confirmed, and the debt goes with them: `isFresh` will have
+  // said no, and if that load never lands the flag keeps the next one honest.
+  projected = Boolean(cached.projected);
 }
 
 // ── Events ───────────────────────────────────────────────────────
