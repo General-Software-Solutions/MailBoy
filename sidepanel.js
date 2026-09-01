@@ -424,6 +424,8 @@ const ICON_CLOSE = '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />';
 // The same glyph the Block button carries (sidepanel.html), so the rule this
 // button makes and the row it shows up as are recognisably the same action.
 const ICON_BLOCK = '<circle cx="8" cy="8" r="5.4" /><path d="M4.2 11.8L11.8 4.2" />';
+// Marks a nested folder row, sitting where the dot does on a top-level one.
+const ICON_SUBFOLDER = '<path d="M6 3.5l5 4.5-5 4.5" />';
 
 /**
  * The Block glyph, sized to sit inline in "(⊘ Blocked mails)".
@@ -480,7 +482,19 @@ function renderRow(item, { editable = false, counted = true, removable = true } 
 
   const name = document.createElement('span');
   name.className = 'row-name';
-  name.textContent = item.name;
+
+  // Depth is already conveyed by indent (data-depth in CSS); the icon repeats
+  // it in a way that reads at a glance without counting padding — a dot for a
+  // top-level folder, a chevron for anything nested, whatever the depth.
+  const icon = document.createElement('span');
+  icon.className = 'row-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML =
+    (item.depth ?? 0) > 0
+      ? `<svg class="row-icon-chevron" viewBox="0 0 16 16">${ICON_SUBFOLDER}</svg>`
+      : '•';
+
+  name.append(icon, document.createTextNode(item.name));
 
   const num = document.createElement('span');
   num.className = 'row-num';

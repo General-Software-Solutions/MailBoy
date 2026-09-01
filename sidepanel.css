@@ -499,6 +499,20 @@ body {
   min-height: var(--row-h);
   padding: 0 var(--pad-x);
   border-radius: 0;
+  position: relative;
+}
+
+/* Inset from both edges by the row's own padding, rather than a border-bottom
+   running the full width — a full-bleed line reads as a table; this reads as
+   space between rows. */
+.group .row:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: var(--pad-x);
+  right: var(--pad-x);
+  bottom: 0;
+  height: 1px;
+  background: var(--border);
 }
 
 .row {
@@ -519,6 +533,26 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Repeats what the indent already says, but at a glance: a dot for a
+   top-level folder, a chevron for anything nested. */
+.row-icon {
+  display: inline-block;
+  width: 12px;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.row-icon-chevron {
+  width: 9px;
+  height: 9px;
+  vertical-align: -1px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .row-count {
@@ -1926,9 +1960,12 @@ svg.stop-icon {
 }
 
 /* aria-current is the state, so it is also the selector — the accessible
-   answer and the visible one cannot then drift apart. */
+   answer and the visible one cannot then drift apart. The tint fills the
+   button's own section of the bar, not just the icon, so which tab is active
+   reads at a glance rather than on close inspection of the glyph colour. */
 .nav-btn[aria-current] {
   color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .nav-btn:focus-visible {
