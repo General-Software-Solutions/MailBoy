@@ -43,16 +43,49 @@
 :root {
   color-scheme: light dark;
 
+  /* Three text tiers, and which one a thing takes is a rule rather than a
+     preference: the two that carry words clear WCAG AA's 4.5:1, and the third
+     is for marks that would still be understood if they vanished — the nesting
+     dot, an inactive sort arrow, a zero that is being deliberately dimmed.
+     Nothing a user has to read may sit on --faint. It used to be #a1a7b0 at
+     2.45:1, carrying group titles, column heads, the footer, snippets, sender
+     names and the stroke on the folder controls. */
   --bg: #ffffff;
   --surface: #f6f7f9;
-  --text: #14161a;
-  --muted: #6b7280;
-  --faint: #a1a7b0;
-  --border: #ecedf1;
-  --accent: #2f6df6;
+  --text: #14161a; /* 18.1:1 */
+  --muted: #5b616b; /* 6.2:1 — anything that is a word */
+  --faint: #82888f; /* 3.6:1 — decoration only, never body copy */
+  /* A divider and the edge of a control are not the same job, and one token was
+     doing both. --border is a hairline between rows, where being nearly
+     invisible is the point; --edge is what makes a button look like one, and
+     has to clear the 3:1 WCAG asks of a component boundary — measured against
+     --surface, since that is what a ghost button now sits on. */
+  --border: #ecedf1; /* 1.2:1 on --bg — dividers, never a boundary */
+  --edge: #848a93; /* 3.2:1 on --surface — clickable boundaries */
+
+  /* A section label is a different layer from the rows under it, so it takes a
+     different hue rather than a lighter grey — grey only ever reads as "less
+     important text", which is what made these blend in. Deeper and less
+     saturated than --accent on purpose: --accent marks what you can press, and
+     a heading is not a control. */
+  --heading: #2656c9; /* 6.4:1 */
+
+  /* Four intents, one per thing an action button can do. Every one is legible
+     as text on --surface *and* as a fill behind --on-fill, because the same
+     hue has to work at both emphases — see the .btn--* intent block. */
+  --accent: #2f6df6; /* 4.5:1 — move, and the primary everywhere else */
   --accent-soft: #eaf0fe;
-  --danger: #c0392f;
+  --danger: #c0392f; /* 5.4:1 — delete */
   --danger-soft: #fdeeec;
+  --warn: #a4620a; /* 4.9:1 — block: sets up destruction, destroys nothing now */
+  --warn-soft: #fdf1e0;
+  --success: #1f7a43; /* 5.4:1 — restore */
+  --success-soft: #e6f3ea;
+
+  /* Text on a filled button. White works on every light-mode fill and on none
+     of the dark-mode ones, which is why it is a token and not a literal. */
+  --on-fill: #ffffff;
+
   --skeleton: #ecedf1;
 
   --row-h: 34px;
@@ -87,13 +120,24 @@
     --bg: #16181c;
     --surface: #1d2025;
     --text: #e9eaed;
-    --muted: #9aa0a6;
-    --faint: #6f747b;
+    --muted: #9aa0a6; /* 6.7:1 on --bg */
+    --faint: #6f747b; /* 3.8:1 — decoration only, as above */
     --border: #282c33;
-    --accent: #7ba3ff;
+    --edge: #6b7280; /* 3.4:1 on --surface */
+    --heading: #aec6f6; /* 10.3:1 */
+    --accent: #7ba3ff; /* 7.2:1 */
     --accent-soft: #1e2740;
-    --danger: #f0857a;
+    --danger: #f0857a; /* 6.9:1 */
     --danger-soft: #2c1d1c;
+    --warn: #e0a45c; /* 8.2:1 */
+    --warn-soft: #2e2417;
+    --success: #5cba7d; /* 7.4:1 */
+    --success-soft: #172c1f;
+    /* Every dark-mode intent is a light tint, so white on it is 2.5:1 or worse.
+       Filled buttons take the page ground as their text instead — 7:1 and up.
+       This was wrong before the intents existed: .btn--primary was hardcoded
+       #fff, which put white on #7ba3ff at 2.46:1. */
+    --on-fill: #16181c;
     --skeleton: #262a31;
   }
 }
@@ -134,6 +178,35 @@ body {
 .screen--center {
   justify-content: center;
   padding: 24px var(--pad-x) 32px;
+}
+
+/* ── Focus ───────────────────────────────────────────────────── */
+/* One declaration for everything that takes focus, rather than a designed ring
+   on three controls and Chrome's default on the rest. The list matters as much
+   as the rule: .sender, .mail and .rule--group are div-based rows carrying
+   role="button" and tabIndex 0 (see sidepanel.js), so they are tab stops that
+   look like text — and a default ring landing on a picked row's --accent-soft
+   is where it is weakest. Inset, because a row is flush to the panel edge and
+   an outset ring would be clipped. */
+.btn:focus-visible,
+.icon-btn:focus-visible,
+.picker-trigger:focus-visible,
+.picker-option:focus-visible,
+.pager-btn:focus-visible,
+.col-head:focus-visible,
+.row:focus-visible,
+.row-action:focus-visible,
+.sender:focus-visible,
+.mail:focus-visible,
+.rule--group:focus-visible,
+.nav-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The tab bar's own cell is square, so its ring needs a radius to sit inside. */
+.nav-btn:focus-visible {
+  border-radius: 8px;
 }
 
 /* ── Boot ────────────────────────────────────────────────────── */
@@ -184,6 +257,11 @@ body {
   letter-spacing: -0.015em;
 }
 
+/* The one thing on the screen, so it spans it. */
+.welcome .btn {
+  width: 100%;
+}
+
 .tagline {
   margin: 5px 0 26px;
   color: var(--muted);
@@ -193,7 +271,7 @@ body {
 .fineprint {
   margin: 18px auto 0;
   max-width: 280px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 11.5px;
   line-height: 1.55;
 }
@@ -213,10 +291,41 @@ body {
   transition: background-color 0.14s ease, opacity 0.14s ease;
 }
 
+/* Every action button carries an intent — what pressing it does — and the
+   intent supplies one hue. Emphasis is the only thing that varies: the primary
+   action in a row wears its hue as a fill, the rest wear the same hue as text,
+   icon and edge. That is what makes Move, Block and Delete read as one family
+   rather than three unrelated controls, and it is why the colour never has to
+   be repeated on the glyph: .btn-glyph strokes with currentColor. */
+.btn {
+  --intent: var(--accent);
+  --intent-soft: var(--accent-soft);
+}
+
+.btn--danger {
+  --intent: var(--danger);
+  --intent-soft: var(--danger-soft);
+}
+
+/* Writes a standing instruction to destroy mail, but moves nothing you already
+   have — caution rather than danger, and a hue between the two says so. */
+.btn--block {
+  --intent: var(--warn);
+  --intent-soft: var(--warn-soft);
+}
+
+.btn--restore {
+  --intent: var(--success);
+  --intent-soft: var(--success-soft);
+}
+
+/* Sizes to its content. It used to be full-width by default, which meant three
+   separate `width: auto` overrides for the places that are not a dialog or the
+   Welcome screen — and one more for every new place a filled button appears.
+   The two that do want the full width now say so themselves. */
 .btn--primary {
-  background: var(--accent);
-  color: #fff;
-  width: 100%;
+  background: var(--intent);
+  color: var(--on-fill);
 }
 
 .btn--primary:hover:not(:disabled) {
@@ -228,14 +337,34 @@ body {
   cursor: default;
 }
 
+/* A ghost button reads as a button through figure/ground first and its edge
+   second. It used to be transparent with a --border hairline, which is 1.2:1
+   against the page — for practical purposes no edge at all, leaving 12px of
+   grey text with an icon beside it, which is what body copy looks like. */
 .btn--ghost {
-  background: transparent;
+  background: var(--surface);
   color: var(--muted);
-  box-shadow: inset 0 0 0 1px var(--border);
+  box-shadow: inset 0 0 0 1px var(--edge);
 }
 
+/* A ghost that carries an intent takes its hue for text, icon and edge. The
+   edge is mixed rather than set to the hue outright: a full-strength coloured
+   border on a small button reads as an alert, where what is wanted is a control
+   that is recognisably about one thing. 55% keeps it clear of --edge's 3:1
+   floor, since the intents are all darker than --edge to begin with. */
+.btn--ghost.btn--danger,
+.btn--ghost.btn--block,
+.btn--ghost.btn--restore,
+.btn--ghost.btn--move {
+  color: var(--intent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--intent) 55%, var(--edge));
+}
+
+/* One neutral step darker than the resting surface. Deliberately not
+   --accent-soft: the accent now marks the one primary action in a tools row,
+   and a neutral button that turns blue on hover would blur that. */
 .btn--ghost:hover:not(:disabled) {
-  background: var(--surface);
+  background: var(--border);
   color: var(--text);
 }
 
@@ -245,11 +374,13 @@ body {
   border-radius: 8px;
 }
 
+/* 550 rather than 500: small type needs more weight to hold its own, not less,
+   and these were the lightest buttons in the product at the smallest size. */
 .btn--xs {
   gap: 5px;
   padding: 5px 10px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 550;
   border-radius: 7px;
 }
 
@@ -277,12 +408,26 @@ body {
 
 /* Refresh and Log out. Refresh carries its label because it is the action
    reached for often; Log out is icon-only and coloured as the rarer,
-   destructive-adjacent one of the pair. */
+   destructive-adjacent one of the pair.
+
+   Refresh is filled, on the same rule Restore follows: **a fill marks the sole
+   action in its region**, and the top bar has exactly one. It was tried as a
+   transparent chip and then as a --surface one, and both disappeared into a
+   white bar — --surface is one shade off --bg, which is the right amount of
+   contrast for a footer and far too little for the only button up here. It
+   cannot be confused with the tools-row buttons because those are all tinted
+   ghosts: nothing else in the panel is both filled and neutral in position. */
+/* The gap matches --pad-x so the Log out glyph is optically centred in its own
+   space. .icon-btn is a 26px box around a 16px glyph, so the glyph carries 5px
+   of its own padding on each side: to the panel edge that is 5 + --pad-x, and
+   to Refresh it is 5 + gap. At the old 2px the icon sat hard against Refresh
+   with a clear margin on the other side, which read as misalignment rather
+   than as a group. */
 .topbar-actions {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--pad-x);
 }
 
 /* Avatar height is the reference the two text lines are sized against. */
@@ -298,12 +443,15 @@ body {
   overflow: hidden;
 }
 
+/* The one glyph drawn in a 24-unit box rather than a 16-unit one, so 1.7 here
+   rendered at 0.071 against the family's 0.100–0.113 and read visibly lighter
+   than everything around it. 2.5/24 puts it back in the set. */
 .avatar svg {
   width: 18px;
   height: 18px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.7;
+  stroke-width: 2.5;
   stroke-linecap: round;
 }
 
@@ -328,11 +476,13 @@ body {
   min-width: 0;
 }
 
+/* Steps back so the screen's own title leads. This is app identity, which is
+   worth stating once and never competing with the page you are actually on. */
 .wordmark {
-  font-size: 14px;
-  font-weight: 620;
+  font-size: 13px;
+  font-weight: 600;
   line-height: 17px;
-  letter-spacing: -0.012em;
+  letter-spacing: -0.01em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -415,7 +565,7 @@ body {
 }
 
 .progress-left {
-  color: var(--faint);
+  color: var(--muted);
   text-align: right;
 }
 
@@ -482,14 +632,17 @@ body {
   margin-top: 4px;
 }
 
+/* --heading rather than a grey: a section label sits at a different layer from
+   the rows under it, and grey only ever reads as "less important text" — which
+   is exactly why these blended into the list. */
 .group-title {
   margin: 0;
   padding: 6px var(--pad-x) 6px;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--faint);
+  color: var(--heading);
 }
 
 .row {
@@ -523,10 +676,6 @@ body {
   background: var(--surface);
 }
 
-.row:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
 
 .row-name {
   flex: 1 1 auto;
@@ -536,7 +685,13 @@ body {
 }
 
 /* Repeats what the indent already says, but at a glance: a dot for a
-   top-level folder, a chevron for anything nested. */
+   top-level folder, a chevron for anything nested.
+
+   Decoration, so it takes --faint and never changes on hover. That is the whole
+   of the icon colour rule: a control sits on --muted and brightens to --text
+   under the pointer, a mark sits on --faint and stays put. Before this, the
+   nesting dot and the bin that deletes a folder were the same colour on the
+   same row, so nothing said which of the two did anything. */
 .row-icon {
   display: inline-block;
   width: 12px;
@@ -571,7 +726,7 @@ body {
 
 .row-size {
   font-size: 11.5px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* A figure that is real but known to be missing a few messages Gmail would not
@@ -629,7 +784,7 @@ body {
 
 .empty {
   padding: 4px var(--pad-x) 10px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -664,7 +819,16 @@ body {
   pointer-events: auto;
 }
 
+/* Tinted by what they do, on the same intent rule the action buttons follow:
+   the + adds and takes --accent, the bin removes and takes --danger. They used
+   to be grey, which put them at the same value as the decorative nesting dot
+   two columns to the left — so nothing on the row said which of the two marks
+   did anything. Colour at rest rather than on hover, because hover is not
+   available to say it on touch, and because a bin you have to hover to
+   recognise is a bin you can press without meaning to. */
 .row-action {
+  --intent: var(--accent);
+  --intent-soft: var(--accent-soft);
   display: grid;
   place-items: center;
   width: 22px;
@@ -673,23 +837,18 @@ body {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--faint);
+  color: var(--intent);
   cursor: pointer;
 }
 
+.row-action--danger {
+  --intent: var(--danger);
+  --intent-soft: var(--danger-soft);
+}
+
 .row-action:hover {
-  background: var(--surface);
-  color: var(--text);
-}
-
-.row-action:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.row-action--danger:hover {
-  background: var(--danger-soft);
-  color: var(--danger);
+  background: var(--intent-soft);
+  color: var(--intent);
 }
 
 .row-action svg {
@@ -843,13 +1002,17 @@ body {
   stroke-linejoin: round;
 }
 
+/* The top of the hierarchy, and it has to look like it. At 14px it was the same
+   size and weight as the wordmark in the bar above it and half a pixel bigger
+   than the rows beneath it, so nothing on the screen was the biggest thing on
+   the screen. 17px against 13.5px rows is the gap that makes it lead. */
 .detail-name {
   flex: 1 1 auto;
   min-width: 0;
   margin: 0;
-  font-size: 14px;
-  font-weight: 620;
-  letter-spacing: -0.012em;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -901,6 +1064,17 @@ body {
   gap: 4px;
 }
 
+/* One filled button per tools row, so the row answers "which of these did I
+   come here to press". */
+.tools-buttons .btn--primary {
+  box-shadow: none;
+}
+
+.tools-buttons .btn--primary:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* Inline SVG rather than a Material Symbols glyph: the icon font is bundled as
    a subset, so a new glyph means rebuilding it. */
 .btn-glyph {
@@ -914,13 +1088,16 @@ body {
   stroke-linejoin: round;
 }
 
-.btn--danger {
-  color: var(--danger);
-}
-
-.btn--danger:hover:not(:disabled) {
-  background: var(--danger-soft);
-  color: var(--danger);
+/* An intent ghost deepens into its own tint on hover rather than the neutral
+   step a plain ghost takes, so the hue is confirmed by the hover instead of
+   being replaced by it. Kept out of the Buttons section only because
+   --intent-soft has to be declared alongside the intents themselves. */
+.btn--ghost.btn--danger:hover:not(:disabled),
+.btn--ghost.btn--block:hover:not(:disabled),
+.btn--ghost.btn--restore:hover:not(:disabled),
+.btn--ghost.btn--move:hover:not(:disabled) {
+  background: var(--intent-soft);
+  color: var(--intent);
 }
 
 #detail-spinner {
@@ -931,7 +1108,7 @@ body {
   font-size: 11.5px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
-  color: var(--faint);
+  color: var(--muted);
   white-space: nowrap;
 }
 
@@ -944,7 +1121,10 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 8px 4px 6px;
+  min-width: 0;
+  /* The value box now sets the control's height, so the trigger gives back the
+     vertical padding it used to add — the row stays on its 27px floor. */
+  padding: 2px 6px;
   font: inherit;
   font-size: 11.5px;
   border: 0;
@@ -954,18 +1134,55 @@ body {
   cursor: pointer;
 }
 
+/* The value's own border carries the hover now, so the trigger no longer takes
+   a fill as well — two things lighting up for one pointer read as a bug. */
 .picker-trigger:hover,
 .picker-trigger[aria-expanded='true'] {
-  background: var(--surface);
   color: var(--text);
 }
 
+.picker-icon {
+  flex: 0 0 auto;
+}
+
+/* Two pickers side by side at the right of the row. */
+/* The label names the setting; the value is what it is currently set to. Only
+   the second changes, so only the second is boxed — that is what tells you at a
+   glance which part of "Sort by: Email count" is the answer and which is the
+   question. Both pickers get it, which they did not before: the period's value
+   was plain muted text and the sort's was --text, so the two read as different
+   kinds of control while doing exactly the same job. */
 .picker-prefix {
-  color: var(--faint);
+  flex: 0 0 auto;
+  color: var(--muted);
 }
 
-#sort-label {
+/* The explicit line-height is the load-bearing part, not the padding. Inheriting
+   the body's 1.45 gives a line box with more leading under the text than over
+   it, so at 1px padding the value sat visibly high in its border and the whole
+   thing read as a badge rather than a field. 1.3 plus symmetric padding centres
+   it optically; 3px/8px is then just room to breathe. */
+.picker-value {
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--edge);
+  /* Near-square on purpose. The rounder it got, the more it read as a badge —
+     a decorative pill stuck onto the label — where a squared box reads as a
+     field holding a value you can change. Just enough radius to not look like
+     an accident against the panel's other rounded controls. */
+  border-radius: 3px;
+  line-height: 1.3;
   color: var(--text);
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-trigger:hover .picker-value,
+.picker-trigger[aria-expanded='true'] .picker-value {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .picker-icon {
@@ -1027,7 +1244,10 @@ body {
   height: 13px;
   fill: none;
   stroke: var(--accent);
-  stroke-width: 2;
+  /* Optical weight here is stroke ÷ viewBox units, not stroke ÷ rendered size —
+     the stroke scales with the box. Every glyph below draws in a 16-unit box,
+     so the family runs 1.6–1.8 (0.100–0.113); this was the one at 2 (0.125). */
+  stroke-width: 1.7;
   stroke-linecap: round;
   stroke-linejoin: round;
   /* Held in place rather than removed, so the labels do not shift on select. */
@@ -1087,7 +1307,7 @@ body {
   letter-spacing: 0.03em;
   text-transform: uppercase;
   text-align: left;
-  color: var(--faint);
+  color: var(--muted);
   background: transparent;
   border: 0;
   cursor: pointer;
@@ -1095,7 +1315,7 @@ body {
 }
 
 .col-head:hover {
-  color: var(--muted);
+  color: var(--text);
 }
 
 .col-head[aria-sort] {
@@ -1122,7 +1342,7 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 400;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* Drawn pointing down, which is what descending means; ascending turns it
@@ -1222,7 +1442,7 @@ body {
 
 .sender-display {
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* Leads the list while more is still arriving, in place of the card the
@@ -1234,7 +1454,7 @@ body {
   gap: 8px;
   padding: 9px var(--pad-x);
   font-size: 11.5px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .sender-figure {
@@ -1278,7 +1498,7 @@ body {
 }
 
 .col-head--static:hover {
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .mail {
@@ -1318,13 +1538,13 @@ body {
 
 .mail-snippet {
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* A message Gmail would not hand over still has a row — it is in the count
    behind it — so it says so rather than showing an empty line. */
 .mail--gone .mail-subject {
-  color: var(--faint);
+  color: var(--muted);
   font-style: italic;
 }
 
@@ -1416,7 +1636,7 @@ body {
 .rule-kind {
   margin-top: 1px;
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* The glyph inside "(⊘ Blocked mails)" — the same one the Block button carries,
@@ -1450,11 +1670,11 @@ body {
 .rule-section {
   margin: 0;
   padding: 14px var(--pad-x) 5px;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--faint);
+  color: var(--heading);
 }
 
 .rule-section:first-child {
@@ -1480,7 +1700,7 @@ body {
    delete here takes its rules with it. Still listed, because the only thing to
    do about one is delete it and that has to be reachable. */
 .rule-name--orphan {
-  color: var(--faint);
+  color: var(--muted);
   font-style: italic;
   font-weight: 500;
 }
@@ -1570,7 +1790,7 @@ body {
 .message-note {
   margin: 0 0 10px;
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .message-files {
@@ -1599,7 +1819,7 @@ body {
 .message-files span:last-child {
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* ── Notices ─────────────────────────────────────────────────── */
@@ -1672,20 +1892,29 @@ body {
   width: 100%;
 }
 
+/* Both are the danger intent under dialog-specific names, kept because the
+   markup and `el.confirmOk.classList.toggle('dialog-destructive', …)` refer to
+   them. Declaring the intent rather than the colour is what keeps them in step
+   with the toolbar's Delete. */
 .dialog-danger {
-  color: var(--danger);
+  --intent: var(--danger);
+  --intent-soft: var(--danger-soft);
+  color: var(--intent);
 }
 
 .dialog-danger:hover:not(:disabled) {
-  background: var(--danger-soft);
-  color: var(--danger);
+  background: var(--intent-soft);
+  color: var(--intent);
 }
 
 /* The primary action of a dialog whose primary action destroys something. It
    keeps the filled weight — it is still what the dialog is for — and takes the
    danger colour so the weight is not read as encouragement. */
 .dialog-destructive {
-  background: var(--danger);
+  --intent: var(--danger);
+  --intent-soft: var(--danger-soft);
+  background: var(--intent);
+  color: var(--on-fill);
 }
 
 /* Only choice in the dialog that touches mail, so it is stated as a choice and
@@ -1753,7 +1982,7 @@ body {
 .checkbox-hint {
   margin: 0 0 16px;
   padding-left: 23px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 11.5px;
   line-height: 1.5;
 }
@@ -1850,10 +2079,6 @@ body {
   margin-top: 18px;
 }
 
-.state-actions .btn--primary {
-  width: auto;
-}
-
 .state-details {
   width: 100%;
   max-width: 300px;
@@ -1864,7 +2089,7 @@ body {
 .state-details summary {
   cursor: pointer;
   font-size: 11.5px;
-  color: var(--faint);
+  color: var(--muted);
   list-style: none;
   text-align: center;
 }
@@ -1874,7 +2099,7 @@ body {
 }
 
 .state-details summary:hover {
-  color: var(--muted);
+  color: var(--text);
 }
 
 .state-details p {
@@ -1906,14 +2131,67 @@ svg.stop-icon {
 /* Between the list and the tab bar, and pinned like both. It used to sit under
    a refresh bar that gave it its separating rule; refresh has moved to the top
    bar, so it carries its own now. */
+/* Three states, because one slot was carrying three different jobs in one
+   voice. `flash()` delivers every outcome in the product here — successes and
+   failures alike — and they used to render exactly as the ambient "Updated 3
+   minutes ago" that sits here the rest of the time: same size, same colour, no
+   glyph. An action could fail and go unnoticed.
+
+   Idle stays quiet and centred. An outcome takes full text colour. A failure
+   takes the danger tint and a glyph, and goes left-aligned because it is a
+   sentence to read rather than a status to glance at. */
+/* The resting state is a status bar rather than a stray line of text: a
+   --surface fill and a slightly stronger rule give it edges, so it reads as a
+   place the panel reports from even when what it says is unremarkable. Kept to
+   a fill and nothing else — no weight, no colour — because it sits under every
+   screen and has to be legible without ever competing with one. */
 .footer {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 6px var(--pad-x) 5px;
   border-top: 1px solid var(--border);
+  background: var(--surface);
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
   text-align: center;
   min-height: 24px;
+}
+
+/* A job under way, and the outcome of one just finished. Both are answers to
+   something the user asked for a moment ago, so both outrank the load's own
+   line — see setFooter. */
+.footer--busy,
+.footer--flash {
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+.footer--error {
+  justify-content: flex-start;
+  text-align: left;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+.footer-icon {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2; /* 24-unit box — matches the family at 0.092 */
+  stroke-linecap: round;
+}
+
+.footer-icon .dot {
+  fill: currentColor;
+  stroke: none;
 }
 
 /* ── The two tabs ────────────────────────────────────────────── */
@@ -1968,8 +2246,3 @@ svg.stop-icon {
   background: var(--accent-soft);
 }
 
-.nav-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  border-radius: 8px;
-}

@@ -840,9 +840,16 @@ let actionStatus = null;
 
 /** The outcome of one, shown briefly and then given back. */
 let flashText = null;
+let flashTone = null;
 let flashTimer = null;
 
 const FLASH_MS = 7000;
+
+/** How long a failure stays up. Longer than an outcome, because it is the one
+ *  thing here that asks the user to do something about it. */
+const FLASH_ERROR_MS = 12000;
+
+const FOOTER_TONES = ['footer--busy', 'footer--flash', 'footer--error'];
 
 function setAction(text) {
   actionStatus = text;
@@ -853,18 +860,60 @@ function setAction(text) {
 
 function clearFlash() {
   flashText = null;
+  flashTone = null;
   clearTimeout(flashTimer);
   flashTimer = null;
 }
 
-function flash(text) {
+/**
+ * An outcome, held for a few seconds and then given back to whatever the footer
+ * was saying before.
+ *
+ * `tone` is 'error' for anything that did not happen — a refused write, a job
+ * that could not finish, an action blocked by another one. Everything else is
+ * an outcome and reads as one. This is the only signal the panel gives that
+ * something failed: there is no toast and no error dialog for these, so a
+ * failure passed in without the tone is a failure the user will not notice.
+ */
+function flash(text, tone = 'flash') {
   clearFlash();
   flashText = text;
-  flashTimer = setTimeout(() => {
-    flashText = null;
-    setFooter();
-  }, FLASH_MS);
+  flashTone = tone;
+  flashTimer = setTimeout(
+    () => {
+      flashText = null;
+      flashTone = null;
+      setFooter();
+    },
+    tone === 'error' ? FLASH_ERROR_MS : FLASH_MS
+  );
   setFooter();
+}
+
+/**
+ * The footer's one slot, painted with the tone that belongs to whatever is
+ * claiming it. A tone is a class rather than an inline colour so the two themes
+ * stay in the stylesheet with everything else.
+ */
+function paintFooter(text, tone = null) {
+  el.footer.classList.remove(...FOOTER_TONES);
+  if (tone) el.footer.classList.add(`footer--${tone}`);
+
+  // A failure gets a glyph, because it is the one line here nobody may scroll
+  // past. ICON_ALERT is constant markup, which is the only thing innerHTML is
+  // used for in this project — the text itself is set as a text node.
+  if (tone === 'error') {
+    const icon = document.createElement('span');
+    icon.innerHTML = ICON_ALERT;
+    const glyph = icon.firstElementChild;
+    glyph.setAttribute('class', 'footer-icon');
+    const label = document.createElement('span');
+    label.textContent = text;
+    el.footer.replaceChildren(glyph, label);
+    return;
+  }
+
+  el.footer.textContent = text;
 }
 
 function setFooter(timestamp = lastLoaded) {
@@ -873,27 +922,27 @@ function setFooter(timestamp = lastLoaded) {
   // Both outrank the load: a refresh runs on its own schedule and says the same
   // thing a second later, where these are answers to something just asked for.
   if (actionStatus) {
-    el.footer.textContent = actionStatus;
+    paintFooter(actionStatus, 'busy');
     return;
   }
   if (flashText) {
-    el.footer.textContent = flashText;
+    paintFooter(flashText, flashTone);
     return;
   }
 
   // Counting, warm or cold. Once it is done the counts on screen are final,
   // so the timestamp is honest even while sizes are still being read.
   if (progress?.phase === 'counting') {
-    el.footer.textContent = `Counting folders… ${progress.done} of ${progress.total}`;
+    paintFooter(`Counting folders… ${progress.done} of ${progress.total}`);
     return;
   }
 
   if (!timestamp) {
-    el.footer.textContent = busy ? 'Loading…' : '';
+    paintFooter(busy ? 'Loading…' : '');
     return;
   }
 
-  el.footer.textContent = `Updated ${formatAgo(Date.now() - timestamp)}`;
+  paintFooter(`Updated ${formatAgo(Date.now() - timestamp)}`);
 }
 
 /**
@@ -1669,7 +1718,7 @@ async function ensureHeaders(ids) {
     // after the cooldown tries again. Deliberately no re-render here: it would
     // be the failing call asking for itself.
     headersBlockedUntil = Date.now() + HEADER_RETRY_MS;
-    flash(`Couldn't read those emails. ${describeWriteError(err)}`);
+    flash(`Couldn't read those emails. ${describeWriteError(err)}`, 'error');
   } finally {
     fetchingHeaders--;
     el.mailsSpinner.hidden = fetchingHeaders > 0;
@@ -2128,7 +2177,7 @@ async function submitCreate() {
       showEditorError(reason);
       editor.input.focus();
     }
-    flash(`Couldn't create the folder. ${reason}`);
+    flash(`Couldn't create the folder. ${reason}`, 'error');
   }
 }
 
@@ -2279,7 +2328,7 @@ let askingDelete = false;
 async function confirmDelete(labelId) {
   if (askingDelete || el.deleteDialog.open) return;
   if (jobRunning()) {
-    flash('MailBoy is still finishing the last job.');
+    flash('MailBoy is still finishing the last job.', 'error');
     return;
   }
 
@@ -2787,7 +2836,7 @@ let confirmRule = null;
 function canAct() {
   if (!openLabel) return false;
   if (jobRunning()) {
-    flash('MailBoy is still finishing the last job.');
+    flash('MailBoy is still finishing the last job.', 'error');
     return false;
   }
   return true;
@@ -2812,7 +2861,7 @@ function resolveSelection() {
 
   const ids = idsForSelection(openLabel.id, facts.keys, sinceDay());
   if (!ids.length) {
-    flash('Those emails are no longer in this folder.');
+    flash('Those emails are no longer in this folder.', 'error');
     clearSelection();
     return null;
   }
@@ -2841,7 +2890,7 @@ function resolveMailSelection() {
 
   const { ids } = mailSelectionFacts();
   if (!ids.length) {
-    flash('Those emails are no longer in this folder.');
+    flash('Those emails are no longer in this folder.', 'error');
     clearMailSelection();
     return null;
   }
@@ -3315,7 +3364,7 @@ function startMove(picked) {
   // before that list exists — a half-built one would shed only some folders and
   // leave the mail in two places, which is the one outcome this must not have.
   if (!currentGroups) {
-    flash('MailBoy is still reading your folders.');
+    flash('MailBoy is still reading your folders.', 'error');
     return;
   }
 
@@ -3420,7 +3469,10 @@ async function applyRules(specs, where, whenFailed = "The emails are moving, but
 
     const room = MAX_RULES - filters;
     if (room <= 0) {
-      flash(`Gmail is full at ${MAX_RULES.toLocaleString()} filters — no rule was added.`);
+      flash(
+        `Gmail is full at ${MAX_RULES.toLocaleString()} filters — no rule was added.`,
+        'error'
+      );
       return;
     }
 
@@ -3444,7 +3496,7 @@ async function applyRules(specs, where, whenFailed = "The emails are moving, but
     flash(parts.join(' '));
   } catch (err) {
     console.error('[MailBoy] could not add the rule:', err);
-    flash(whenFailed);
+    flash(whenFailed, 'error');
   }
 }
 
@@ -3565,7 +3617,8 @@ async function startBlock(material) {
     flash(
       material.count === 1
         ? 'That sender has no address MailBoy can write a rule against.'
-        : 'None of those senders has an address MailBoy can write a rule against.'
+        : 'None of those senders has an address MailBoy can write a rule against.',
+      'error'
     );
     return;
   }
@@ -3743,7 +3796,7 @@ function onFolderMessage(message) {
     deleteState = null;
     markWorkingRows();
     setAction(null);
-    flash(`Couldn't finish deleting “${name}”.`);
+    flash(`Couldn't finish deleting “${name}”.`, 'error');
     resolveAction({ listing: true, why: 'the delete failed outright' });
     return;
   }
@@ -3777,7 +3830,7 @@ function onFolderMessage(message) {
     console.error('[MailBoy] selection job failed:', message.message);
     bulkState = null;
     setAction(null);
-    flash("Couldn't finish moving those emails.");
+    flash("Couldn't finish moving those emails.", 'error');
     // The rows are showing mail gone from somewhere it may never have left.
     resolveAction({ listing: true, why: 'the selection job failed outright' });
   }
@@ -4416,7 +4469,7 @@ function closeRuleGroup() {
 async function confirmRuleDelete(doomed, where) {
   if (!doomed.length) return;
   if (jobRunning()) {
-    flash('MailBoy is still finishing the last job.');
+    flash('MailBoy is still finishing the last job.', 'error');
     return;
   }
 
@@ -4475,7 +4528,7 @@ async function confirmRuleDelete(doomed, where) {
   } catch (err) {
     console.error('[MailBoy] could not delete those rules:', err);
     setAction(null);
-    flash("Couldn't delete those rules.");
+    flash("Couldn't delete those rules.", 'error');
     // Whatever did or did not go, the list on screen is now a guess.
     void loadRules();
   }
@@ -4931,7 +4984,7 @@ async function load({ force = false } = {}) {
     membershipReady = restoreMembership();
     // Someone who pressed the button is owed an answer; an open that quietly
     // skipped its sync is not worth interrupting for.
-    if (force) flash('MailBoy is still finishing the last job.');
+    if (force) flash('MailBoy is still finishing the last job.', 'error');
     return;
   }
 

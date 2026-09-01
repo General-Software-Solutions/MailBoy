@@ -121,7 +121,7 @@
              reduced to its glyph, coloured to read as the one destructive
              control in the bar. -->
         <div class="topbar-actions">
-          <button id="btn-refresh" class="btn btn--ghost btn--xs">
+          <button id="btn-refresh" class="btn btn--primary btn--xs">
             <span id="refresh-icon" class="icon" aria-hidden="true">refresh</span>
             <svg id="stop-icon" class="stop-icon" viewBox="0 0 16 16" aria-hidden="true" hidden>
               <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
@@ -322,6 +322,20 @@
 
       <!-- ── Mailbox ───────────────────────────────────────────── -->
       <section id="screen-main" class="screen" hidden>
+        <!-- Every other signed-in screen carries a title bar, and this one did
+             not — so moving between Home and Rules changed the shape of the
+             header area and read as two different apps. Flush rather than
+             inset because nothing was opened to get here, so there is no back
+             button and the heading lines up with the rows beneath it.
+
+             No total beside it, unlike the breakdown: rows overlap by design
+             (a labelled message still in the inbox is counted under both), so
+             the sections deliberately do not sum to the mailbox and any figure
+             here would be a number that means nothing. -->
+        <header class="detail-head detail-head--flush">
+          <h1 class="detail-name"><span>Mailbox</span></h1>
+        </header>
+
         <div class="content">
           <section id="notice" class="notice-card" hidden>
             <div class="notice-head">
@@ -379,6 +393,9 @@
                about re-sorting a list you are in the middle of acting on, and a
                side panel has no width to carry both. -->
           <div id="tools-filters" class="tools-filters">
+          <!-- Period at the left, sort at the right: two settings on one list,
+               each anchored to its own end so neither moves as the other's
+               value changes length. -->
           <div class="picker">
             <button
               id="btn-period"
@@ -390,7 +407,8 @@
                 <circle cx="8" cy="8" r="5.75" />
                 <path d="M8 4.75V8l2.25 1.5" />
               </svg>
-              <span id="period-label">All time</span>
+              <span class="picker-prefix">Period:</span>
+              <span id="period-label" class="picker-value">All time</span>
             </button>
 
             <div id="period-menu" class="picker-menu" role="menu" hidden>
@@ -438,7 +456,7 @@
                 <path d="M2.5 4h11M4 8h8M6 12h4" />
               </svg>
               <span class="picker-prefix">Sort by:</span>
-              <span id="sort-label">Email count</span>
+              <span id="sort-label" class="picker-value">Email count</span>
             </button>
 
             <div id="sort-menu" class="picker-menu picker-menu--right" role="menu" hidden>
@@ -477,14 +495,14 @@
                  mean permanent — which needs the widest scope Google publishes
                  and is not something MailBoy will ever ask for. -->
             <div class="tools-buttons">
-              <button id="btn-restore" class="btn btn--ghost btn--xs" hidden>
+              <button id="btn-restore" class="btn btn--primary btn--restore btn--xs" hidden>
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" />
                   <path d="M2.6 2.6v2.6h2.6" />
                 </svg>
                 <span>Restore</span>
               </button>
-              <button id="btn-move" class="btn btn--ghost btn--xs">
+              <button id="btn-move" class="btn btn--ghost btn--move btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M2 12.6V3.9h3.7l1.2 1.6h7.1v7.1z" />
                   <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
@@ -495,7 +513,7 @@
                    rule and stops. Not danger-coloured for that reason — nothing
                    already in the mailbox is touched — but its dialog's button
                    is, because what it sets up is mail being destroyed unseen. -->
-              <button id="btn-block" class="btn btn--ghost btn--xs">
+              <button id="btn-block" class="btn btn--ghost btn--block btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <circle cx="8" cy="8" r="5.4" />
                   <path d="M4.2 11.8L11.8 4.2" />
@@ -589,7 +607,7 @@
                   <path d="M2.5 4h11M4 8h8M6 12h4" />
                 </svg>
                 <span class="picker-prefix">Sort by:</span>
-                <span id="mail-sort-label">Date</span>
+                <span id="mail-sort-label" class="picker-value">Date</span>
               </button>
 
               <div id="mail-sort-menu" class="picker-menu picker-menu--right" role="menu" hidden>
@@ -612,14 +630,14 @@
           <div id="mails-actions" class="tools-actions" hidden>
             <span id="mail-selection-summary" class="selection-summary"></span>
             <div class="tools-buttons">
-              <button id="btn-mail-restore" class="btn btn--ghost btn--xs" hidden>
+              <button id="btn-mail-restore" class="btn btn--primary btn--restore btn--xs" hidden>
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" />
                   <path d="M2.6 2.6v2.6h2.6" />
                 </svg>
                 <span>Restore</span>
               </button>
-              <button id="btn-mail-move" class="btn btn--ghost btn--xs">
+              <button id="btn-mail-move" class="btn btn--ghost btn--move btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M2 12.6V3.9h3.7l1.2 1.6h7.1v7.1z" />
                   <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
@@ -628,7 +646,7 @@
               </button>
               <!-- About the sender, not the ticks: blocking is a rule, and a
                    rule cannot be about ten particular messages. -->
-              <button id="btn-mail-block" class="btn btn--ghost btn--xs">
+              <button id="btn-mail-block" class="btn btn--ghost btn--block btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <circle cx="8" cy="8" r="5.4" />
                   <path d="M4.2 11.8L11.8 4.2" />
@@ -696,21 +714,21 @@
           <div class="tools-actions">
             <span id="message-scope" class="selection-summary"></span>
             <div class="tools-buttons">
-              <button id="btn-message-restore" class="btn btn--ghost btn--xs" hidden>
+              <button id="btn-message-restore" class="btn btn--primary btn--restore btn--xs" hidden>
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" />
                   <path d="M2.6 2.6v2.6h2.6" />
                 </svg>
                 <span>Restore</span>
               </button>
-              <button id="btn-message-move" class="btn btn--ghost btn--xs">
+              <button id="btn-message-move" class="btn btn--ghost btn--move btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M2 12.6V3.9h3.7l1.2 1.6h7.1v7.1z" />
                   <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
                 </svg>
                 <span>Move</span>
               </button>
-              <button id="btn-message-block" class="btn btn--ghost btn--xs">
+              <button id="btn-message-block" class="btn btn--ghost btn--block btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <circle cx="8" cy="8" r="5.4" />
                   <path d="M4.2 11.8L11.8 4.2" />
