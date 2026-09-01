@@ -21,7 +21,7 @@
   </defs>
 
   <!-- Deep elegant gold background with gradient -->
-  <rect x="0" y="10" width="200" height="190" fill="url(#metallicGold)" rx="4"/>
+  <rect x="0" y="10" width="200" height="190" fill="url(#metallicGold)" rx="25" ry="25"/>
   
 
    <!-- Thick Deep black V stroke -->
