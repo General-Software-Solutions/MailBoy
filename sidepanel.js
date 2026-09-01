@@ -104,6 +104,7 @@ const el = {
   refresh: document.getElementById('btn-refresh'),
   refreshIcon: document.getElementById('refresh-icon'),
   stopIcon: document.getElementById('stop-icon'),
+  refreshLabel: document.getElementById('refresh-label'),
   navbar: document.getElementById('navbar'),
   welcomeError: document.getElementById('welcome-error'),
   account: document.getElementById('account'),
@@ -734,11 +735,13 @@ function setBusy(running) {
   busy = running;
 
   // The one button does both jobs: it is how you start a refresh and the only
-  // way to call one off, so it is never disabled. Icon-only since it moved to
-  // the top bar, so what it says lives in the label and the tooltip.
+  // way to call one off, so it is never disabled. It carries a visible label
+  // as well as the tooltip — the word swaps with the icon rather than just
+  // the aria-label/title, since the button shows text now.
   const says = running ? 'Stop refreshing' : 'Refresh current data';
   el.refreshIcon.hidden = running;
   el.stopIcon.hidden = !running;
+  el.refreshLabel.textContent = running ? 'Stop' : 'Refresh';
   el.refresh.setAttribute('aria-label', says);
   el.refresh.title = says;
   el.detailSpinner.hidden = !running;

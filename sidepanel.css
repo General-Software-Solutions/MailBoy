@@ -275,9 +275,9 @@ body {
   min-width: 0;
 }
 
-/* Refresh and Log out. Refresh is icon-only because the pair has to fit beside
-   an email address on a panel the user can drag as narrow as they like, and of
-   the two it is the one whose glyph needs no word. */
+/* Refresh and Log out. Refresh carries its label because it is the action
+   reached for often; Log out is icon-only and coloured as the rarer,
+   destructive-adjacent one of the pair. */
 .topbar-actions {
   flex: 0 0 auto;
   display: flex;
@@ -788,6 +788,15 @@ body {
 .icon-btn:hover {
   background: var(--surface);
   color: var(--text);
+}
+
+.icon-btn--danger {
+  color: var(--danger);
+}
+
+.icon-btn--danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .icon-btn svg {

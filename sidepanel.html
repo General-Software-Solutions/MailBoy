@@ -115,19 +115,27 @@
         </div>
         <!-- Refresh sits here rather than above the footer because the footer
              now has the tab bar under it, and a third stacked strip at the
-             bottom of a side panel is more chrome than list. Icon only: the
-             wording it used to carry ("Refresh current data" / "Stop
-             refreshing") moves to the title and the label, which is where a
-             single-glyph control belongs anyway. -->
+             bottom of a side panel is more chrome than list. It carries its
+             own label ("Refresh" / "Stop") since it is the action someone is
+             more likely to reach for; Log out is the rarer action and is
+             reduced to its glyph, coloured to read as the one destructive
+             control in the bar. -->
         <div class="topbar-actions">
-          <button id="btn-refresh" class="icon-btn" aria-label="Refresh current data">
+          <button id="btn-refresh" class="btn btn--ghost btn--xs">
             <span id="refresh-icon" class="icon" aria-hidden="true">refresh</span>
             <svg id="stop-icon" class="stop-icon" viewBox="0 0 16 16" aria-hidden="true" hidden>
               <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
             </svg>
+            <span id="refresh-label">Refresh</span>
           </button>
-          <button id="btn-logout" class="btn btn--ghost btn--xs">
-            <span class="icon" aria-hidden="true">logout</span><span>Log out</span>
+          <!-- Inline SVG rather than a Material Symbols glyph: "power" is not
+               in the subsetted font, and rebuilding the subset for one
+               button is not worth it. -->
+          <button id="btn-logout" class="icon-btn icon-btn--danger" aria-label="Log out" title="Log out">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 1.3V8" />
+              <path d="M12.24 4.43a6 6 0 1 1-8.49 0" />
+            </svg>
           </button>
         </div>
       </header>
