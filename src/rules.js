@@ -1,8 +1,14 @@
 // Rules: standing instructions about mail that has not arrived yet.
 //
-// A rule is a Gmail filter, and MailBoy makes exactly two kinds — everything
-// from one sender goes to one folder, or everything with one subject does. Both
-// are the same shape underneath: match, add the destination, take away INBOX.
+// A rule is a Gmail filter, and MailBoy makes three kinds — everything from one
+// sender goes to one folder, everything from one *domain* does, or everything
+// with one subject does. All three are the same shape underneath: match, add the
+// destination, take away INBOX.
+//
+// The domain kind was added 2026-08-31, after the tab started listing the
+// account's own filters and made it obvious that people write filters against a
+// whole domain far more often than against one address. It is a strictly wider
+// sender rule and nothing else — see `domainRule`.
 //
 // ── Filters MailBoy did not make ─────────────────────────────────
 //
@@ -87,8 +93,11 @@ export const MAX_RULES = 1000;
  * @property {string} filterId Gmail's filter id — what a delete is addressed to
  * @property {'mailboy' | 'existing'} origin which section of the tab it belongs
  *   to: made here, or found on the account
- * @property {'sender' | 'subject'} kind
- * @property {string} match the address, or the subject, as typed into the filter
+ * @property {'sender' | 'domain' | 'subject'} kind
+ * @property {string} match the address, the bare domain, or the subject. A
+ *   domain is stored here *without* its `@` — `example.com`, not `@example.com`
+ *   — so that a spec asking for one and a rule read back from Gmail compare
+ *   equal in `sameRule`. `domainRule` puts the `@` on.
  * @property {string} destination the label id this row is about
  * @property {string[]} destinations every folder the parent filter files into.
  *   More than one means deleting this row takes the others with it — Gmail has
@@ -181,6 +190,52 @@ export function senderRule(address, labelId) {
 }
 
 /**
+ * The filter body for "everything from anyone at this domain".
+ *
+ * `@example.com` in `criteria.from`, which is how Gmail's own From box is
+ * written for a domain and what its `from:` operator matches a domain with. The
+ * leading `@` is what makes it a domain rather than a sender: without it Gmail
+ * would also match a display name or an address merely containing the string.
+ *
+ * A strictly wider `senderRule` and nothing else — same action, same mark, same
+ * everything. That is why ticking the domain box in a dialog makes the sender
+ * box redundant rather than making it mean something different.
+ */
+export function domainRule(domain, labelId) {
+  return { criteria: { from: `@${domainOf(domain)}`, negatedQuery: MARK }, action: actionFor(labelId) };
+}
+
+/**
+ * The domain half of an address, lowercased. Handed a bare domain it returns it
+ * unchanged, so it is safe to run over either.
+ */
+export const domainOf = (address) => String(address).split('@').pop().trim().toLowerCase();
+
+/**
+ * A `criteria.from` read as a domain, or null where it names a sender.
+ *
+ * Two forms count. `@example.com` is what `domainRule` writes. `*@example.com`
+ * is the other thing people type into Gmail's own From box, and it means the
+ * same thing there — **Gmail has no wildcards**; it tokenises on punctuation, so
+ * the `*` is dropped rather than honoured. Reading both keeps a filter somebody
+ * wrote by hand from rendering as *All mails from `*@example.com`*, an address
+ * that has apparently lost its front half.
+ *
+ * MailBoy writes the bare form deliberately. The starred one cannot match
+ * anything the bare one does not, and it implies a wildcard facility that does
+ * not exist — which is an invitation to write `invoice*@example.com` next and
+ * get a filter that quietly matches nothing like what was meant.
+ *
+ * Which is also why anything with a real local part is a sender, star or no
+ * star: `invoice*@example.com` is somebody expecting a prefix match Gmail does
+ * not do, and guessing at what they meant is not this function's job.
+ */
+function domainIn(from) {
+  const found = /^\s*\*?@(.+)$/.exec(String(from));
+  return found ? found[1].trim().toLowerCase() : null;
+}
+
+/**
  * The filter body for "everything with this subject".
  *
  * Quoted, so Gmail matches the line as a phrase rather than as a bag of words —
@@ -239,11 +294,13 @@ export function readFilter(filter) {
     return [];
   }
 
+  const domain = on === 'from' ? domainIn(criteria.from) : null;
+
   const shared = {
     filterId: filter.id,
     origin: ours ? 'mailboy' : 'existing',
-    kind: on === 'from' ? 'sender' : 'subject',
-    match: on === 'from' ? criteria.from : unquote(criteria.subject),
+    kind: on === 'subject' ? 'subject' : domain ? 'domain' : 'sender',
+    match: on === 'subject' ? unquote(criteria.subject) : (domain ?? criteria.from),
     destinations,
   };
 
@@ -296,7 +353,7 @@ export const sameRule = (rule, { kind, match, destination }) =>
  * the half that has already happened by the time these run, so one refused
  * filter must not read as the whole action having failed.
  *
- * @param {{kind: 'sender' | 'subject', match: string, destination: string}[]} specs
+ * @param {{kind: 'sender' | 'domain' | 'subject', match: string, destination: string}[]} specs
  * @returns {Promise<{created: Rule[], failed: {match: string, message: string}[]}>}
  */
 export async function createRules(specs) {
@@ -307,7 +364,9 @@ export async function createRules(specs) {
     const body =
       spec.kind === 'sender'
         ? senderRule(spec.match, spec.destination)
-        : subjectRule(spec.match, spec.destination);
+        : spec.kind === 'domain'
+          ? domainRule(spec.match, spec.destination)
+          : subjectRule(spec.match, spec.destination);
 
     try {
       const filter = await createFilter(body);

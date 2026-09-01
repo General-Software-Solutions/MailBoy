@@ -1673,6 +1673,23 @@ body {
   margin-top: 2px;
 }
 
+/* The sender box while the domain box below it is ticked: still ticked, because
+   the answer to what it asks is genuinely yes, but no longer a choice — the
+   domain rule already covers it. Dimmed rather than hidden so the answer stays
+   readable, and so the box comes back the moment the domain is unticked.
+
+   `cursor: default` on the label as well as the input: the label is the whole
+   click target, and a pointer over something that cannot be clicked is the part
+   that reads as broken. */
+.checkbox--locked {
+  color: var(--faint);
+  cursor: default;
+}
+
+.checkbox--locked input {
+  cursor: default;
+}
+
 .checkbox-hint {
   margin: 0 0 16px;
   padding-left: 23px;

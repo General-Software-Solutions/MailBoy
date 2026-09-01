@@ -214,6 +214,13 @@
             <input type="checkbox" id="trash-rule-sender" />
             <span id="trash-rule-sender-label"></span>
           </label>
+          <!-- The wider half of the same question, so it sits directly under it.
+               Ticking it ticks the sender box and disables it: a domain rule
+               already covers that sender, and only the domain rule is made. -->
+          <label class="checkbox checkbox--rule" id="trash-rule-domain-row" hidden>
+            <input type="checkbox" id="trash-rule-domain" />
+            <span id="trash-rule-domain-label"></span>
+          </label>
           <label class="checkbox checkbox--rule" id="trash-rule-subject-row" hidden>
             <input type="checkbox" id="trash-rule-subject" />
             <span id="trash-rule-subject-label"></span>
@@ -249,6 +256,13 @@
         <label class="checkbox checkbox--rule" id="rule-sender-row">
           <input type="checkbox" id="rule-sender" />
           <span id="rule-sender-label">Move all future mails from this sender to this folder</span>
+        </label>
+        <!-- The wider half of the same question, so it sits directly under it.
+             Ticking it ticks the sender box and disables it: a domain rule
+             already covers that sender, and only the domain rule is made. -->
+        <label class="checkbox checkbox--rule" id="rule-domain-row">
+          <input type="checkbox" id="rule-domain" />
+          <span id="rule-domain-label">Move all future mails from this entire domain to this folder</span>
         </label>
         <label class="checkbox checkbox--rule" id="rule-subject-row">
           <input type="checkbox" id="rule-subject" />

@@ -56,7 +56,14 @@ import {
   unpatchMessages,
 } from './src/mailbox.js';
 import { clearMessages, dayOf, reloadMessages, resetMessages, sizeOf } from './src/messages.js';
-import { MAX_RULES, createRules, deleteRules, listRules, sameRule } from './src/rules.js';
+import {
+  MAX_RULES,
+  createRules,
+  deleteRules,
+  domainOf,
+  listRules,
+  sameRule,
+} from './src/rules.js';
 import { trace } from './src/trace.js';
 
 // Both live in the signed-in account's namespace — see src/account.js. Bare
@@ -144,10 +151,13 @@ const el = {
   moveConfirm: document.getElementById('btn-move-confirm'),
   moveCancel: document.getElementById('btn-move-cancel'),
 
-  // The two rule boxes, in each of the dialogs that offers them.
+  // The three rule boxes, in each of the dialogs that offers them.
   ruleSenderRow: document.getElementById('rule-sender-row'),
   ruleSender: document.getElementById('rule-sender'),
   ruleSenderLabel: document.getElementById('rule-sender-label'),
+  ruleDomainRow: document.getElementById('rule-domain-row'),
+  ruleDomain: document.getElementById('rule-domain'),
+  ruleDomainLabel: document.getElementById('rule-domain-label'),
   ruleSubjectRow: document.getElementById('rule-subject-row'),
   ruleSubject: document.getElementById('rule-subject'),
   ruleSubjectLabel: document.getElementById('rule-subject-label'),
@@ -155,6 +165,9 @@ const el = {
   trashRuleSenderRow: document.getElementById('trash-rule-sender-row'),
   trashRuleSender: document.getElementById('trash-rule-sender'),
   trashRuleSenderLabel: document.getElementById('trash-rule-sender-label'),
+  trashRuleDomainRow: document.getElementById('trash-rule-domain-row'),
+  trashRuleDomain: document.getElementById('trash-rule-domain'),
+  trashRuleDomainLabel: document.getElementById('trash-rule-domain-label'),
   trashRuleSubjectRow: document.getElementById('trash-rule-subject-row'),
   trashRuleSubject: document.getElementById('trash-rule-subject'),
   trashRuleSubjectLabel: document.getElementById('trash-rule-subject-label'),
@@ -3003,7 +3016,7 @@ function paintMoveTarget() {
 }
 
 /**
- * The two rule boxes, as they appear in one dialog.
+ * The three rule boxes, as they appear in one dialog.
  *
  * There are two sets of them — the move dialog's and the delete confirmation's —
  * and they behave identically. Only the destination they name and the
@@ -3014,6 +3027,9 @@ const MOVE_RULE_BOXES = {
   senderRow: () => el.ruleSenderRow,
   sender: () => el.ruleSender,
   senderLabel: () => el.ruleSenderLabel,
+  domainRow: () => el.ruleDomainRow,
+  domain: () => el.ruleDomain,
+  domainLabel: () => el.ruleDomainLabel,
   subjectRow: () => el.ruleSubjectRow,
   subject: () => el.ruleSubject,
   subjectLabel: () => el.ruleSubjectLabel,
@@ -3024,6 +3040,9 @@ const TRASH_RULE_BOXES = {
   senderRow: () => el.trashRuleSenderRow,
   sender: () => el.trashRuleSender,
   senderLabel: () => el.trashRuleSenderLabel,
+  domainRow: () => el.trashRuleDomainRow,
+  domain: () => el.trashRuleDomain,
+  domainLabel: () => el.trashRuleDomainLabel,
   subjectRow: () => el.trashRuleSubjectRow,
   subject: () => el.trashRuleSubject,
   subjectLabel: () => el.trashRuleSubjectLabel,
@@ -3049,12 +3068,35 @@ const TRASH_RULE_HINT =
   'your inbox — and Gmail deletes trashed mail for good after 30 days.';
 
 /**
- * Paint one dialog's pair.
+ * The distinct domains behind a set of addresses, in the order they first
+ * appear. Two senders at the same company are one domain rule, not two.
  *
- * Each box is shown only where its wording is true. "This sender" needs an
- * address — a sender bucketed under a display name has nothing a `from:` rule
- * could be written against — and "this subject" needs there to be exactly one,
- * which is only ever the case for a single message.
+ * Anything without an `@` is dropped rather than treated as a bare domain: that
+ * would turn a malformed `From` into a rule reading `@something`, which is a
+ * wider instruction than anybody asked for.
+ */
+const domainsIn = (addresses) => [
+  ...new Set(addresses.filter((address) => address.includes('@')).map(domainOf).filter(Boolean)),
+];
+
+/**
+ * What the sender box was before a domain tick forced it on, so unticking the
+ * domain gives it back rather than silently clearing a yes somebody made.
+ *
+ * Keyed on the input itself: the two dialogs have their own, and neither should
+ * be able to read the other's.
+ *
+ * @type {WeakMap<HTMLInputElement, boolean>}
+ */
+const senderWas = new WeakMap();
+
+/**
+ * Paint one dialog's three.
+ *
+ * Each box is shown only where its wording is true. "This sender" and "this
+ * domain" both need an address — a sender bucketed under a display name has
+ * nothing a `from:` rule could be written against — and "this subject" needs
+ * there to be exactly one, which is only ever the case for a single message.
  *
  * @param {object} boxes MOVE_RULE_BOXES or TRASH_RULE_BOXES
  * @param {{senders: string[], subject: string | null} | null} material
@@ -3064,6 +3106,7 @@ const TRASH_RULE_HINT =
 function paintRuleBoxes(boxes, material, copy) {
   const senders = material?.senders ?? [];
   const subject = material?.subject ?? null;
+  const domains = domainsIn(senders);
 
   boxes.senderRow().hidden = senders.length === 0;
   boxes.senderLabel().textContent =
@@ -3071,10 +3114,49 @@ function paintRuleBoxes(boxes, material, copy) {
       ? `Move all future mails from these ${senders.length.toLocaleString()} senders to ${copy.to}`
       : `Move all future mails from this sender to ${copy.to}`;
 
+  // The domain is named where there is one of it, because which domain this is
+  // decides the answer — "everything from gmail.com" is a very different offer
+  // from "everything from acme-invoices.com", and the sender's address alone
+  // does not make that obvious enough to tick a box on.
+  boxes.domainRow().hidden = domains.length === 0;
+  boxes.domainLabel().textContent =
+    domains.length > 1
+      ? `Move all future mails from these ${domains.length.toLocaleString()} entire domains to ${copy.to}`
+      : `Move all future mails from this entire domain (${domains[0] ?? ''}) to ${copy.to}`;
+
   boxes.subjectRow().hidden = !subject;
   boxes.subjectLabel().textContent = `Move all future mails with this subject to ${copy.to}`;
 
+  syncDomainLock(boxes);
   paintRuleHint(boxes, material, copy);
+}
+
+/**
+ * Hold the sender box ticked and disabled for as long as the domain box is.
+ *
+ * A domain rule already catches everything the sender rule would, so the two
+ * cannot be a real choice — and leaving the sender box tickable next to a ticked
+ * domain box would invite someone to ask for a second rule that does nothing but
+ * spend one of Gmail's thousand.
+ *
+ * Ticked rather than merely greyed: the question the box asks is "does future
+ * mail from this sender move", and under a domain rule the honest answer is yes.
+ * `ruleSpecs` is where that stops being a second rule.
+ */
+function syncDomainLock(boxes) {
+  const sender = boxes.sender();
+  const locked = boxes.domain().checked && !boxes.domainRow().hidden;
+
+  if (locked) {
+    if (!sender.disabled) senderWas.set(sender, sender.checked);
+    sender.checked = true;
+    sender.disabled = true;
+  } else if (sender.disabled) {
+    sender.checked = senderWas.get(sender) ?? false;
+    sender.disabled = false;
+  }
+
+  boxes.senderRow().classList.toggle('checkbox--locked', locked);
 }
 
 /**
@@ -3094,6 +3176,12 @@ function paintRuleHint(boxes, material, copy) {
   }
 
   const lines = [copy.hint];
+  // A domain rule is the one box here that catches mail from people who have
+  // never written before, which is the whole of what makes it useful and the
+  // whole of what makes it worth a second thought.
+  if (boxes.domain().checked && !boxes.domainRow().hidden) {
+    lines.push('A domain rule also catches senders you have never had mail from.');
+  }
   // Gmail's ceiling is 1,000 filters across everything the account has ever
   // made, so a selection of a few hundred senders is worth saying out loud
   // before it is spent rather than after.
@@ -3112,15 +3200,28 @@ function paintRuleHint(boxes, material, copy) {
  *
  * The boxes are read here rather than remembered, so what is created is what is
  * ticked at the moment the dialog's own button is pressed.
+ *
+ * **A ticked domain box replaces the sender rules rather than adding to them.**
+ * The sender box is ticked and disabled beside it (see `syncDomainLock`) because
+ * the answer to what it asks is yes — but a domain rule already catches that
+ * mail, so a sender rule as well would be a second filter doing nothing, against
+ * an account that is allowed a thousand of them. One rule per distinct domain.
  */
 function ruleSpecs(boxes, material, destination) {
   const specs = [];
+  const senders = material?.senders ?? [];
+  const byDomain = boxes.domain().checked && !boxes.domainRow().hidden;
 
-  if (boxes.sender().checked && !boxes.senderRow().hidden) {
-    for (const address of material?.senders ?? []) {
+  if (byDomain) {
+    for (const domain of domainsIn(senders)) {
+      specs.push({ kind: 'domain', match: domain, destination });
+    }
+  } else if (boxes.sender().checked && !boxes.senderRow().hidden) {
+    for (const address of senders) {
       specs.push({ kind: 'sender', match: address, destination });
     }
   }
+
   if (boxes.subject().checked && !boxes.subjectRow().hidden && material?.subject) {
     specs.push({ kind: 'subject', match: material.subject, destination });
   }
@@ -3128,11 +3229,17 @@ function ruleSpecs(boxes, material, destination) {
   return specs;
 }
 
-/** Untick and hide a pair, so no dialog ever opens carrying a previous yes. */
+/** Untick and hide a set, so no dialog ever opens carrying a previous yes. */
 function resetRuleBoxes(boxes) {
+  // Before the ticks: unlocking reads the remembered state back, and there is
+  // nothing to remember once a dialog is being reset.
+  boxes.domain().checked = false;
+  syncDomainLock(boxes);
+
   boxes.sender().checked = false;
   boxes.subject().checked = false;
   boxes.senderRow().hidden = true;
+  boxes.domainRow().hidden = true;
   boxes.subjectRow().hidden = true;
   boxes.hint().hidden = true;
 }
@@ -3844,7 +3951,11 @@ function renderRuleGroupRow(group) {
 
   const count = document.createElement('span');
   count.className = 'rule-count';
-  count.textContent = group.rules.length.toLocaleString();
+  // Blank at one. A destination with a single rule is the common case, and a
+  // column of "1"s down the side of every row is a number nobody reads telling
+  // them what the row already says. It earns its place only where opening the
+  // row would show more than the one thing.
+  count.textContent = group.rules.length > 1 ? group.rules.length.toLocaleString() : '';
 
   row.append(
     ruleTick(
@@ -3857,11 +3968,14 @@ function renderRuleGroupRow(group) {
   return row;
 }
 
-/** How a single rule reads. The two kinds are one sentence each, deliberately. */
+/** How a single rule reads. The three kinds are one sentence each, deliberately. */
 function ruleSentence(rule) {
-  return rule.kind === 'sender'
-    ? { lead: 'All mails from ', body: rule.match }
-    : { lead: 'All mails having subject ', body: `“${rule.match}”` };
+  if (rule.kind === 'sender') return { lead: 'All mails from ', body: rule.match };
+  // "anyone at" rather than the bare domain: the whole point of the kind is that
+  // it catches senders nobody has seen yet, and a row reading "All mails from
+  // example.com" would look like an address that had lost its front half.
+  if (rule.kind === 'domain') return { lead: 'All mails from anyone at ', body: rule.match };
+  return { lead: 'All mails having subject ', body: `“${rule.match}”` };
 }
 
 function renderRuleDetail() {
@@ -5148,20 +5262,23 @@ el.rulesDelete.addEventListener('click', deletePickedGroups);
 el.ruleDelete.addEventListener('click', deletePickedRules);
 
 // The hint appears only once something is ticked, in whichever dialog is up.
-// The wording is already right — only the hint has to react.
-for (const box of [el.ruleSender, el.ruleSubject]) {
-  box.addEventListener('change', () =>
+// The wording is already right — only the hint has to react, and the sender box
+// has to follow the domain box's lock either way round.
+for (const box of [el.ruleSender, el.ruleDomain, el.ruleSubject]) {
+  box.addEventListener('change', () => {
+    syncDomainLock(MOVE_RULE_BOXES);
     paintRuleHint(MOVE_RULE_BOXES, moveRule, {
       to: moveTarget ? `“${moveTarget.name}”` : 'this folder',
       hint: MOVE_RULE_HINT,
-    })
-  );
+    });
+  });
 }
 
-for (const box of [el.trashRuleSender, el.trashRuleSubject]) {
-  box.addEventListener('change', () =>
-    paintRuleHint(TRASH_RULE_BOXES, confirmRule, { to: 'Trash', hint: TRASH_RULE_HINT })
-  );
+for (const box of [el.trashRuleSender, el.trashRuleDomain, el.trashRuleSubject]) {
+  box.addEventListener('change', () => {
+    syncDomainLock(TRASH_RULE_BOXES);
+    paintRuleHint(TRASH_RULE_BOXES, confirmRule, { to: 'Trash', hint: TRASH_RULE_HINT });
+  });
 }
 
 // ── One message ──────────────────────────────────────────────────
