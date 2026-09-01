@@ -218,6 +218,7 @@ const el = {
 
   // Rules, grouped by where they send mail.
   rulesScreen: document.getElementById('screen-rules'),
+  rulesHome: document.getElementById('btn-rules-home'),
   rulesTotal: document.getElementById('rules-total'),
   rulesSpinner: document.getElementById('rules-spinner'),
   rulesFilters: document.getElementById('rules-filters'),
@@ -5547,6 +5548,12 @@ el.navbar.addEventListener('click', (event) => {
   const tab = event.target.closest('.nav-btn');
   if (tab) showTab(tab.dataset.tab);
 });
+
+// The only back that crosses tabs. Nothing inside Rules leads here, so the
+// screen behind it is the mailbox — the same thing pressing the Home tab does,
+// which is why it goes through showTab rather than showScreen: Home has its own
+// remembered place and this must not take it somewhere else.
+el.rulesHome.addEventListener('click', () => showTab('home'));
 
 el.rulesBack.addEventListener('click', closeRuleGroup);
 

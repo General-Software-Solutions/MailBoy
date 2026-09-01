@@ -764,7 +764,16 @@
            subject-based rule carries a real mail subject and those are never
            written to disk. -->
       <section id="screen-rules" class="screen" hidden>
-        <header class="detail-head detail-head--flush">
+        <!-- The one back button that crosses tabs: this screen is not reached
+             from another, so there is nothing behind it inside Rules and the
+             only useful "back" is the mailbox. Same control as every other
+             drill-down's, so it reads the same way. -->
+        <header class="detail-head">
+          <button id="btn-rules-home" class="icon-btn" aria-label="Back to mailbox">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M9.5 3.5L5 8l4.5 4.5" />
+            </svg>
+          </button>
           <h1 class="detail-name">
             <span>Rules</span>
             <span id="rules-total" class="detail-total"></span>
