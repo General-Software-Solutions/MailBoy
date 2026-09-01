@@ -234,6 +234,38 @@
         </form>
       </dialog>
 
+      <!-- ── Blocking a sender ───────────────────────────────────── -->
+      <!-- The only action in the product that touches no mail at all: it writes
+           a rule sending this sender's *future* mail straight to Trash, and
+           nothing already in the mailbox moves. The text says so, because a
+           button called Block sitting next to Delete invites the opposite
+           reading.
+
+           Confirmed anyway, for two reasons a plain click could not carry: a
+           standing instruction to destroy mail unseen outlives the moment it was
+           made, and the box below widens it from one sender to everybody at
+           their domain — a far larger promise than the button reads. Unticked
+           on every open, like every other rule box. -->
+      <dialog id="block-dialog" class="dialog">
+        <form method="dialog">
+          <h2 class="dialog-title">Block <strong id="block-who"></strong>?</h2>
+          <p class="dialog-text" id="block-text"></p>
+
+          <label class="checkbox checkbox--rule" id="block-domain-row">
+            <input type="checkbox" id="block-domain" />
+            <span id="block-domain-label">Block all from the entire domain</span>
+          </label>
+          <p class="checkbox-hint" id="block-hint" hidden></p>
+
+          <div class="dialog-actions">
+            <button value="go" class="btn btn--primary btn--sm dialog-destructive">
+              Block
+            </button>
+            <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
+          </div>
+        </form>
+      </dialog>
+
       <!-- Clicking a folder picks it; "Move here" is what starts the move, and
            it stays disabled until something is picked. No method="dialog": the
            move is dispatched in script, and Cancel must not look like a way of
@@ -451,6 +483,17 @@
                 </svg>
                 <span>Move</span>
               </button>
+              <!-- The one action here that moves no mail at all: it writes a
+                   rule and stops. Not danger-coloured for that reason — nothing
+                   already in the mailbox is touched — but its dialog's button
+                   is, because what it sets up is mail being destroyed unseen. -->
+              <button id="btn-block" class="btn btn--ghost btn--xs">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <circle cx="8" cy="8" r="5.4" />
+                  <path d="M4.2 11.8L11.8 4.2" />
+                </svg>
+                <span>Block</span>
+              </button>
               <button id="btn-trash" class="btn btn--ghost btn--xs btn--danger">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path
@@ -575,6 +618,15 @@
                 </svg>
                 <span>Move</span>
               </button>
+              <!-- About the sender, not the ticks: blocking is a rule, and a
+                   rule cannot be about ten particular messages. -->
+              <button id="btn-mail-block" class="btn btn--ghost btn--xs">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <circle cx="8" cy="8" r="5.4" />
+                  <path d="M4.2 11.8L11.8 4.2" />
+                </svg>
+                <span>Block</span>
+              </button>
               <button id="btn-mail-trash" class="btn btn--ghost btn--xs btn--danger">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path
@@ -649,6 +701,13 @@
                   <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
                 </svg>
                 <span>Move</span>
+              </button>
+              <button id="btn-message-block" class="btn btn--ghost btn--xs">
+                <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+                  <circle cx="8" cy="8" r="5.4" />
+                  <path d="M4.2 11.8L11.8 4.2" />
+                </svg>
+                <span>Block</span>
               </button>
               <button id="btn-message-trash" class="btn btn--ghost btn--xs btn--danger">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">

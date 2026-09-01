@@ -1376,6 +1376,21 @@ body {
   color: var(--faint);
 }
 
+/* The glyph inside "(⊘ Blocked mails)" — the same one the Block button carries,
+   on the `<svg>` itself the way `.btn-glyph` is. `vertical-align` pulls it up
+   from the text baseline it would otherwise sit on; `currentColor` is what lets
+   it pick up `.rule--danger`'s colour with no rule of its own. */
+.rule-block-icon {
+  width: 11px;
+  height: 11px;
+  vertical-align: -1px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .rule-count {
   text-align: center;
   font-size: 12.5px;
@@ -1409,9 +1424,11 @@ body {
   padding-top: 2px;
 }
 
-/* The one destination that destroys mail. It reads "Move to Trash" like any
-   other row, because that is what it does — the colour is so it is not read
-   like any other row. */
+/* The one destination that destroys mail, and the one row pinned to the top of
+   its section. It reads "Blocked" rather than "Move to Trash" — the intent
+   rather than the mechanism — and takes the colour so it is not read like any
+   other row. The whole name is coloured because there is no muted "Move to"
+   lead in front of it to carry the distinction. */
 .rule--danger .rule-name {
   color: var(--danger);
 }

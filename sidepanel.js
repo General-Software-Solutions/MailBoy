@@ -136,6 +136,7 @@ const el = {
   selectionSummary: document.getElementById('selection-summary'),
   selectAll: document.getElementById('select-all'),
   move: document.getElementById('btn-move'),
+  block: document.getElementById('btn-block'),
   trash: document.getElementById('btn-trash'),
   restore: document.getElementById('btn-restore'),
   confirmDialog: document.getElementById('confirm-dialog'),
@@ -150,6 +151,13 @@ const el = {
   moveList: document.getElementById('move-list'),
   moveConfirm: document.getElementById('btn-move-confirm'),
   moveCancel: document.getElementById('btn-move-cancel'),
+  blockDialog: document.getElementById('block-dialog'),
+  blockWho: document.getElementById('block-who'),
+  blockText: document.getElementById('block-text'),
+  blockDomainRow: document.getElementById('block-domain-row'),
+  blockDomain: document.getElementById('block-domain'),
+  blockDomainLabel: document.getElementById('block-domain-label'),
+  blockHint: document.getElementById('block-hint'),
 
   // The three rule boxes, in each of the dialogs that offers them.
   ruleSenderRow: document.getElementById('rule-sender-row'),
@@ -187,6 +195,7 @@ const el = {
   mailsActions: document.getElementById('mails-actions'),
   mailSelectionSummary: document.getElementById('mail-selection-summary'),
   mailMove: document.getElementById('btn-mail-move'),
+  mailBlock: document.getElementById('btn-mail-block'),
   mailTrash: document.getElementById('btn-mail-trash'),
   mailRestore: document.getElementById('btn-mail-restore'),
   mails: document.getElementById('mails'),
@@ -201,6 +210,7 @@ const el = {
   messageSubject: document.getElementById('message-subject'),
   messageScope: document.getElementById('message-scope'),
   messageMove: document.getElementById('btn-message-move'),
+  messageBlock: document.getElementById('btn-message-block'),
   messageTrash: document.getElementById('btn-message-trash'),
   messageRestore: document.getElementById('btn-message-restore'),
   messageView: document.getElementById('message-view'),
@@ -410,6 +420,21 @@ const ICON_ADD = '<path d="M8 3.5v9M3.5 8h9" />';
 const ICON_BIN =
   '<path d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4" />';
 const ICON_CLOSE = '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />';
+// The same glyph the Block button carries (sidepanel.html), so the rule this
+// button makes and the row it shows up as are recognisably the same action.
+const ICON_BLOCK = '<circle cx="8" cy="8" r="5.4" /><path d="M4.2 11.8L11.8 4.2" />';
+
+/**
+ * The Block glyph, sized to sit inline in "(⊘ Blocked mails)".
+ *
+ * A fresh node each call — the Rules tab can pin the destination in both
+ * sections at once, and a DOM node belongs to one parent.
+ */
+function blockIcon() {
+  const wrap = document.createElement('span');
+  wrap.innerHTML = `<svg class="rule-block-icon" viewBox="0 0 16 16" aria-hidden="true">${ICON_BLOCK}</svg>`;
+  return wrap.firstElementChild;
+}
 
 /**
  * @param {string} action what the delegated handler on `#groups` should do
@@ -1023,6 +1048,12 @@ function paintSelection() {
   const inTrash = openLabel?.id === 'TRASH';
   el.restore.hidden = !inTrash;
   el.move.hidden = inTrash;
+  // Block follows Move and Delete rather than standing on its own reasoning. It
+  // would in fact work here — a rule is about mail that has not arrived, so
+  // where the mail on screen is sitting is beside the point — but Trash offers
+  // one button in this product, and adding a second is a bigger change than
+  // adding a button.
+  el.block.hidden = inTrash;
   el.trash.hidden = inTrash;
 
   // A picker left open goes off screen with its trigger, and would come back
@@ -1442,6 +1473,7 @@ function paintMailSelection() {
   const inTrash = openLabel?.id === 'TRASH';
   el.mailRestore.hidden = !inTrash;
   el.mailMove.hidden = inTrash;
+  el.mailBlock.hidden = inTrash;
   el.mailTrash.hidden = inTrash;
 
   // A picker left open goes off screen with its trigger.
@@ -1761,6 +1793,7 @@ function paintMessageActions() {
   const inTrash = openLabel?.id === 'TRASH';
   el.messageRestore.hidden = !inTrash;
   el.messageMove.hidden = inTrash;
+  el.messageBlock.hidden = inTrash;
   el.messageTrash.hidden = inTrash;
 }
 
@@ -3351,8 +3384,12 @@ function confirmMove() {
  *
  * The outcome is a flash, which a long move's status line will sit on top of
  * (see `setFooter`) — the Rules tab is the durable answer either way.
+ *
+ * `whenFailed` is passed because the usual line reassures about a move that is
+ * already under way, and Block dispatches no move at all: telling someone their
+ * emails are moving when nothing is would be the one wrong thing to say.
  */
-async function applyRules(specs, where) {
+async function applyRules(specs, where, whenFailed = "The emails are moving, but the rule couldn't be added.") {
   try {
     const { rules: existing, filters } = await listRules();
     rules = existing;
@@ -3390,8 +3427,185 @@ async function applyRules(specs, where) {
     flash(parts.join(' '));
   } catch (err) {
     console.error('[MailBoy] could not add the rule:', err);
-    flash("The emails are moving, but the rule couldn't be added.");
+    flash(whenFailed);
   }
+}
+
+// ── Blocking a sender ────────────────────────────────────────────
+//
+// The only action in the product that moves no mail. A block is one rule and
+// nothing else — everything from this sender goes straight to Trash from now on
+// — so it shares `applyRules` with the boxes in the move and delete dialogs and
+// owns none of the job machinery those actions need.
+//
+// It is deliberately *not* the Trash box on the delete confirmation with the
+// delete taken away. That box is an afterthought to an action about the mail
+// already here; this is the whole ask, which is why it gets a button in the
+// tools row and a dialog whose one sentence is about mail that has not arrived.
+//
+// **A block is about senders, not about the ticks.** On the breakdown that is
+// every sender ticked; on the two mail screens it is the sender whose mail is
+// being read, whichever messages happen to be selected. A rule cannot be about
+// ten particular messages, and pretending otherwise in the wording would be a
+// promise Gmail has no way to keep.
+
+/**
+ * The addresses the open block dialog would write rules about.
+ *
+ * Held while it is up for the same reason `moveRule` is: ticking the domain box
+ * has to recount what is being asked for, and the lists behind the dialog keep
+ * moving as a measuring pass lands.
+ *
+ * @type {string[]}
+ */
+let blockAddresses = [];
+
+/**
+ * Who a Block from the breakdown would be about.
+ *
+ * `selectionFacts().addresses` already drops the senders bucketed under a
+ * display name — there is nothing a `from:` rule could be written against for
+ * those — so the difference between that and the row count is what `skipped`
+ * reports. Saying it out loud beats quietly blocking four of five.
+ *
+ * @returns {{addresses: string[], skipped: number, count: number} | null}
+ */
+function blockFromSelection() {
+  const facts = selectionFacts();
+  if (!facts.senders) return null;
+  return {
+    addresses: [...new Set(facts.addresses.map((address) => address.toLowerCase()))],
+    skipped: facts.senders - facts.addresses.length,
+    count: facts.senders,
+  };
+}
+
+/**
+ * And from either mail screen, where the subject of a block is the sender whose
+ * list is open rather than anything ticked in it.
+ */
+function blockOpenSender() {
+  if (!openSender) return null;
+  const address = openSender.address;
+  return {
+    addresses: address ? [address.toLowerCase()] : [],
+    skipped: address ? 0 : 1,
+    count: 1,
+  };
+}
+
+/**
+ * The rules the dialog is currently asking for.
+ *
+ * The sender rules are the default rather than a box, because blocking *is* the
+ * sender rule — the box only widens it. A ticked domain box replaces them rather
+ * than adding to them, for the same reason it does in the other two dialogs: a
+ * domain rule is a strictly wider sender rule with the same action, so making
+ * both would spend two of Gmail's thousand filters to do one thing.
+ */
+function blockSpecs() {
+  const matches = blockByDomain() ? domainsIn(blockAddresses) : blockAddresses;
+  const kind = blockByDomain() ? 'domain' : 'sender';
+  return matches.map((match) => ({ kind, match, destination: 'TRASH' }));
+}
+
+/** The row's own visibility is part of the answer: a box nobody can see cannot
+ *  be what is being asked for, however it was left. */
+const blockByDomain = () => el.blockDomain.checked && !el.blockDomainRow.hidden;
+
+/** What ticking the box, or blocking a great many senders at once, signs up for. */
+function paintBlockHint() {
+  const lines = [];
+  // The one box here that catches mail from people who have never written
+  // before — the whole of what makes a domain block useful, and the whole of
+  // what makes it worth a second thought.
+  if (blockByDomain()) {
+    lines.push('This also blocks senders you have never had mail from.');
+  }
+  // Gmail's ceiling is 1,000 filters across everything the account ever made,
+  // and a breakdown selection can run to hundreds of senders.
+  const wanted = blockSpecs().length;
+  if (wanted > 25) {
+    lines.push(
+      `This adds ${wanted.toLocaleString()} rules; Gmail allows ${MAX_RULES.toLocaleString()} in total.`
+    );
+  }
+
+  el.blockHint.textContent = lines.join(' ');
+  el.blockHint.hidden = lines.length === 0;
+}
+
+/**
+ * Block whoever the screen's selection points at.
+ *
+ * @param {{addresses: string[], skipped: number, count: number} | null} material
+ */
+async function startBlock(material) {
+  // showModal throws on an already-open dialog, which a second click would be.
+  if (!material || el.blockDialog.open) return;
+
+  if (!material.addresses.length) {
+    flash(
+      material.count === 1
+        ? 'That sender has no address MailBoy can write a rule against.'
+        : 'None of those senders has an address MailBoy can write a rule against.'
+    );
+    return;
+  }
+
+  blockAddresses = material.addresses;
+  const domains = domainsIn(blockAddresses);
+
+  el.blockWho.textContent =
+    blockAddresses.length === 1
+      ? `“${blockAddresses[0]}”`
+      : `${blockAddresses.length.toLocaleString()} senders`;
+
+  const skipped = material.skipped
+    ? ` ${material.skipped.toLocaleString()} of the ${material.count.toLocaleString()} selected ` +
+      'gave no address to write a rule against, so they are not blocked.'
+    : '';
+
+  el.blockText.textContent =
+    'Future mail from them goes straight to Trash without ever reaching your ' +
+    'inbox, and Gmail deletes trashed mail for good after 30 days. Nothing you ' +
+    'already have moves — a rule only ever acts on mail as it arrives. You can ' +
+    `undo this at any time under Rules.${skipped}`;
+
+  // Named, because which domain this is decides the answer: "everyone at
+  // gmail.com" is a very different offer from "everyone at acme-invoices.com",
+  // and the sender's address alone does not make that obvious enough to tick.
+  el.blockDomainLabel.textContent =
+    domains.length > 1
+      ? `Block all from these ${domains.length.toLocaleString()} entire domains`
+      : `Block all from the entire domain (${domains[0] ?? ''})`;
+  el.blockDomainRow.hidden = domains.length === 0;
+
+  // Unticked on every open. A rule outlives the action that made it, so a box
+  // remembering a previous yes would go on destroying mail nobody asked it to —
+  // the same reasoning every other rule box is cleared under.
+  el.blockDomain.checked = false;
+  paintBlockHint();
+
+  // Escape leaves the previous choice in place, so a second open would read as
+  // a confirmation of the first.
+  el.blockDialog.returnValue = '';
+
+  const specs = await new Promise((resolve) => {
+    el.blockDialog.addEventListener(
+      'close',
+      () => {
+        // Read here rather than by the caller afterwards, so nothing can come
+        // between the click and the read.
+        resolve(el.blockDialog.returnValue === 'go' ? blockSpecs() : []);
+        blockAddresses = [];
+      },
+      { once: true }
+    );
+    el.blockDialog.showModal();
+  });
+
+  if (specs.length) void applyRules(specs, 'Trash', "The rule couldn't be added.");
 }
 
 // ── Reporting a selection job ────────────────────────────────────
@@ -3731,8 +3945,8 @@ const RULE_SECTIONS = [
     title: 'MailBoy filters',
     scope: 'Rules MailBoy manages',
     empty:
-      'None yet. When you move mail, tick “Move all future mails…” in the ' +
-      'move window and the rule will appear here.',
+      'None yet. Block a sender, or tick “Move all future mails…” when you ' +
+      'move mail, and the rule will appear here.',
   },
   {
     origin: 'existing',
@@ -3754,6 +3968,27 @@ const sectionOf = (origin) => RULE_SECTIONS.find((section) => section.origin ===
  */
 const groupKeyOf = (rule) => `${rule.origin}:${rule.destination}`;
 
+/**
+ * Whether a destination is the blocking one.
+ *
+ * A rule sending future mail to Trash *is* a block — it is exactly what the
+ * Block button makes — so the tab says so rather than calling it "Move to
+ * Trash", which describes the mechanism and buries the intent. It reads that way
+ * whatever made it: the Block button, the Trash box on a delete confirmation,
+ * and a "Delete it" filter written years ago in Gmail all mean the same thing.
+ */
+const isBlockDestination = (labelId) => labelId === 'TRASH';
+
+/**
+ * Pinned first, whatever its rule count.
+ *
+ * It is the one destination on the screen that destroys mail, so it is the one
+ * worth finding without reading — and unlike the folder rows it is a single
+ * fixed row rather than one of a list somebody named, so nothing is displaced by
+ * putting it at the top. Per section, since the two are separate lists.
+ */
+const rulePinned = (group) => (isBlockDestination(group.id) ? 0 : 1);
+
 /** One section's rules, gathered under the folders they send mail to. */
 function ruleGroups(origin) {
   const byDestination = new Map();
@@ -3773,7 +4008,10 @@ function ruleGroups(origin) {
       rules: list,
     }))
     .sort(
-      (a, b) => b.rules.length - a.rules.length || (a.name ?? '').localeCompare(b.name ?? '')
+      (a, b) =>
+        rulePinned(a) - rulePinned(b) ||
+        b.rules.length - a.rules.length ||
+        (a.name ?? '').localeCompare(b.name ?? '')
     );
 }
 
@@ -3848,8 +4086,8 @@ function ruleNote() {
   if (rulesError) return 'MailBoy could not read your rules. Try again in a moment.';
   if (!rulesLoaded) return 'Reading your rules…';
   return (
-    'No rules yet, and no filters in Gmail that send mail to a folder. When you ' +
-    'move mail, tick “Move all future mails…” in the move window and the rule ' +
+    'No rules yet, and no filters in Gmail that send mail to a folder. Block a ' +
+    'sender, or tick “Move all future mails…” when you move mail, and the rule ' +
     'will appear here.'
   );
 }
@@ -3915,12 +4153,13 @@ function renderRuleGroups() {
 }
 
 function renderRuleGroupRow(group) {
+  // Pinned at the top of its section and named for what it is rather than for
+  // where it sends mail — see `isBlockDestination`. It is also the one row here
+  // that ends in mail being destroyed, so it keeps its colour.
+  const blocking = isBlockDestination(group.id);
+
   const row = document.createElement('div');
-  // Trash reads "Move to Trash" like any other destination — which is exactly
-  // what it does — but it is the one row here that ends in mail being
-  // destroyed, so it is coloured for it rather than left to be read carefully.
-  row.className =
-    group.id === 'TRASH' ? 'rule rule--group rule--danger' : 'rule rule--group';
+  row.className = blocking ? 'rule rule--group rule--danger' : 'rule rule--group';
   // The key, not the label id: the same folder can be a destination in both
   // sections, and those are two rows that tick independently.
   row.dataset.destination = group.key;
@@ -3933,16 +4172,27 @@ function renderRuleGroupRow(group) {
   what.className = 'rule-what';
 
   const name = document.createElement('span');
-  name.className = group.name ? 'rule-name' : 'rule-name rule-name--orphan';
+  // Never orphaned when it is the block row: Trash is one of MailBoy's own
+  // folders and always resolves, unlike a deleted user folder.
+  name.className = blocking || group.name ? 'rule-name' : 'rule-name rule-name--orphan';
 
   const lead = document.createElement('span');
   lead.className = 'rule-lead';
   lead.textContent = 'Move to ';
-  name.append(lead, group.name ?? 'a folder that no longer exists');
+  name.append(lead);
+
+  // "Move to Trash (⊘ Blocked mails)" rather than a sentence of its own: the
+  // mechanism reads the same as every other row, and the parenthetical — icon
+  // and all — is what marks this one out. Everything in it takes the danger
+  // colour: the bare text inherits it from `.rule--danger .rule-name`, and the
+  // icon's stroke is `currentColor`. Only the lead stays muted, same as every
+  // other row.
+  name.append(group.name ?? (blocking ? 'Trash' : 'a folder that no longer exists'));
+  if (blocking) name.append(' (Blocked mails)');
 
   what.append(name);
 
-  if (!group.name) {
+  if (!blocking && !group.name) {
     const why = document.createElement('span');
     why.className = 'rule-kind';
     why.textContent = 'The folder was removed outside MailBoy. Delete to tidy up.';
@@ -3960,7 +4210,9 @@ function renderRuleGroupRow(group) {
   row.append(
     ruleTick(
       selectedDestinations.has(group.key),
-      `Select rules moving to ${group.name ?? 'a deleted folder'}`
+      blocking
+        ? 'Select the rules that block senders'
+        : `Select rules moving to ${group.name ?? 'a deleted folder'}`
     ),
     what,
     count
@@ -3989,7 +4241,14 @@ function renderRuleDetail() {
   listedRules = mine;
 
   const name = folderNameOf(openRuleGroup.id) ?? openRuleGroup.name;
-  el.ruleDetailLabel.textContent = `Move to ${name ?? 'a deleted folder'}`;
+  // The same sentence the row that was opened carried, icon and all — a heading
+  // that read differently from the row that opened it would look like a
+  // different screen.
+  if (isBlockDestination(openRuleGroup.id)) {
+    el.ruleDetailLabel.replaceChildren(`Move to ${name ?? 'Trash'} (`, blockIcon(), ' Blocked mails)');
+  } else {
+    el.ruleDetailLabel.textContent = `Move to ${name ?? 'a deleted folder'}`;
+  }
   el.ruleDetailTotal.textContent = mine.length ? `(${ruleCount(mine.length)})` : '';
   el.ruleDetailScope.textContent = sectionOf(openRuleGroup.origin)?.scope ?? '';
 
@@ -4209,10 +4468,15 @@ async function confirmRuleDelete(doomed, where) {
 function deletePickedGroups() {
   const groups = listedGroups.filter((group) => selectedDestinations.has(group.key));
   const doomed = groups.flatMap((group) => group.rules);
+  // "blocking senders" rather than "moving mail to Trash", so the dialog names
+  // the row that was ticked. Only where the block row is the whole selection:
+  // a mixed set is described by its count either way.
   const where =
-    groups.length === 1
-      ? `moving mail to “${groups[0].name ?? 'a deleted folder'}”`
-      : `moving mail to ${groups.length.toLocaleString()} folders`;
+    groups.length !== 1
+      ? `moving mail to ${groups.length.toLocaleString()} folders`
+      : isBlockDestination(groups[0].id)
+        ? 'blocking senders'
+        : `moving mail to “${groups[0].name ?? 'a deleted folder'}”`;
   void confirmRuleDelete(doomed, where);
 }
 
@@ -4220,7 +4484,12 @@ function deletePickedGroups() {
 function deletePickedRules() {
   const doomed = listedRules.filter((rule) => selectedRules.has(rule.id));
   const name = folderNameOf(openRuleGroup?.id ?? '') ?? openRuleGroup?.name;
-  void confirmRuleDelete(doomed, `moving mail to “${name ?? 'a deleted folder'}”`);
+  void confirmRuleDelete(
+    doomed,
+    isBlockDestination(openRuleGroup?.id ?? '')
+      ? 'blocking senders'
+      : `moving mail to “${name ?? 'a deleted folder'}”`
+  );
 }
 
 /**
@@ -5122,6 +5391,10 @@ el.selectAll.addEventListener('change', () => {
 el.trash.addEventListener('click', () => void startTrash(resolveSelection()));
 el.restore.addEventListener('click', () => void startRestore(resolveSelection()));
 el.move.addEventListener('click', () => startMove(resolveSelection()));
+// No `resolveSelection` and no `canAct`: a block moves no mail, so there is
+// nothing to resolve to ids and no reason a running job should hold it up —
+// filters are a different Gmail surface with its own quota.
+el.block.addEventListener('click', () => void startBlock(blockFromSelection()));
 el.moveConfirm.addEventListener('click', confirmMove);
 el.moveCancel.addEventListener('click', closeMoveDialog);
 
@@ -5196,6 +5469,7 @@ el.mailHead.addEventListener('click', (event) => {
 el.mailTrash.addEventListener('click', () => void startTrash(resolveMailSelection()));
 el.mailRestore.addEventListener('click', () => void startRestore(resolveMailSelection()));
 el.mailMove.addEventListener('click', () => startMove(resolveMailSelection()));
+el.mailBlock.addEventListener('click', () => void startBlock(blockOpenSender()));
 
 // ── Rules ────────────────────────────────────────────────────────
 
@@ -5288,6 +5562,11 @@ el.messageBack.addEventListener('click', closeMessage);
 el.messageTrash.addEventListener('click', () => void startTrash(resolveOpenMessage()));
 el.messageRestore.addEventListener('click', () => void startRestore(resolveOpenMessage()));
 el.messageMove.addEventListener('click', () => startMove(resolveOpenMessage()));
+el.messageBlock.addEventListener('click', () => void startBlock(blockOpenSender()));
+
+// The hint appears only once the box is ticked, and the count it carries is the
+// box's doing.
+el.blockDomain.addEventListener('change', paintBlockHint);
 // Escape closes a dialog on its own, leaving the editor inside it and the ids
 // it was holding behind. Re-entrant by design: `close()` is guarded on `.open`,
 // which is already false by the time this fires.
@@ -5349,6 +5628,7 @@ document.addEventListener('keydown', (event) => {
     el.logoutDialog.open ||
     el.deleteDialog.open ||
     el.confirmDialog.open ||
+    el.blockDialog.open ||
     el.moveDialog.open
   ) {
     return;
