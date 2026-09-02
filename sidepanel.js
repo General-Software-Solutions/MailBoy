@@ -320,12 +320,19 @@ const GATED = {
 };
 
 /**
- * Mark what cannot be done yet, without taking it away.
+ * Note what cannot be done yet, without changing how it looks.
  *
  * Deliberately not `disabled`: a control that does nothing and says nothing is
  * how a permission somebody declined by accident stays declined forever. These
- * stay pressable and the press is what asks — which is also why the marking is
- * a class and a title rather than a rewritten label.
+ * stay pressable and the press is what asks.
+ *
+ * Deliberately not visible either — `.needs-perm` has no CSS behind it. Two
+ * marks were tried and both were wrong for the same reason: Move, Delete, the +
+ * and the bin are one permission, so they change together, and four faded or
+ * greyed controls read as a broken panel rather than as an answer to a question
+ * nobody has asked yet. The dialog the press opens is where the difference gets
+ * explained. The class and the title stay as the hook, so a mark can come back
+ * without re-deriving which controls it belongs on.
  */
 function paintCapabilities() {
   for (const [cap, nodes] of Object.entries(GATED)) {

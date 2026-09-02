@@ -2249,37 +2249,19 @@ svg.stop-icon {
 
 /* ── Permissions the grant does not reach ────────────────────── */
 /* Google's consent screen lets each Gmail permission be unticked on its own, so
-   a sign-in can come back partial and the panel runs on what it got. These
-   controls stay pressable — the press is what asks for the permission, and a
-   control that is merely disabled is how a permission declined by accident
-   stays declined forever.
+   a sign-in can come back partial and the panel runs on what it got.
 
-   What they lose is the hue. Every action button's colour states which of Move,
-   Block and Delete it is (decision 25), and a control that cannot act yet has
-   no intent to state; going neutral is the same information the intents carry,
-   said by its absence. Setting the two tokens is the whole of it, because
-   everything downstream already reads them — text, edge, hover tint, and the
-   glyph through currentColor.
+   **A control the grant does not reach looks exactly like one it does.** It is
+   not dimmed, not greyed and not disabled: the press is what asks for the
+   permission, and the dialog it opens is where the difference is explained. Two
+   marks were tried and both were withdrawn — neutralising the intent hue took
+   away *which* action a button is (decision 25) rather than saying anything
+   about availability, and dimming turned Move and Delete into controls that look
+   broken to the ninety-nine opens in a hundred where nothing is wrong.
 
-   Must stay below the .btn--* and .row-action--danger blocks: it overrides them
-   at equal specificity, so source order is what decides it. */
-.needs-perm,
-.app--no-write .row-action {
-  --intent: var(--muted);
-  --intent-soft: var(--surface);
-}
-
-.needs-perm.btn--ghost {
-  color: var(--muted);
-  box-shadow: inset 0 0 0 1px var(--edge);
-}
-
-/* The one mark that cannot be a hue: the bar is muted at rest already. Never
-   while the tab is the one showing — a dimmed active tab reads as broken rather
-   than as unavailable. */
-.nav-btn.needs-perm:not([aria-current]) {
-  opacity: 0.55;
-}
+   `.needs-perm` is still set by `paintCapabilities`, and still carries a title,
+   so there is a hook here if a mark is ever wanted again. It deliberately has no
+   rules of its own. */
 
 /* Reading the mailbox is the one permission with no control to mark, because
    without it Home has no rows, no counts and nothing to press. So it takes the
