@@ -304,7 +304,7 @@ than opening a public issue.
 
 ## License
 
-Copyright © 2026 General Software Solutions. All rights reserved.
+Copyright © 2026 Jerry Raju. All rights reserved.
 
 **Source-available, not open source.** The code is published so that anyone
 using MailBoy can read exactly what it does with their mailbox and check the
