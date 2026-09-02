@@ -64,6 +64,7 @@ import {
   listRules,
   sameRule,
 } from './src/rules.js';
+import { COPY, applyStaticCopy, emails, ruleCount } from './src/copy.js';
 import { trace } from './src/trace.js';
 
 // Both live in the signed-in account's namespace — see src/account.js. Bare
@@ -86,6 +87,10 @@ const IDENTITY_NAME = 'identity';
  */
 const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Every word in the markup comes from src/copy.js. Done before anything
+// reads or paints, so no screen is ever seen with its keys still in it.
+applyStaticCopy();
+
 const el = {
   boot: document.getElementById('screen-boot'),
   welcome: document.getElementById('screen-welcome'),
@@ -94,7 +99,7 @@ const el = {
   connect: document.getElementById('btn-connect'),
   logout: document.getElementById('btn-logout'),
   logoutDialog: document.getElementById('logout-dialog'),
-  logoutMailbox: document.getElementById('logout-mailbox'),
+  logoutText: document.getElementById('logout-text'),
   deleteDialog: document.getElementById('delete-dialog'),
   deleteName: document.getElementById('delete-name'),
   deleteText: document.getElementById('delete-text'),
@@ -520,9 +525,9 @@ function renderRow(item, { editable = false, counted = true, removable = true } 
 
     const actions = document.createElement('span');
     actions.className = 'row-actions';
-    actions.append(actionButton('add', ICON_ADD, `New folder inside ${item.name}`));
+    actions.append(actionButton('add', ICON_ADD, COPY.folders.addInside(item.name)));
     if (removable) {
-      actions.append(actionButton('delete', ICON_BIN, `Delete ${item.name}`, { danger: true }));
+      actions.append(actionButton('delete', ICON_BIN, COPY.folders.removeFolder(item.name), { danger: true }));
     }
     row.append(actions);
   }
@@ -545,7 +550,7 @@ function renderGroup(title, items, emptyText, options = {}) {
 
   // The heading's + is the only way to make a folder that sits at the top
   // level; every other one nests into the row it is on.
-  if (editable) head.append(actionButton('add', ICON_ADD, 'New folder'));
+  if (editable) head.append(actionButton('add', ICON_ADD, COPY.folders.newFolder));
   section.append(head);
 
   if (!items.length) {
@@ -591,8 +596,8 @@ let currentGroups = null;
 function renderSkeleton(groups) {
   currentGroups = groups;
   el.groups.replaceChildren(
-    renderGroup('Google Default Folders', defaultsOf(groups), 'None found.'),
-    renderGroup('Your Folders', groups.user ?? [], 'No folders of your own yet.', {
+    renderGroup(COPY.main.googleFolders, defaultsOf(groups), COPY.main.noGoogleFolders),
+    renderGroup(COPY.main.userFolders, groups.user ?? [], COPY.main.noUserFolders, {
       editable: true,
     })
   );
@@ -658,7 +663,7 @@ function repaint() {
 function spinner() {
   const el = document.createElement('span');
   el.className = 'row-spinner';
-  el.setAttribute('aria-label', 'Measuring size');
+  el.setAttribute('aria-label', COPY.main.measuring);
   return el;
 }
 
@@ -684,7 +689,7 @@ function paintRow(labelId, record) {
   if (!record) {
     num.textContent = '—';
     size.replaceChildren();
-    row.title = 'Count unavailable.';
+    row.title = COPY.main.countUnavailable;
     return;
   }
 
@@ -753,10 +758,10 @@ function setBusy(running) {
   // way to call one off, so it is never disabled. It carries a visible label
   // as well as the tooltip — the word swaps with the icon rather than just
   // the aria-label/title, since the button shows text now.
-  const says = running ? 'Stop refreshing' : 'Refresh current data';
+  const says = running ? COPY.topbar.stopTitle : COPY.topbar.refreshTitle;
   el.refreshIcon.hidden = running;
   el.stopIcon.hidden = !running;
-  el.refreshLabel.textContent = running ? 'Stop' : 'Refresh';
+  el.refreshLabel.textContent = running ? COPY.topbar.stop : COPY.topbar.refresh;
   el.refresh.setAttribute('aria-label', says);
   el.refresh.title = says;
   el.detailSpinner.hidden = !running;
@@ -810,7 +815,7 @@ function paintProgress() {
   el.progressBar.style.width = `${percent}%`;
   el.progress.setAttribute('aria-valuenow', String(percent));
 
-  el.progressDone.textContent = `${done.toLocaleString()} of ${total.toLocaleString()}`;
+  el.progressDone.textContent = COPY.notice.done(done, total);
   const seconds = secondsRemaining(progress);
   el.progressLeft.textContent = seconds === null ? '' : formatTimeLeft(seconds);
 }
@@ -934,16 +939,16 @@ function setFooter(timestamp = lastLoaded) {
   // Counting, warm or cold. Once it is done the counts on screen are final,
   // so the timestamp is honest even while sizes are still being read.
   if (progress?.phase === 'counting') {
-    paintFooter(`Counting folders… ${progress.done} of ${progress.total}`);
+    paintFooter(COPY.footer.counting(progress.done, progress.total));
     return;
   }
 
   if (!timestamp) {
-    paintFooter(busy ? 'Loading…' : '');
+    paintFooter(busy ? COPY.main.loading : '');
     return;
   }
 
-  paintFooter(`Updated ${formatAgo(Date.now() - timestamp)}`);
+  paintFooter(COPY.footer.updated(formatAgo(Date.now() - timestamp)));
 }
 
 /**
@@ -986,10 +991,10 @@ function perDay(sender) {
  * start: biggest-first for the figures, A-Z for the address.
  */
 const SORTS = {
-  count: { label: 'Email count', dir: 'desc', of: (s) => s.count },
-  bytes: { label: 'Size', dir: 'desc', of: (s) => s.bytes },
-  rate: { label: 'How often', dir: 'desc', of: (s) => perDay(s) },
-  address: { label: 'Sender', dir: 'asc', of: (s) => s.address || '' },
+  count: { label: COPY.sorts.count, dir: 'desc', of: (s) => s.count },
+  bytes: { label: COPY.sorts.bytes, dir: 'desc', of: (s) => s.bytes },
+  rate: { label: COPY.sorts.rate, dir: 'desc', of: (s) => perDay(s) },
+  address: { label: COPY.sorts.address, dir: 'asc', of: (s) => s.address || '' },
 };
 
 function comparator(key, direction) {
@@ -1014,11 +1019,11 @@ const DAY_MS = 86_400_000;
  * left open overnight still means "the last month" tomorrow.
  */
 const PERIODS = {
-  all: { label: 'All time', days: 0 },
-  y1: { label: 'Last 1 year', days: 365 },
-  m6: { label: 'Last 6 months', days: 183 },
-  m3: { label: 'Last 3 months', days: 91 },
-  m1: { label: 'Last 1 month', days: 30 },
+  all: { label: COPY.periods.all, days: 0 },
+  y1: { label: COPY.periods.y1, days: 365 },
+  m6: { label: COPY.periods.m6, days: 183 },
+  m3: { label: COPY.periods.m3, days: 91 },
+  m1: { label: COPY.periods.m1, days: 30 },
 };
 
 /** Which label is open, how its senders are ordered, and over what span. */
@@ -1127,9 +1132,9 @@ function paintSelection() {
   // still open when the ticks are cleared.
   closeMenus();
 
-  const scope = periodKey === 'all' ? '' : ` · ${PERIODS[periodKey].label}`;
-  el.selectionSummary.textContent = `${emails(messages)}${scope}`;
-  el.selectionSummary.title = `${senders.toLocaleString()} selected · ${emails(messages)}${scope}`;
+  const scope = periodKey === 'all' ? '' : COPY.actions.scopeClause(PERIODS[periodKey].label);
+  el.selectionSummary.textContent = COPY.actions.selectedSummary(messages, scope);
+  el.selectionSummary.title = COPY.actions.sendersSelected(senders, messages, scope);
 }
 
 /**
@@ -1177,7 +1182,7 @@ function renderSender(sender) {
   // The tick is the only part of the row that still toggles, so it stretches
   // the full height of its column rather than being a bare 15px box.
   const { cell: tick, box } = tickBox(
-    `Select ${sender.address || sender.name || 'unknown sender'}`
+    COPY.breakdown.selectOne(sender.address || sender.name || COPY.breakdown.unknownSender)
   );
   box.checked = picked;
 
@@ -1188,7 +1193,7 @@ function renderSender(sender) {
   // to call themselves that day, and the same sender varies it constantly.
   const address = document.createElement('span');
   address.className = 'sender-id';
-  address.textContent = sender.address || 'Unknown sender';
+  address.textContent = sender.address || COPY.breakdown.unknownSender;
   who.append(address);
 
   const rate = formatRate(sender.dated, sender.last - sender.first);
@@ -1212,7 +1217,7 @@ function renderSender(sender) {
   const parts = [sender.name, sender.address].filter(Boolean);
   parts.push(`${sender.count.toLocaleString()} messages`, formatBytes(sender.bytes));
   if (rate) parts.push(rate);
-  row.title = parts.join(' · ') || 'Unknown sender';
+  row.title = parts.join(' · ') || COPY.breakdown.unknownSender;
   return row;
 }
 
@@ -1220,7 +1225,7 @@ function stillReading() {
   const row = document.createElement('div');
   row.className = 'sender-more';
   row.append(spinner(), Object.assign(document.createElement('span'), {
-    textContent: 'Still reading — this list will grow.',
+    textContent: COPY.breakdown.stillReading,
   }));
   return row;
 }
@@ -1253,10 +1258,10 @@ function renderBreakdown() {
     paintSelection();
     const note = emptyNote(
       !total
-        ? "Nothing here yet. If MailBoy is still going through your mailbox, this fills in once it's done."
+        ? COPY.breakdown.nothingYet
         : !cached
-          ? 'None of these messages have been read yet. They are measured in the background — check back shortly.'
-          : 'Nothing in this period.'
+          ? COPY.breakdown.noneRead
+          : COPY.breakdown.nothingInPeriod
     );
     el.senderRows.replaceChildren(...(busy ? [stillReading(), note] : [note]));
     return;
@@ -1281,7 +1286,7 @@ function renderBreakdown() {
   if (cached < total) {
     nodes.push(
       emptyNote(
-        `${(total - cached).toLocaleString()} more not measured yet, so these totals will grow.`
+        COPY.breakdown.moreComing(total - cached)
       )
     );
   }
@@ -1293,8 +1298,7 @@ function renderBreakdown() {
   if (undated) {
     nodes.push(
       emptyNote(
-        `${undated.toLocaleString()} not dated yet, so they are left out of this period. ` +
-          'They join it once the current pass reaches them.'
+        COPY.breakdown.undated(undated)
       )
     );
   }
@@ -1318,7 +1322,7 @@ async function openBreakdown(labelId, labelName) {
   // they stand for is that folder's messages.
   listedSenders = [];
   clearSelection();
-  el.senderRows.replaceChildren(emptyNote('Working it out…'));
+  el.senderRows.replaceChildren(emptyNote(COPY.breakdown.loading));
 
   showScreen('detail');
   el.back.focus();
@@ -1437,8 +1441,8 @@ const MAIL_PAGE = 10;
 
 /** Same shape as SORTS: read the column, and say which way round it starts. */
 const MAIL_SORTS = {
-  date: { label: 'Date', dir: 'desc', of: (id) => dayOf(id) },
-  bytes: { label: 'Size', dir: 'desc', of: (id) => sizeOf(id) ?? 0 },
+  date: { label: COPY.sorts.date, dir: 'desc', of: (id) => dayOf(id) },
+  bytes: { label: COPY.sorts.bytes, dir: 'desc', of: (id) => sizeOf(id) ?? 0 },
 };
 
 /**
@@ -1546,9 +1550,9 @@ function paintMailSelection() {
   // A picker left open goes off screen with its trigger.
   closeMenus();
 
-  const scope = periodKey === 'all' ? '' : ` · ${PERIODS[periodKey].label}`;
-  el.mailSelectionSummary.textContent = `${emails(messages)}${scope}`;
-  el.mailSelectionSummary.title = `${emails(messages)} selected${scope}`;
+  const scope = periodKey === 'all' ? '' : COPY.actions.scopeClause(PERIODS[periodKey].label);
+  el.mailSelectionSummary.textContent = COPY.actions.selectedSummary(messages, scope);
+  el.mailSelectionSummary.title = COPY.actions.mailsSelected(messages, scope);
 }
 
 /** Paint ticks from `selectedMails` rather than trusting the boxes: a measuring
@@ -1599,7 +1603,7 @@ function renderMail(id) {
   const picked = selectedMails.has(id);
   row.classList.toggle('mail--picked', picked);
 
-  const { cell, box } = tickBox(`Select ${meta?.subject || 'this email'}`);
+  const { cell, box } = tickBox(COPY.mails.selectOne(meta?.subject || 'this email'));
   box.checked = picked;
 
   const who = document.createElement('span');
@@ -1616,10 +1620,10 @@ function renderMail(id) {
     // away, so the row appears complete except for the part still coming.
     subject.append(skeleton());
   } else if (meta.gone) {
-    subject.textContent = 'No longer in Gmail';
-    snippet.textContent = 'It was moved or deleted since this list was built.';
+    subject.textContent = COPY.mails.gone;
+    snippet.textContent = COPY.mails.goneWhy;
   } else {
-    subject.textContent = meta.subject || '(no subject)';
+    subject.textContent = meta.subject || COPY.mails.noSubject;
     snippet.textContent = meta.snippet;
   }
 
@@ -1661,7 +1665,7 @@ function renderPager(pages) {
 
   const bar = document.createElement('nav');
   bar.className = 'pager';
-  bar.setAttribute('aria-label', 'Pages of emails');
+  bar.setAttribute('aria-label', COPY.mails.pages);
 
   const button = (text, page, { label, current = false, disabled = false } = {}) => {
     const node = document.createElement('button');
@@ -1670,13 +1674,13 @@ function renderPager(pages) {
     node.textContent = text;
     node.disabled = disabled;
     if (page !== null) node.dataset.page = String(page);
-    node.setAttribute('aria-label', label ?? `Page ${text}`);
+    node.setAttribute('aria-label', label ?? COPY.mails.page(text));
     if (current) node.setAttribute('aria-current', 'page');
     return node;
   };
 
   bar.append(
-    button('‹', mailPage - 1, { label: 'Previous page', disabled: mailPage === 0 })
+    button('‹', mailPage - 1, { label: COPY.mails.previousPage, disabled: mailPage === 0 })
   );
 
   const start = Math.max(0, Math.min(mailPage, pages - 5));
@@ -1685,7 +1689,7 @@ function renderPager(pages) {
   }
 
   bar.append(
-    button('›', mailPage + 1, { label: 'Next page', disabled: mailPage >= pages - 1 })
+    button('›', mailPage + 1, { label: COPY.mails.nextPage, disabled: mailPage >= pages - 1 })
   );
 
   return bar;
@@ -1719,7 +1723,7 @@ async function ensureHeaders(ids) {
     // after the cooldown tries again. Deliberately no re-render here: it would
     // be the failing call asking for itself.
     headersBlockedUntil = Date.now() + HEADER_RETRY_MS;
-    flash(`Couldn't read those emails. ${describeWriteError(err)}`, 'error');
+    flash(COPY.mails.readFailed(describeWriteError(err)), 'error');
   } finally {
     fetchingHeaders--;
     el.mailsSpinner.hidden = fetchingHeaders > 0;
@@ -1732,15 +1736,15 @@ function renderMails() {
   mailIds = mailIdsFor();
 
   const bytes = mailIds.reduce((sum, id) => sum + (sizeOf(id) ?? 0), 0);
-  el.mailsLabel.textContent = openSender.address || openSender.name || 'Unknown sender';
+  el.mailsLabel.textContent = openSender.address || openSender.name || COPY.breakdown.unknownSender;
   el.mailsTotal.textContent = mailIds.length
     ? `(${mailIds.length.toLocaleString()} · ${formatBytes(bytes)})`
     : '';
 
   // The period picker is on the screen behind this one, so the scope has to be
   // stated here or the count is a figure with no visible basis.
-  const scope = periodKey === 'all' ? '' : ` · ${PERIODS[periodKey].label}`;
-  el.mailsScope.textContent = `In ${departing()}${scope}`;
+  const scope = periodKey === 'all' ? '' : COPY.actions.scopeClause(PERIODS[periodKey].label);
+  el.mailsScope.textContent = `${COPY.mails.inFolder(departing())}${scope}`;
   el.mailsScope.title = el.mailsScope.textContent;
 
   const pages = Math.max(1, Math.ceil(mailIds.length / MAIL_PAGE));
@@ -1761,8 +1765,8 @@ function renderMails() {
     nodes.push(
       emptyNote(
         busy
-          ? 'Still working through this folder — this sender’s mail appears as it is read.'
-          : 'Nothing from this sender in this period.'
+          ? COPY.mails.stillReading
+          : COPY.mails.nothingHere
       )
     );
   } else {
@@ -1787,7 +1791,7 @@ function openMails(sender) {
   mailIds = [];
   clearMailSelection();
   el.mailHead.hidden = true;
-  el.mailRows.replaceChildren(emptyNote('Working it out…'));
+  el.mailRows.replaceChildren(emptyNote(COPY.mails.loading));
 
   showScreen('mails');
   el.mailsBack.focus();
@@ -1872,7 +1876,7 @@ function messageLine(text, className) {
 }
 
 function renderMessage(mail) {
-  el.messageSubject.textContent = mail.subject || '(no subject)';
+  el.messageSubject.textContent = mail.subject || COPY.mails.noSubject;
   el.messageSubject.title = mail.subject || '';
 
   const meta = document.createElement('div');
@@ -1881,7 +1885,7 @@ function renderMessage(mail) {
   const who = document.createElement('strong');
   who.textContent = mail.from.name
     ? `${mail.from.name} <${mail.from.address}>`
-    : mail.from.address || 'Unknown sender';
+    : mail.from.address || COPY.breakdown.unknownSender;
   meta.append(who);
 
   const when = document.createElement('span');
@@ -1895,7 +1899,7 @@ function renderMessage(mail) {
   if (mail.fromHtml) {
     nodes.push(
       messageLine(
-        'Shown as plain text. MailBoy never loads a sender’s images or styling, so the layout is gone but the words are all here.',
+        COPY.message.plainText,
         'message-note'
       )
     );
@@ -1907,7 +1911,7 @@ function renderMessage(mail) {
           className: 'message-text',
           textContent: mail.text,
         })
-      : emptyNote('This message has no readable text — it may be attachments only.')
+      : emptyNote(COPY.message.noText)
   );
 
   if (mail.attachments.length) {
@@ -1916,15 +1920,14 @@ function renderMessage(mail) {
 
     const heading = document.createElement('li');
     const label = document.createElement('span');
-    label.textContent =
-      mail.attachments.length === 1 ? '1 attachment' : `${mail.attachments.length} attachments`;
+    label.textContent = COPY.message.attachments(mail.attachments.length);
     heading.append(label);
     list.append(heading);
 
     for (const file of mail.attachments) {
       const item = document.createElement('li');
       const name = document.createElement('span');
-      name.textContent = file.name || '(unnamed)';
+      name.textContent = file.name || COPY.message.unnamed;
       name.title = file.name || '';
       const size = document.createElement('span');
       size.textContent = formatBytes(file.bytes);
@@ -1945,10 +1948,10 @@ async function openMessage(id) {
   // Whatever the list already knows, so the header is not blank for the length
   // of a round trip.
   const known = mailMeta.get(id);
-  el.messageSubject.textContent = known?.subject || '(no subject)';
-  el.messageScope.textContent = `In ${departing()}`;
+  el.messageSubject.textContent = known?.subject || COPY.mails.noSubject;
+  el.messageScope.textContent = COPY.mails.inFolder(departing());
   paintMessageActions();
-  el.messageView.replaceChildren(emptyNote('Opening…'));
+  el.messageView.replaceChildren(emptyNote(COPY.message.opening));
 
   showScreen('message');
   el.messageBack.focus();
@@ -1962,7 +1965,7 @@ async function openMessage(id) {
     console.error('[MailBoy] could not open the message:', err);
     if (openMessageId !== id) return;
     el.messageView.replaceChildren(
-      emptyNote(`Couldn't open this email. ${describeWriteError(err)}`)
+      emptyNote(COPY.message.openFailed(describeWriteError(err)))
     );
   }
 }
@@ -1995,7 +1998,6 @@ function closeMessage() {
 
 const leafOf = (path) => path.split('/').pop();
 
-const emails = (n) => `${n.toLocaleString()} email${n === 1 ? '' : 's'}`;
 
 /** The user's folders as the last render knew them. */
 const folderRows = () => currentGroups?.user ?? [];
@@ -2033,18 +2035,18 @@ async function saveSnapshot() {
 
 /** Short enough for the status line or the editor, with the detail in the log. */
 function describeWriteError(err) {
-  if (err instanceof AuthError) return 'Gmail access expired — reconnect and try again.';
+  if (err instanceof AuthError) return COPY.writeErrors.expired;
 
   if (err instanceof GmailError) {
-    if (err.status === 409) return 'Gmail already has a folder with that name.';
-    if (err.status === 400) return 'Gmail would not accept that name.';
-    if (err.status === 403) return 'Gmail turned down the change.';
+    if (err.status === 409) return COPY.writeErrors.duplicate;
+    if (err.status === 400) return COPY.writeErrors.badName;
+    if (err.status === 403) return COPY.writeErrors.refused;
   }
 
   // fetch() rejects with a TypeError when it never reached the server.
-  if (err instanceof TypeError) return "Couldn't reach Gmail.";
+  if (err instanceof TypeError) return COPY.writeErrors.unreachable;
 
-  return 'Something went wrong.';
+  return COPY.writeErrors.unknown;
 }
 
 // ── The inline editor ────────────────────────────────────────────
@@ -2068,7 +2070,7 @@ function setEditorBusy(working) {
   editor.working = working;
   editor.input.disabled = working;
   editor.create.disabled = working;
-  editor.create.textContent = working ? 'Creating…' : 'Create';
+  editor.create.textContent = working ? COPY.folders.creating : COPY.folders.create;
 }
 
 /**
@@ -2096,7 +2098,7 @@ function openEditor({ parent = '', depth = 0, after = null, into = null }) {
   // The ceiling is on the whole path, so a deeply nested folder has less of it
   // left to spend on its own name.
   input.maxLength = Math.max(1, MAX_NAME - (parent ? parent.length + 1 : 0));
-  input.placeholder = parent ? `New folder in ${leafOf(parent)}` : 'New folder';
+  input.placeholder = parent ? COPY.folders.newFolderIn(leafOf(parent)) : COPY.folders.newFolder;
   input.setAttribute('aria-label', input.placeholder);
   input.autocomplete = 'off';
   input.spellcheck = false;
@@ -2104,7 +2106,7 @@ function openEditor({ parent = '', depth = 0, after = null, into = null }) {
   const create = document.createElement('button');
   create.type = 'button';
   create.className = 'btn btn--primary btn--sm';
-  create.textContent = 'Create';
+  create.textContent = COPY.folders.create;
 
   const cancel = actionButton('cancel', ICON_CLOSE, 'Cancel');
 
@@ -2158,14 +2160,14 @@ async function submitCreate() {
   }
 
   setEditorBusy(true);
-  setAction(`Creating “${leafOf(check.name)}”…`);
+  setAction(COPY.folders.creatingNamed(leafOf(check.name)));
 
   try {
     const label = await createFolder(check.name);
     closeEditor();
     setAction(null);
     addFolder(label);
-    flash(`Created “${leafOf(label.name)}”.`);
+    flash(COPY.folders.created(leafOf(label.name)));
   } catch (err) {
     console.error('[MailBoy] could not create folder:', err);
     setAction(null);
@@ -2178,7 +2180,7 @@ async function submitCreate() {
       showEditorError(reason);
       editor.input.focus();
     }
-    flash(`Couldn't create the folder. ${reason}`, 'error');
+    flash(COPY.folders.createFailed(reason), 'error');
   }
 }
 
@@ -2248,8 +2250,8 @@ function markWorkingRows() {
 /** The hint tracks the box, because the two outcomes are genuinely different. */
 function paintDeleteHint() {
   el.deleteHint.textContent = el.deleteTrash.checked
-    ? 'They go to Trash, where Gmail keeps them for 30 days. On a large folder this takes a while — MailBoy carries on in the background, so you can close the panel.'
-    : 'These emails will be appearing in your inbox (Primary, Social, Promotions, Updates, Forums).';
+    ? COPY.deleteFolder.trashHint
+    : COPY.deleteFolder.inboxHint;
 }
 
 /**
@@ -2261,28 +2263,27 @@ function askDelete(target, children, messages, doomedRules = 0) {
   // showModal throws on an already-open dialog, which a second click would be.
   if (el.deleteDialog.open) return Promise.resolve(null);
 
-  el.deleteName.textContent = `“${target.name}”`;
+  el.deleteName.textContent = COPY.deleteFolder.name(target.name);
 
-  const inside = children.length === 1 ? 'the folder inside it' : `the ${children.length} folders inside it`;
-  const holds = messages ? `Together they hold ${emails(messages)}.` : 'Neither holds any email.';
+  const inside =
+    children.length === 1 ? COPY.deleteFolder.oneChild : COPY.deleteFolder.manyChildren(children.length);
+  const holds = messages
+    ? COPY.deleteFolder.childrenHold(messages)
+    : COPY.deleteFolder.childrenEmpty;
 
   const says = [
     children.length
-      ? `This also deletes ${inside}. ${holds}`
+      ? COPY.deleteFolder.alsoDeletes(inside, holds)
       : messages
-        ? `It holds ${emails(messages)}.`
-        : 'It holds no email.',
+        ? COPY.deleteFolder.holds(messages)
+        : COPY.deleteFolder.empty,
   ];
 
   // A rule pointing at a folder that has gone can only ever fail, so it goes
   // with it — and a delete that quietly removed standing instructions the user
   // set up would be the worst kind of surprise, hence saying so here.
   if (doomedRules) {
-    says.push(
-      `${ruleCount(doomedRules)} send${doomedRules === 1 ? 's' : ''} mail ` +
-        `${children.length ? 'to these folders' : 'here'}, and ` +
-        `${doomedRules === 1 ? 'it will be deleted' : 'they will be deleted'} too.`
-    );
+    says.push(COPY.deleteFolder.rulesGoToo(doomedRules, children.length > 0));
   }
 
   el.deleteText.textContent = says.join(' ');
@@ -2291,7 +2292,7 @@ function askDelete(target, children, messages, doomedRules = 0) {
   const movable = messages > 0;
   el.deleteTrash.closest('.checkbox').hidden = !movable;
   el.deleteHint.hidden = !movable;
-  el.deleteTrashLabel.textContent = `Also move ${emails(messages)} to Trash`;
+  el.deleteTrashLabel.textContent = COPY.deleteFolder.trashBox(messages);
 
   // Unticked every single time. Gmail's own folder delete never removes a
   // message, and a box that remembers a previous yes is how mail gets deleted
@@ -2329,7 +2330,7 @@ let askingDelete = false;
 async function confirmDelete(labelId) {
   if (askingDelete || el.deleteDialog.open) return;
   if (jobRunning()) {
-    flash('MailBoy is still finishing the last job.', 'error');
+    flash(COPY.actions.busy, 'error');
     return;
   }
 
@@ -2380,7 +2381,7 @@ async function confirmDelete(labelId) {
 
   deleteState = { ids: familyIds, name: target.name };
   markWorkingRows();
-  setAction(`Deleting “${target.name}”…`);
+  setAction(COPY.deleteFolder.working(target.name));
 
   // The folder empties straight away, the same as it does for a selection —
   // and, the same as a selection, the mail does not turn up where it is going
@@ -2436,13 +2437,13 @@ function removeFolders(ids) {
 }
 
 function summariseDelete(message, name) {
-  const parts = [`Deleted “${name}”.`];
+  const parts = [COPY.deleteFolder.done(name)];
 
-  if (message.trashed) parts.push(`${emails(message.trashed)} moved to Trash.`);
-  else if (message.restored) parts.push(`${emails(message.restored)} moved to your inbox.`);
+  if (message.trashed) parts.push(COPY.deleteFolder.trashed(message.trashed));
+  else if (message.restored) parts.push(COPY.deleteFolder.restored(message.restored));
 
   if (message.failed?.length) {
-    parts.push(`${message.failed.length.toLocaleString()} could not be moved.`);
+    parts.push(COPY.deleteFolder.someStuck(message.failed.length));
   }
 
   return parts.join(' ');
@@ -2701,14 +2702,14 @@ function resolveAction({ landed, stranded, listing = false, why }) {
 
 /** How the dialogs name where the mail is coming from. */
 function departing() {
-  if (!openLabel) return 'this folder';
-  return openLabel.id.startsWith('CATEGORY_') ? 'your inbox' : `“${openLabel.name}”`;
+  if (!openLabel) return COPY.actions.thisFolder;
+  return openLabel.id.startsWith('CATEGORY_') ? COPY.actions.yourInbox : `“${openLabel.name}”`;
 }
 
 /** The period picker is off screen in all three places these can be started
  *  from, so every scope line has to carry it. */
 function periodClause() {
-  return periodKey === 'all' ? '' : `, ${PERIODS[periodKey].label.toLowerCase()}`;
+  return periodKey === 'all' ? '' : COPY.actions.periodClause(PERIODS[periodKey].label);
 }
 
 /**
@@ -2796,7 +2797,7 @@ function askConfirm({
 
   resetRuleBoxes(TRASH_RULE_BOXES);
   if (rule) {
-    paintRuleBoxes(TRASH_RULE_BOXES, rule, { to: 'Trash', hint: TRASH_RULE_HINT });
+    paintRuleBoxes(TRASH_RULE_BOXES, rule, { to: COPY.rules.trash, hint: COPY.ruleBoxes.trashHint });
   }
 
   // Escape leaves the previous choice in place, so a second open would read as
@@ -2837,7 +2838,7 @@ let confirmRule = null;
 function canAct() {
   if (!openLabel) return false;
   if (jobRunning()) {
-    flash('MailBoy is still finishing the last job.', 'error');
+    flash(COPY.actions.busy, 'error');
     return false;
   }
   return true;
@@ -2862,15 +2863,15 @@ function resolveSelection() {
 
   const ids = idsForSelection(openLabel.id, facts.keys, sinceDay());
   if (!ids.length) {
-    flash('Those emails are no longer in this folder.', 'error');
+    flash(COPY.actions.gone, 'error');
     clearSelection();
     return null;
   }
 
-  const who = facts.senders === 1 ? 'one sender' : `${facts.senders.toLocaleString()} senders`;
+  const who = COPY.actions.fromSenders(facts.senders);
   return {
     ids,
-    line: `From ${who} in ${departing()}${periodClause()}.`,
+    line: COPY.actions.fromLine(who, departing(), periodClause()),
     // No subject: a breakdown row is a sender, and the messages behind it carry
     // as many different subjects as they like.
     rule: { senders: facts.addresses, subject: null },
@@ -2891,15 +2892,15 @@ function resolveMailSelection() {
 
   const { ids } = mailSelectionFacts();
   if (!ids.length) {
-    flash('Those emails are no longer in this folder.', 'error');
+    flash(COPY.actions.gone, 'error');
     clearMailSelection();
     return null;
   }
 
-  const who = openSender.address || openSender.name || 'this sender';
+  const who = openSender.address || openSender.name || COPY.actions.thisSender;
   return {
     ids,
-    line: `From “${who}” in ${departing()}${periodClause()}.`,
+    line: COPY.actions.fromLine(`“${who}”`, departing(), periodClause()),
     // A subject rule is only offered for a single message, because that is the
     // only case where "this subject" names one thing. Ticking twenty messages
     // and getting twenty rules is not what the wording promises.
@@ -2924,7 +2925,9 @@ function resolveOpenMessage() {
   const subject = subjectOf(openMessageId) || el.messageSubject.textContent;
   return {
     ids: [openMessageId],
-    line: subject ? `“${subject}” in ${departing()}.` : `This email, in ${departing()}.`,
+    line: subject
+      ? COPY.actions.thisSubject(subject, departing())
+      : COPY.actions.thisEmail(departing()),
     // The one place both rules are on offer: there is exactly one sender and
     // exactly one subject on screen.
     rule: {
@@ -2940,14 +2943,11 @@ async function startTrash(picked) {
   const { ids, line, rule } = picked;
 
   const { ok, specs } = await askConfirm({
-    verb: 'Move',
+    verb: COPY.trash.verb,
     count: ids.length,
-    where: 'to Trash',
-    text:
-      `${line} Gmail keeps trashed mail for 30 days, so you can still get it ` +
-      'back from Trash. On a large selection this takes a while — MailBoy carries on in ' +
-      'the background, so you can close the panel.',
-    button: 'Move to Trash',
+    where: COPY.trash.where,
+    text: COPY.trash.text(line),
+    button: COPY.trash.confirm,
     destructive: true,
     // Trash is a destination like any other to a rule, so the same two boxes
     // are on offer here as in the move dialog — the delete handles the mail
@@ -2962,14 +2962,14 @@ async function startTrash(picked) {
       total: ids.length,
       action: 'trash',
       target: 'Trash',
-      status: `Moving ${emails(ids.length)} to Trash…`,
+      status: COPY.trash.status(ids.length),
     }
   );
 
   // After the dispatch, for the same reason a move's rules are: the projection
   // is what makes the button look like it worked, and a refused filter must not
   // read as the delete having failed.
-  if (specs.length) void applyRules(specs, 'Trash');
+  if (specs.length) void applyRules(specs, COPY.rules.trash);
 }
 
 /**
@@ -2988,11 +2988,11 @@ async function startRestore(picked) {
   // No rule boxes: "restore all future mail from this sender" describes nothing
   // — mail does not arrive in Trash.
   const { ok } = await askConfirm({
-    verb: 'Restore',
+    verb: COPY.restore.verb,
     count: ids.length,
-    where: 'to your inbox',
-    text: `${line} They keep any folders they were in when they were deleted.`,
-    button: 'Restore to inbox',
+    where: COPY.restore.where,
+    text: COPY.restore.text(line),
+    button: COPY.restore.confirm,
   });
   if (!ok) return;
 
@@ -3002,7 +3002,7 @@ async function startRestore(picked) {
       total: ids.length,
       action: 'restore',
       target: 'Inbox',
-      status: `Restoring ${emails(ids.length)} to your inbox…`,
+      status: COPY.restore.status(ids.length),
     }
   );
 }
@@ -3041,10 +3041,10 @@ function renderMoveList() {
   const sections = [];
 
   if (defaults.length) {
-    sections.push(renderGroup('Google Default Folders', defaults, '', { counted: false }));
+    sections.push(renderGroup(COPY.main.googleFolders, defaults, '', { counted: false }));
   }
   sections.push(
-    renderGroup('Your Folders', user, 'No folders of your own yet — use + to make one.', {
+    renderGroup(COPY.main.userFolders, user, COPY.main.noUserFolders, {
       editable: true,
       counted: false,
       removable: false,
@@ -3110,8 +3110,8 @@ function paintMoveTarget() {
   // rewords them. Before a folder is picked there is nothing to name, and "this
   // folder" is still true — the list is right there.
   paintRuleBoxes(MOVE_RULE_BOXES, moveRule, {
-    to: moveTarget ? `“${moveTarget.name}”` : 'this folder',
-    hint: MOVE_RULE_HINT,
+    to: moveTarget ? `“${moveTarget.name}”` : COPY.ruleBoxes.thisFolder,
+    hint: COPY.ruleBoxes.moveHint,
   });
 }
 
@@ -3148,24 +3148,6 @@ const TRASH_RULE_BOXES = {
   subjectLabel: () => el.trashRuleSubjectLabel,
   hint: () => el.trashRuleHint,
 };
-
-/**
- * Both dialogs warn about the same thing first — a rule is about mail that has
- * not arrived — and then about what is particular to where it sends it.
- */
-const MOVE_RULE_HINT =
-  'Rules only act on mail as it arrives. Gmail cannot apply one to messages ' +
-  'you already have — that is what the move itself does.';
-
-/**
- * Trash earns a longer one. This is the only rule MailBoy can make that ends in
- * mail being destroyed, it happens without the mail ever being seen, and Gmail
- * does the destroying on its own schedule.
- */
-const TRASH_RULE_HINT =
-  'Rules only act on mail as it arrives, so this will not touch anything you ' +
-  'already have. Mail it catches goes straight to Trash without appearing in ' +
-  'your inbox — and Gmail deletes trashed mail for good after 30 days.';
 
 /**
  * The distinct domains behind a set of addresses, in the order they first
@@ -3211,8 +3193,8 @@ function paintRuleBoxes(boxes, material, copy) {
   boxes.senderRow().hidden = senders.length === 0;
   boxes.senderLabel().textContent =
     senders.length > 1
-      ? `Move all future mails from these ${senders.length.toLocaleString()} senders to ${copy.to}`
-      : `Move all future mails from this sender to ${copy.to}`;
+      ? COPY.ruleBoxes.senders(senders.length, copy.to)
+      : COPY.ruleBoxes.sender(copy.to);
 
   // The domain is named where there is one of it, because which domain this is
   // decides the answer — "everything from gmail.com" is a very different offer
@@ -3221,11 +3203,11 @@ function paintRuleBoxes(boxes, material, copy) {
   boxes.domainRow().hidden = domains.length === 0;
   boxes.domainLabel().textContent =
     domains.length > 1
-      ? `Move all future mails from these ${domains.length.toLocaleString()} entire domains to ${copy.to}`
-      : `Move all future mails from this entire domain (${domains[0] ?? ''}) to ${copy.to}`;
+      ? COPY.ruleBoxes.domains(domains.length, copy.to)
+      : COPY.ruleBoxes.domain(domains[0] ?? '', copy.to);
 
   boxes.subjectRow().hidden = !subject;
-  boxes.subjectLabel().textContent = `Move all future mails with this subject to ${copy.to}`;
+  boxes.subjectLabel().textContent = COPY.ruleBoxes.subject(copy.to);
 
   syncDomainLock(boxes);
   paintRuleHint(boxes, material, copy);
@@ -3280,15 +3262,13 @@ function paintRuleHint(boxes, material, copy) {
   // never written before, which is the whole of what makes it useful and the
   // whole of what makes it worth a second thought.
   if (boxes.domain().checked && !boxes.domainRow().hidden) {
-    lines.push('A domain rule also catches senders you have never had mail from.');
+    lines.push(COPY.ruleBoxes.domainWarning);
   }
   // Gmail's ceiling is 1,000 filters across everything the account has ever
   // made, so a selection of a few hundred senders is worth saying out loud
   // before it is spent rather than after.
   if (wanted.length > 25) {
-    lines.push(
-      `This adds ${wanted.length.toLocaleString()} rules; Gmail allows ${MAX_RULES.toLocaleString()} in total.`
-    );
+    lines.push(COPY.ruleBoxes.ceiling(wanted.length, MAX_RULES));
   }
 
   boxes.hint().textContent = lines.join(' ');
@@ -3365,7 +3345,7 @@ function startMove(picked) {
   // before that list exists — a half-built one would shed only some folders and
   // leave the mail in two places, which is the one outcome this must not have.
   if (!currentGroups) {
-    flash('MailBoy is still reading your folders.', 'error');
+    flash(COPY.actions.foldersNotReady, 'error');
     return;
   }
 
@@ -3378,9 +3358,7 @@ function startMove(picked) {
   moveRule = rule ?? null;
   resetRuleBoxes(MOVE_RULE_BOXES);
   el.moveCount.textContent = emails(ids.length);
-  el.moveText.textContent =
-    `${line} They move out of every folder they are in now — your inbox ` +
-    'included — and into the one you pick.';
+  el.moveText.textContent = COPY.move.text(line);
 
   // renderMoveList paints the boxes on its way through paintMoveTarget.
   renderMoveList();
@@ -3425,7 +3403,7 @@ function confirmMove() {
       total: ids.length,
       action: 'move',
       target: name,
-      status: `Moving ${emails(ids.length)} to “${name}”…`,
+      status: COPY.move.status(ids.length, name),
     }
   );
 
@@ -3456,7 +3434,7 @@ function confirmMove() {
  * already under way, and Block dispatches no move at all: telling someone their
  * emails are moving when nothing is would be the one wrong thing to say.
  */
-async function applyRules(specs, where, whenFailed = "The emails are moving, but the rule couldn't be added.") {
+async function applyRules(specs, where, whenFailed = COPY.rules.addFailedDuringMove) {
   try {
     const { rules: existing, filters } = await listRules();
     rules = existing;
@@ -3464,16 +3442,13 @@ async function applyRules(specs, where, whenFailed = "The emails are moving, but
 
     const fresh = specs.filter((spec) => !existing.some((rule) => sameRule(rule, spec)));
     if (!fresh.length) {
-      flash(`Already had ${specs.length === 1 ? 'that rule' : 'those rules'}.`);
+      flash(COPY.rules.alreadyHad(specs.length));
       return;
     }
 
     const room = MAX_RULES - filters;
     if (room <= 0) {
-      flash(
-        `Gmail is full at ${MAX_RULES.toLocaleString()} filters — no rule was added.`,
-        'error'
-      );
+      flash(COPY.rules.full(MAX_RULES), 'error');
       return;
     }
 
@@ -3486,14 +3461,14 @@ async function applyRules(specs, where, whenFailed = "The emails are moving, but
     if (created.length) {
       parts.push(
         created.length === 1
-          ? `Rule added — future mail goes to ${where}.`
-          : `${created.length.toLocaleString()} rules added, all sending mail to ${where}.`
+          ? COPY.rules.added(where)
+          : COPY.rules.addedMany(created.length, where)
       );
     }
     if (fresh.length > wanted.length) {
-      parts.push(`${(fresh.length - wanted.length).toLocaleString()} would not fit in Gmail's limit.`);
+      parts.push(COPY.rules.noRoom(fresh.length - wanted.length));
     }
-    if (failed.length) parts.push(`${failed.length.toLocaleString()} could not be added.`);
+    if (failed.length) parts.push(COPY.rules.someFailed(failed.length));
     flash(parts.join(' '));
   } catch (err) {
     console.error('[MailBoy] could not add the rule:', err);
@@ -3590,15 +3565,13 @@ function paintBlockHint() {
   // before — the whole of what makes a domain block useful, and the whole of
   // what makes it worth a second thought.
   if (blockByDomain()) {
-    lines.push('This also blocks senders you have never had mail from.');
+    lines.push(COPY.block.domainWarning);
   }
   // Gmail's ceiling is 1,000 filters across everything the account ever made,
   // and a breakdown selection can run to hundreds of senders.
   const wanted = blockSpecs().length;
   if (wanted > 25) {
-    lines.push(
-      `This adds ${wanted.toLocaleString()} rules; Gmail allows ${MAX_RULES.toLocaleString()} in total.`
-    );
+    lines.push(COPY.ruleBoxes.ceiling(wanted, MAX_RULES));
   }
 
   el.blockHint.textContent = lines.join(' ');
@@ -3616,9 +3589,7 @@ async function startBlock(material) {
 
   if (!material.addresses.length) {
     flash(
-      material.count === 1
-        ? 'That sender has no address MailBoy can write a rule against.'
-        : 'None of those senders has an address MailBoy can write a rule against.',
+      material.count === 1 ? COPY.block.noAddress : COPY.block.noAddresses,
       'error'
     );
     return;
@@ -3629,27 +3600,22 @@ async function startBlock(material) {
 
   el.blockWho.textContent =
     blockAddresses.length === 1
-      ? `“${blockAddresses[0]}”`
-      : `${blockAddresses.length.toLocaleString()} senders`;
+      ? COPY.block.who(blockAddresses[0])
+      : COPY.block.manyWho(blockAddresses.length);
 
   const skipped = material.skipped
-    ? ` ${material.skipped.toLocaleString()} of the ${material.count.toLocaleString()} selected ` +
-      'gave no address to write a rule against, so they are not blocked.'
+    ? COPY.block.skipped(material.skipped, material.count)
     : '';
 
-  el.blockText.textContent =
-    'Future mail from them goes straight to Trash without ever reaching your ' +
-    'inbox, and Gmail deletes trashed mail for good after 30 days. Nothing you ' +
-    'already have moves — a rule only ever acts on mail as it arrives. You can ' +
-    `undo this at any time under Rules.${skipped}`;
+  el.blockText.textContent = `${COPY.block.text}${skipped}`;
 
   // Named, because which domain this is decides the answer: "everyone at
   // gmail.com" is a very different offer from "everyone at acme-invoices.com",
   // and the sender's address alone does not make that obvious enough to tick.
   el.blockDomainLabel.textContent =
     domains.length > 1
-      ? `Block all from these ${domains.length.toLocaleString()} entire domains`
-      : `Block all from the entire domain (${domains[0] ?? ''})`;
+      ? COPY.block.domainsBox(domains.length)
+      : COPY.block.domainBox(domains[0] ?? '');
   el.blockDomainRow.hidden = domains.length === 0;
 
   // Unticked on every open. A rule outlives the action that made it, so a box
@@ -3676,7 +3642,7 @@ async function startBlock(material) {
     el.blockDialog.showModal();
   });
 
-  if (specs.length) void applyRules(specs, 'Trash', "The rule couldn't be added.");
+  if (specs.length) void applyRules(specs, COPY.rules.trash, COPY.block.ruleFailed);
 }
 
 // ── Reporting a selection job ────────────────────────────────────
@@ -3685,10 +3651,10 @@ function bulkStatus(done, total) {
   const action = bulkState?.action;
   const lead =
     action === 'trash'
-      ? 'Moving to Trash'
+      ? COPY.trash.progress
       : action === 'restore'
-        ? 'Restoring to your inbox'
-        : `Moving to “${bulkState?.target ?? ''}”`;
+        ? COPY.restore.progress
+        : COPY.move.progress(bulkState?.target ?? '');
 
   // `done` is capped: a move reports its whole chunk at once and the totals are
   // built from different sums, so overshooting by a few is possible.
@@ -3700,14 +3666,12 @@ function bulkStatus(done, total) {
 
 function summariseBulk(message, action, target) {
   if (action === 'trash') {
-    const parts = [`${emails(message.trashed ?? 0)} moved to Trash.`];
-    if (message.failed?.length) {
-      parts.push(`${message.failed.length.toLocaleString()} could not be moved.`);
-    }
+    const parts = [COPY.trash.done(message.trashed ?? 0)];
+    if (message.failed?.length) parts.push(COPY.trash.someStuck(message.failed.length));
     return parts.join(' ');
   }
-  if (action === 'restore') return `${emails(message.moved ?? 0)} restored to your inbox.`;
-  return `${emails(message.moved ?? 0)} moved to “${target}”.`;
+  if (action === 'restore') return COPY.restore.done(message.moved ?? 0);
+  return COPY.move.done(message.moved ?? 0, target);
 }
 
 /**
@@ -3760,8 +3724,8 @@ function onFolderMessage(message) {
     // once. Completion is the worker saying so, never the two meeting.
     setAction(
       message.total
-        ? `Deleting “${name}”… ${Math.min(message.done, message.total).toLocaleString()} of ${message.total.toLocaleString()}`
-        : `Deleting “${name}”…`
+        ? COPY.deleteFolder.progress(name, Math.min(message.done, message.total), message.total)
+        : COPY.deleteFolder.working(name)
     );
     return;
   }
@@ -3786,7 +3750,7 @@ function onFolderMessage(message) {
     deleteState = null;
     markWorkingRows();
     setAction(null);
-    flash(`Stopped deleting “${name}”. The folder is still there.`);
+    flash(COPY.deleteFolder.stopped(name));
     // Some of the mail moved and some did not, and the job does not say which.
     resolveAction({ listing: true, why: 'the delete was stopped partway' });
     return;
@@ -3797,7 +3761,7 @@ function onFolderMessage(message) {
     deleteState = null;
     markWorkingRows();
     setAction(null);
-    flash(`Couldn't finish deleting “${name}”.`, 'error');
+    flash(COPY.deleteFolder.failed(name), 'error');
     resolveAction({ listing: true, why: 'the delete failed outright' });
     return;
   }
@@ -3819,7 +3783,7 @@ function onFolderMessage(message) {
 
     flash(
       stopped
-        ? `Stopped. ${summariseBulk(message, action, target)}`
+        ? COPY.move.stopped(summariseBulk(message, action, target))
         : summariseBulk(message, action, target)
     );
 
@@ -3831,7 +3795,7 @@ function onFolderMessage(message) {
     console.error('[MailBoy] selection job failed:', message.message);
     bulkState = null;
     setAction(null);
-    flash("Couldn't finish moving those emails.", 'error');
+    flash(COPY.move.failed, 'error');
     // The rows are showing mail gone from somewhere it may never have left.
     resolveAction({ listing: true, why: 'the selection job failed outright' });
   }
@@ -3929,7 +3893,7 @@ async function adoptPendingDelete() {
     name: job.labels.at(-1)?.name ?? '',
   };
   markWorkingRows();
-  setAction(`Deleting “${deleteState.name}”…`);
+  setAction(COPY.deleteFolder.working(deleteState.name));
   folderChannel();
 }
 
@@ -3985,7 +3949,6 @@ let openRuleGroup = null;
 let listedGroups = [];
 let listedRules = [];
 
-const ruleCount = (n) => `${n.toLocaleString()} rule${n === 1 ? '' : 's'}`;
 
 /**
  * The folder a rule sends mail to, by name.
@@ -4011,22 +3974,8 @@ function folderNameOf(labelId) {
  * row, tick, drill-down and delete, which is the point.
  */
 const RULE_SECTIONS = [
-  {
-    origin: 'mailboy',
-    title: 'MailBoy filters',
-    scope: 'Rules MailBoy manages',
-    empty:
-      'None yet. Block a sender, or tick “Move all future mails…” when you ' +
-      'move mail, and the rule will appear here.',
-  },
-  {
-    origin: 'existing',
-    title: 'Existing filters',
-    scope: 'Filters already on your account',
-    empty:
-      'None. MailBoy lists the filters you made in Gmail that send mail to a ' +
-      'folder by sender or by subject; anything wider stays in Gmail’s settings.',
-  },
+  { origin: 'mailboy', ...COPY.rules.mine },
+  { origin: 'existing', ...COPY.rules.existing },
 ];
 
 const sectionOf = (origin) => RULE_SECTIONS.find((section) => section.origin === origin);
@@ -4154,13 +4103,9 @@ function ruleTick(checked, label) {
  * rather than collapsing to one sentence that describes the wrong half.
  */
 function ruleNote() {
-  if (rulesError) return 'MailBoy could not read your rules. Try again in a moment.';
-  if (!rulesLoaded) return 'Reading your rules…';
-  return (
-    'No rules yet, and no filters in Gmail that send mail to a folder. Block a ' +
-    'sender, or tick “Move all future mails…” when you move mail, and the rule ' +
-    'will appear here.'
-  );
+  if (rulesError) return COPY.rules.readFailed;
+  if (!rulesLoaded) return COPY.rules.readingRules;
+  return COPY.rules.noneAtAll;
 }
 
 /** A section's heading, sitting between the rows rather than in the sticky head. */
@@ -4178,7 +4123,7 @@ function renderRuleGroups() {
   if (!currentGroups) {
     listedGroups = [];
     el.rulesHead.hidden = true;
-    el.ruleRows.replaceChildren(emptyNote('Reading your folders…'));
+    el.ruleRows.replaceChildren(emptyNote(COPY.rules.readingFolders));
     paintRuleSelection();
     return;
   }
@@ -4195,7 +4140,7 @@ function renderRuleGroups() {
 
   el.rulesTotal.textContent = rules.length ? `(${ruleCount(rules.length)})` : '';
   el.rulesCount.textContent = groups.length ? `· ${groups.length.toLocaleString()}` : '';
-  el.rulesScope.textContent = 'Filters that file mail into a folder';
+  el.rulesScope.textContent = COPY.rules.scope;
 
   el.rulesHead.hidden = !groups.length;
   if (!groups.length) {
@@ -4249,7 +4194,7 @@ function renderRuleGroupRow(group) {
 
   const lead = document.createElement('span');
   lead.className = 'rule-lead';
-  lead.textContent = 'Move to ';
+  lead.textContent = COPY.rules.moveTo;
   name.append(lead);
 
   // "Move to Trash (⊘ Blocked mails)" rather than a sentence of its own: the
@@ -4258,15 +4203,15 @@ function renderRuleGroupRow(group) {
   // colour: the bare text inherits it from `.rule--danger .rule-name`, and the
   // icon's stroke is `currentColor`. Only the lead stays muted, same as every
   // other row.
-  name.append(group.name ?? (blocking ? 'Trash' : 'a folder that no longer exists'));
-  if (blocking) name.append(' (Blocked mails)');
+  name.append(group.name ?? (blocking ? COPY.rules.trash : COPY.rules.orphan));
+  if (blocking) name.append(COPY.rules.blocked);
 
   what.append(name);
 
   if (!blocking && !group.name) {
     const why = document.createElement('span');
     why.className = 'rule-kind';
-    why.textContent = 'The folder was removed outside MailBoy. Delete to tidy up.';
+    why.textContent = COPY.rules.orphanWhy;
     what.append(why);
   }
 
@@ -4282,8 +4227,8 @@ function renderRuleGroupRow(group) {
     ruleTick(
       selectedDestinations.has(group.key),
       blocking
-        ? 'Select the rules that block senders'
-        : `Select rules moving to ${group.name ?? 'a deleted folder'}`
+        ? COPY.rules.selectBlockRow
+        : COPY.rules.selectDestination(group.name ?? COPY.rules.orphan)
     ),
     what,
     count
@@ -4293,12 +4238,12 @@ function renderRuleGroupRow(group) {
 
 /** How a single rule reads. The three kinds are one sentence each, deliberately. */
 function ruleSentence(rule) {
-  if (rule.kind === 'sender') return { lead: 'All mails from ', body: rule.match };
+  if (rule.kind === 'sender') return { lead: COPY.rules.fromSender, body: rule.match };
   // "anyone at" rather than the bare domain: the whole point of the kind is that
   // it catches senders nobody has seen yet, and a row reading "All mails from
   // example.com" would look like an address that had lost its front half.
-  if (rule.kind === 'domain') return { lead: 'All mails from anyone at ', body: rule.match };
-  return { lead: 'All mails having subject ', body: `“${rule.match}”` };
+  if (rule.kind === 'domain') return { lead: COPY.rules.fromDomain, body: rule.match };
+  return { lead: COPY.rules.withSubject, body: `“${rule.match}”` };
 }
 
 function renderRuleDetail() {
@@ -4316,9 +4261,13 @@ function renderRuleDetail() {
   // that read differently from the row that opened it would look like a
   // different screen.
   if (isBlockDestination(openRuleGroup.id)) {
-    el.ruleDetailLabel.replaceChildren(`Move to ${name ?? 'Trash'} (`, blockIcon(), ' Blocked mails)');
+    el.ruleDetailLabel.replaceChildren(
+      `${COPY.rules.moveTo}${name ?? COPY.rules.trash}${COPY.rules.blockedBeforeIcon}`,
+      blockIcon(),
+      COPY.rules.blockedAfterIcon
+    );
   } else {
-    el.ruleDetailLabel.textContent = `Move to ${name ?? 'a deleted folder'}`;
+    el.ruleDetailLabel.textContent = `${COPY.rules.moveTo}${name ?? COPY.rules.orphan}`;
   }
   el.ruleDetailTotal.textContent = mine.length ? `(${ruleCount(mine.length)})` : '';
   el.ruleDetailScope.textContent = sectionOf(openRuleGroup.origin)?.scope ?? '';
@@ -4356,7 +4305,7 @@ function renderRuleRow(rule) {
   name.append(prefix, body);
 
   what.append(name);
-  row.append(ruleTick(selectedRules.has(rule.id), `Select ${lead}${body}`), what);
+  row.append(ruleTick(selectedRules.has(rule.id), COPY.rules.selectRule(`${lead}${body}`)), what);
   return row;
 }
 
@@ -4393,7 +4342,7 @@ function paintRuleSelection() {
     : picked.length;
   summary.textContent = ruleCount(total);
   summary.title = onGroups
-    ? `${picked.length.toLocaleString()} destinations · ${ruleCount(total)}`
+    ? COPY.rules.destinations(picked.length, ruleCount(total))
     : ruleCount(total);
 }
 
@@ -4470,7 +4419,7 @@ function closeRuleGroup() {
 async function confirmRuleDelete(doomed, where) {
   if (!doomed.length) return;
   if (jobRunning()) {
-    flash('MailBoy is still finishing the last job.', 'error');
+    flash(COPY.actions.busy, 'error');
     return;
   }
 
@@ -4482,25 +4431,16 @@ async function confirmRuleDelete(doomed, where) {
   const total = doomed.length + alsoGoing.length;
 
   const { ok } = await askConfirm({
-    verb: 'Delete',
+    verb: COPY.common.delete,
     countText: ruleCount(total),
     where,
-    text:
-      'Mail that has already been filed stays exactly where it is — a rule only ' +
-      'ever acts on mail as it arrives. New mail that would have matched will land ' +
-      'in your inbox instead, as it did before the rule was made. Gmail cannot ' +
-      'restore a deleted filter, so it would have to be made again.' +
-      (alsoGoing.length
-        ? ` One of these files mail into more than one folder, and Gmail cannot ` +
-          `remove part of a filter — so ${ruleCount(alsoGoing.length)} sending mail ` +
-          `elsewhere ${alsoGoing.length === 1 ? 'goes' : 'go'} as well.`
-        : ''),
-    button: total === 1 ? 'Delete rule' : 'Delete rules',
+    text: COPY.rules.deleteText + (alsoGoing.length ? COPY.rules.alsoGoing(alsoGoing.length) : ''),
+    button: total === 1 ? COPY.rules.deleteOne : COPY.rules.deleteMany,
     destructive: true,
   });
   if (!ok) return;
 
-  setAction(`Deleting ${ruleCount(total)}…`);
+  setAction(COPY.rules.deleting(ruleCount(total)));
 
   try {
     const { deleted, failed } = await deleteRules([...filterIds]);
@@ -4523,13 +4463,13 @@ async function confirmRuleDelete(doomed, where) {
 
     flash(
       kept
-        ? `${ruleCount(removed)} deleted. ${ruleCount(kept)} could not be.`
-        : `${ruleCount(removed)} deleted.`
+        ? COPY.rules.deletedSome(ruleCount(removed), ruleCount(kept))
+        : COPY.rules.deleted(ruleCount(removed))
     );
   } catch (err) {
     console.error('[MailBoy] could not delete those rules:', err);
     setAction(null);
-    flash("Couldn't delete those rules.", 'error');
+    flash(COPY.rules.deleteFailed, 'error');
     // Whatever did or did not go, the list on screen is now a guess.
     void loadRules();
   }
@@ -4604,49 +4544,28 @@ const ICON_ALERT = `
  */
 function describeError(err) {
   if (!navigator.onLine) {
-    return {
-      title: "You're offline",
-      body: 'MailBoy needs a connection to read your folders from Gmail.',
-    };
+    return COPY.errors.offline;
   }
 
   if (err instanceof GmailError) {
     if (err.reason === 'accessNotConfigured' || err.reason === 'SERVICE_DISABLED') {
-      return {
-        title: 'Gmail access is switched off',
-        body: "MailBoy's connection to Gmail isn't finished being set up, so Gmail is refusing the request. Reconnecting won't change this.",
-      };
+      return COPY.errors.notConfigured;
     }
     if (err.reason === 'rateLimitExceeded' || err.reason === 'userRateLimitExceeded') {
-      return {
-        title: 'Gmail is busy',
-        body: 'Too many requests went out at once. Waiting a moment usually clears it.',
-      };
+      return COPY.errors.busy;
     }
     if (err.status >= 500) {
-      return {
-        title: 'Gmail is having trouble',
-        body: "The problem is on Google's side. Trying again shortly usually works.",
-      };
+      return COPY.errors.google;
     }
-    return {
-      title: 'Gmail turned down the request',
-      body: 'MailBoy asked Gmail for your folders and was refused.',
-    };
+    return COPY.errors.refused;
   }
 
   // fetch() rejects with a TypeError when it never reached the server.
   if (err instanceof TypeError) {
-    return {
-      title: "Couldn't reach Gmail",
-      body: 'The connection failed before Gmail could answer.',
-    };
+    return COPY.errors.unreachable;
   }
 
-  return {
-    title: 'Something went wrong',
-    body: "MailBoy couldn't load your folders.",
-  };
+  return COPY.errors.unknown;
 }
 
 function technicalDetail(err) {
@@ -4694,15 +4613,15 @@ function renderErrorState(err) {
   text.className = 'state-body';
   text.textContent = body;
 
-  const retry = iconButton('btn btn--primary btn--sm', 'refresh', 'Try again');
-  const signOut = iconButton('btn btn--ghost btn--sm', 'logout', 'Log out');
+  const retry = iconButton('btn btn--primary btn--sm', 'refresh', COPY.errors.retry);
+  const signOut = iconButton('btn btn--ghost btn--sm', 'logout', COPY.errors.logout);
 
   signOut.el.addEventListener('click', () => handleLogout());
 
   retry.el.addEventListener('click', async () => {
     retry.el.disabled = true;
     signOut.el.disabled = true;
-    retry.label.textContent = 'Trying…';
+    retry.label.textContent = COPY.errors.retrying;
     retry.icon.classList.add('icon--spin');
 
     // A repeat failure re-renders an identical state, so without a floor on
@@ -4713,7 +4632,7 @@ function renderErrorState(err) {
     if (retry.el.isConnected) {
       retry.el.disabled = false;
       signOut.el.disabled = false;
-      retry.label.textContent = 'Try again';
+      retry.label.textContent = COPY.errors.retry;
       retry.icon.classList.remove('icon--spin');
     }
   });
@@ -4730,7 +4649,7 @@ function renderErrorState(err) {
     detailsOpen = details.open;
   });
   const summary = document.createElement('summary');
-  summary.textContent = 'Technical details';
+  summary.textContent = COPY.errors.details;
   const detailText = document.createElement('p');
   detailText.textContent = technicalDetail(err);
   details.append(summary, detailText);
@@ -4985,7 +4904,7 @@ async function load({ force = false } = {}) {
     membershipReady = restoreMembership();
     // Someone who pressed the button is owed an answer; an open that quietly
     // skipped its sync is not worth interrupting for.
-    if (force) flash('MailBoy is still finishing the last job.', 'error');
+    if (force) flash(COPY.actions.busy, 'error');
     return;
   }
 
@@ -5074,7 +4993,7 @@ async function load({ force = false } = {}) {
     if (err instanceof AuthError) {
       const key = await scopedKey(CACHE_NAME);
       if (key) await chrome.storage.local.remove(key);
-      showWelcome('Gmail access expired. Please connect again.');
+      showWelcome(COPY.welcome.expired);
     } else {
       renderErrorState(err);
     }
@@ -5210,7 +5129,7 @@ async function paintCache() {
 
 el.connect.addEventListener('click', async () => {
   el.connect.disabled = true;
-  el.connect.textContent = 'Waiting for Google…';
+  el.connect.textContent = COPY.welcome.connecting;
   setNotice(el.welcomeError, null);
 
   try {
@@ -5234,11 +5153,11 @@ el.connect.addEventListener('click', async () => {
       showWelcome(null);
     } else {
       console.error('[MailBoy] connect failed:', err);
-      showWelcome("Couldn't connect to Google. Please try again.");
+      showWelcome(COPY.welcome.failed);
     }
   } finally {
     el.connect.disabled = false;
-    el.connect.textContent = 'Connect to Mailbox';
+    el.connect.textContent = COPY.welcome.connect;
   }
 });
 
@@ -5285,7 +5204,9 @@ function confirmLogout() {
   if (el.logoutDialog.open) return Promise.resolve(null);
 
   return new Promise((resolve) => {
-    el.logoutMailbox.textContent = el.account.textContent || 'this mailbox';
+    el.logoutText.textContent = COPY.logout.text(
+      el.account.textContent || COPY.logout.mailboxFallback
+    );
     // Escape leaves the previous choice in place, so a second open would read
     // as a confirmation of the first.
     el.logoutDialog.returnValue = '';
@@ -5620,7 +5541,7 @@ for (const box of [el.ruleSender, el.ruleDomain, el.ruleSubject]) {
     syncDomainLock(MOVE_RULE_BOXES);
     paintRuleHint(MOVE_RULE_BOXES, moveRule, {
       to: moveTarget ? `“${moveTarget.name}”` : 'this folder',
-      hint: MOVE_RULE_HINT,
+      hint: COPY.ruleBoxes.moveHint,
     });
   });
 }
@@ -5628,7 +5549,7 @@ for (const box of [el.ruleSender, el.ruleDomain, el.ruleSubject]) {
 for (const box of [el.trashRuleSender, el.trashRuleDomain, el.trashRuleSubject]) {
   box.addEventListener('change', () => {
     syncDomainLock(TRASH_RULE_BOXES);
-    paintRuleHint(TRASH_RULE_BOXES, confirmRule, { to: 'Trash', hint: TRASH_RULE_HINT });
+    paintRuleHint(TRASH_RULE_BOXES, confirmRule, { to: COPY.rules.trash, hint: COPY.ruleBoxes.trashHint });
   });
 }
 

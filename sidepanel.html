@@ -43,7 +43,7 @@
           />
           <path d="m60,160 h80 v-65 l-40,35 l-40,-35" fill="#4285f4" stroke="#34a853" />
         </svg>
-        <p class="boot-text" role="status">Getting things ready…</p>
+        <p class="boot-text" role="status" data-copy="boot.loading"></p>
       </div>
     </section>
 
@@ -78,18 +78,12 @@
           />
           <path d="m60,160 h80 v-65 l-40,35 l-40,-35" fill="#4285f4" stroke="#34a853" />
         </svg>
-        <h1>MailBoy</h1>
-        <p class="tagline">See where your mail actually lives.</p>
+        <h1 data-copy="common.appName"></h1>
+        <p class="tagline" data-copy="welcome.tagline"></p>
 
-        <button id="btn-connect" class="btn btn--primary">Connect to Mailbox</button>
+        <button id="btn-connect" class="btn btn--primary" data-copy="welcome.connect"></button>
 
-        <p class="fineprint">
-          A Google sign-in window will open so you can choose an account.
-          MailBoy reads your mailbox, and adds or removes folders when you ask
-          it to — it can never delete a message for good. It talks to Gmail
-          directly from this browser, so your mail is never sent to a server of
-          ours.
-        </p>
+        <p class="fineprint" data-copy="welcome.fineprint"></p>
 
         <div id="welcome-error" class="notice notice--error" hidden></div>
       </div>
@@ -109,7 +103,7 @@
             </svg>
           </span>
           <span class="identity-text">
-            <span class="wordmark">MailBoy</span>
+            <span class="wordmark" data-copy="common.appName"></span>
             <span id="account" class="account"></span>
           </span>
         </div>
@@ -126,12 +120,17 @@
             <svg id="stop-icon" class="stop-icon" viewBox="0 0 16 16" aria-hidden="true" hidden>
               <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
             </svg>
-            <span id="refresh-label">Refresh</span>
+            <span id="refresh-label" data-copy="topbar.refresh"></span>
           </button>
           <!-- Inline SVG rather than a Material Symbols glyph: "power" is not
                in the subsetted font, and rebuilding the subset for one
                button is not worth it. -->
-          <button id="btn-logout" class="icon-btn icon-btn--danger" aria-label="Log out" title="Log out">
+          <button
+            id="btn-logout"
+            class="icon-btn icon-btn--danger"
+            data-copy-label="topbar.logout"
+            data-copy-title="topbar.logout"
+          >
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M8 1.3V8" />
               <path d="M12.24 4.43a6 6 0 1 1-8.49 0" />
@@ -148,20 +147,21 @@
            choice back as returnValue. -->
       <dialog id="logout-dialog" class="dialog">
         <form method="dialog">
-          <h2 class="dialog-title">Log out of MailBoy?</h2>
-          <p class="dialog-text">
-            What MailBoy has measured for
-            <strong id="logout-mailbox">this mailbox</strong> stays on this
-            device for 7 days, so signing back in is immediate. After that it is
-            erased, and the next sign-in do a full scan — which can
-            take many minutes on a large mailbox.
-          </p>
+          <h2 class="dialog-title" data-copy="logout.title"></h2>
+          <p class="dialog-text" id="logout-text"></p>
           <div class="dialog-actions">
-            <button value="keep" class="btn btn--primary btn--sm">Log out</button>
-            <button value="erase" class="btn btn--ghost btn--sm dialog-danger">
-              Log out and erase data now
-            </button>
-            <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
+            <button value="keep" class="btn btn--primary btn--sm" data-copy="logout.keep"></button>
+            <button
+              value="erase"
+              class="btn btn--ghost btn--sm dialog-danger"
+              data-copy="logout.erase"
+            ></button>
+            <button
+              value="cancel"
+              class="btn btn--ghost btn--sm"
+              autofocus
+              data-copy="common.cancel"
+            ></button>
           </div>
         </form>
       </dialog>
@@ -180,21 +180,29 @@
       <dialog id="delete-dialog" class="dialog">
         <form method="dialog">
           <h2 class="dialog-title">
-            Delete <strong id="delete-name">this folder</strong>?
+            <span data-copy="deleteFolder.titleLead"></span>
+            <strong id="delete-name"></strong><span data-copy="deleteFolder.titleTail"></span>
           </h2>
           <p class="dialog-text" id="delete-text"></p>
 
           <label class="checkbox">
             <input type="checkbox" id="delete-trash" />
-            <span id="delete-trash-label">Also move the emails to Trash</span>
+            <span id="delete-trash-label"></span>
           </label>
           <p class="checkbox-hint" id="delete-hint"></p>
 
           <div class="dialog-actions">
-            <button value="delete" class="btn btn--primary btn--sm dialog-destructive">
-              Delete folder
-            </button>
-            <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
+            <button
+              value="delete"
+              class="btn btn--primary btn--sm dialog-destructive"
+              data-copy="deleteFolder.confirm"
+            ></button>
+            <button
+              value="cancel"
+              class="btn btn--ghost btn--sm"
+              autofocus
+              data-copy="common.cancel"
+            ></button>
           </div>
         </form>
       </dialog>
@@ -237,7 +245,12 @@
 
           <div class="dialog-actions">
             <button value="go" id="confirm-ok" class="btn btn--primary btn--sm"></button>
-            <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
+            <button
+              value="cancel"
+              class="btn btn--ghost btn--sm"
+              autofocus
+              data-copy="common.cancel"
+            ></button>
           </div>
         </form>
       </dialog>
@@ -256,20 +269,30 @@
            on every open, like every other rule box. -->
       <dialog id="block-dialog" class="dialog">
         <form method="dialog">
-          <h2 class="dialog-title">Block <strong id="block-who"></strong>?</h2>
+          <h2 class="dialog-title">
+            <span data-copy="block.titleLead"></span>
+            <strong id="block-who"></strong><span data-copy="block.titleTail"></span>
+          </h2>
           <p class="dialog-text" id="block-text"></p>
 
           <label class="checkbox checkbox--rule" id="block-domain-row">
             <input type="checkbox" id="block-domain" />
-            <span id="block-domain-label">Block all from the entire domain</span>
+            <span id="block-domain-label"></span>
           </label>
           <p class="checkbox-hint" id="block-hint" hidden></p>
 
           <div class="dialog-actions">
-            <button value="go" class="btn btn--primary btn--sm dialog-destructive">
-              Block
-            </button>
-            <button value="cancel" class="btn btn--ghost btn--sm" autofocus>Cancel</button>
+            <button
+              value="go"
+              class="btn btn--primary btn--sm dialog-destructive"
+              data-copy="block.confirm"
+            ></button>
+            <button
+              value="cancel"
+              class="btn btn--ghost btn--sm"
+              autofocus
+              data-copy="common.cancel"
+            ></button>
           </div>
         </form>
       </dialog>
@@ -282,7 +305,11 @@
            exist yet can be made without leaving the dialog. No bins: this is a
            place to choose a destination, not to manage folders. -->
       <dialog id="move-dialog" class="dialog">
-        <h2 class="dialog-title">Move <strong id="move-count">these emails</strong> to…</h2>
+        <h2 class="dialog-title">
+          <span data-copy="move.titleLead"></span>
+          <strong id="move-count" data-copy="move.countFallback"></strong>
+          <span data-copy="move.titleTail"></span>
+        </h2>
         <p class="dialog-text" id="move-text"></p>
         <div id="move-list" class="move-list"></div>
 
@@ -295,28 +322,35 @@
              quietly file mail nobody asked it to. -->
         <label class="checkbox checkbox--rule" id="rule-sender-row">
           <input type="checkbox" id="rule-sender" />
-          <span id="rule-sender-label">Move all future mails from this sender to this folder</span>
+          <span id="rule-sender-label"></span>
         </label>
         <!-- The wider half of the same question, so it sits directly under it.
              Ticking it ticks the sender box and disables it: a domain rule
              already covers that sender, and only the domain rule is made. -->
         <label class="checkbox checkbox--rule" id="rule-domain-row">
           <input type="checkbox" id="rule-domain" />
-          <span id="rule-domain-label">Move all future mails from this entire domain to this folder</span>
+          <span id="rule-domain-label"></span>
         </label>
         <label class="checkbox checkbox--rule" id="rule-subject-row">
           <input type="checkbox" id="rule-subject" />
-          <span id="rule-subject-label">Move all future mails with this subject to this folder</span>
+          <span id="rule-subject-label"></span>
         </label>
         <p class="checkbox-hint" id="rule-hint" hidden></p>
 
         <div class="dialog-actions">
-          <button type="button" id="btn-move-confirm" class="btn btn--primary btn--sm" disabled>
-            Move here
-          </button>
-          <button type="button" id="btn-move-cancel" class="btn btn--ghost btn--sm">
-            Cancel
-          </button>
+          <button
+            type="button"
+            id="btn-move-confirm"
+            class="btn btn--primary btn--sm"
+            disabled
+            data-copy="move.confirm"
+          ></button>
+          <button
+            type="button"
+            id="btn-move-cancel"
+            class="btn btn--ghost btn--sm"
+            data-copy="common.cancel"
+          ></button>
         </div>
       </dialog>
 
@@ -333,21 +367,16 @@
              the sections deliberately do not sum to the mailbox and any figure
              here would be a number that means nothing. -->
         <header class="detail-head detail-head--flush">
-          <h1 class="detail-name"><span>Mailbox</span></h1>
+          <h1 class="detail-name"><span data-copy="main.title"></span></h1>
         </header>
 
         <div class="content">
           <section id="notice" class="notice-card" hidden>
             <div class="notice-head">
               <span class="notice-spinner" aria-hidden="true"></span>
-              <h2 class="notice-title">Getting your mailbox ready</h2>
+              <h2 class="notice-title" data-copy="notice.title"></h2>
             </div>
-            <p class="notice-body">
-              MailBoy is fetching the latest data. Everything stays usable
-              meanwhile — numbers fill in as they arrive.
-              MailBoy fetches only the size, sender and date from your mails;
-              not the full mail content or attachments.
-            </p>
+            <p class="notice-body" data-copy="notice.body"></p>
             <div class="progress-stats">
               <span id="progress-done"></span>
               <span id="progress-left" class="progress-left"></span>
@@ -356,7 +385,7 @@
               id="progress"
               class="progress"
               role="progressbar"
-              aria-label="Reading messages"
+              data-copy-label="notice.progressLabel"
               aria-valuemin="0"
               aria-valuemax="100"
             >
@@ -375,7 +404,7 @@
            costs no Gmail calls at all. -->
       <section id="screen-detail" class="screen" hidden>
         <header class="detail-head">
-          <button id="btn-back" class="icon-btn" aria-label="Back to folders">
+          <button id="btn-back" class="icon-btn" data-copy-label="breakdown.back">
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M9.5 3.5L5 8l4.5 4.5" />
             </svg>
@@ -407,8 +436,8 @@
                 <circle cx="8" cy="8" r="5.75" />
                 <path d="M8 4.75V8l2.25 1.5" />
               </svg>
-              <span class="picker-prefix">Period:</span>
-              <span id="period-label" class="picker-value">All time</span>
+              <span class="picker-prefix" data-copy="breakdown.period"></span>
+              <span id="period-label" class="picker-value" data-copy="periods.all"></span>
             </button>
 
             <div id="period-menu" class="picker-menu" role="menu" hidden>
@@ -416,31 +445,31 @@
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                  <span>All time</span>
+                  <span data-copy="periods.all"></span>
                 </button>
                 <button class="picker-option" role="menuitemradio" data-period="y1">
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                  <span>Last 1 year</span>
+                  <span data-copy="periods.y1"></span>
                 </button>
                 <button class="picker-option" role="menuitemradio" data-period="m6">
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                  <span>Last 6 months</span>
+                  <span data-copy="periods.m6"></span>
                 </button>
                 <button class="picker-option" role="menuitemradio" data-period="m3">
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                  <span>Last 3 months</span>
+                  <span data-copy="periods.m3"></span>
                 </button>
                 <button class="picker-option" role="menuitemradio" data-period="m1">
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                  <span>Last 1 month</span>
+                  <span data-copy="periods.m1"></span>
                 </button>
             </div>
           </div>
@@ -455,8 +484,8 @@
               <svg class="picker-icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M2.5 4h11M4 8h8M6 12h4" />
               </svg>
-              <span class="picker-prefix">Sort by:</span>
-              <span id="sort-label" class="picker-value">Email count</span>
+              <span class="picker-prefix" data-copy="breakdown.sortBy"></span>
+              <span id="sort-label" class="picker-value" data-copy="sorts.count"></span>
             </button>
 
             <div id="sort-menu" class="picker-menu picker-menu--right" role="menu" hidden>
@@ -464,25 +493,25 @@
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                  <span>Email count</span>
+                  <span data-copy="sorts.count"></span>
                 </button>
                 <button class="picker-option" role="menuitemradio" data-sort="bytes">
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                  <span>Size</span>
+                  <span data-copy="sorts.bytes"></span>
                 </button>
                 <button class="picker-option" role="menuitemradio" data-sort="rate">
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                  <span>How often</span>
+                  <span data-copy="sorts.rate"></span>
                 </button>
                 <button class="picker-option" role="menuitemradio" data-sort="address">
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 8.5l3 3 6-7" />
                 </svg>
-                  <span>Sender</span>
+                  <span data-copy="sorts.address"></span>
                 </button>
             </div>
           </div>
@@ -500,14 +529,14 @@
                   <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" />
                   <path d="M2.6 2.6v2.6h2.6" />
                 </svg>
-                <span>Restore</span>
+                <span data-copy="actions.restore"></span>
               </button>
               <button id="btn-move" class="btn btn--ghost btn--move btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M2 12.6V3.9h3.7l1.2 1.6h7.1v7.1z" />
                   <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
                 </svg>
-                <span>Move</span>
+                <span data-copy="actions.move"></span>
               </button>
               <!-- The one action here that moves no mail at all: it writes a
                    rule and stops. Not danger-coloured for that reason — nothing
@@ -518,7 +547,7 @@
                   <circle cx="8" cy="8" r="5.4" />
                   <path d="M4.2 11.8L11.8 4.2" />
                 </svg>
-                <span>Block</span>
+                <span data-copy="actions.block"></span>
               </button>
               <button id="btn-trash" class="btn btn--ghost btn--xs btn--danger">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
@@ -526,7 +555,7 @@
                     d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
                   />
                 </svg>
-                <span>Delete</span>
+                <span data-copy="actions.delete"></span>
               </button>
             </div>
           </div>
@@ -537,29 +566,29 @@
             <!-- Not a .col-head: it is a control, not a sort order, and it must
                  not take the click that turns a column round. -->
             <label class="sender-tick sender-tick--head">
-              <input type="checkbox" id="select-all" aria-label="Select every sender listed" />
+              <input type="checkbox" id="select-all" data-copy-label="breakdown.selectAll" />
             </label>
             <button class="col-head" data-sort="address">
-              <span class="col-label">Sender</span>
+              <span class="col-label" data-copy="columns.sender"></span>
               <span id="sender-count" class="col-count"></span>
               <svg class="col-arrow" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 3.5v9M4.5 9L8 12.5 11.5 9" />
               </svg>
             </button>
             <button class="col-head col-num" data-sort="count">
-              <span class="col-label">Count</span>
+              <span class="col-label" data-copy="columns.count"></span>
               <svg class="col-arrow" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 3.5v9M4.5 9L8 12.5 11.5 9" />
               </svg>
             </button>
             <button class="col-head col-num" data-sort="bytes">
-              <span class="col-label">Size</span>
+              <span class="col-label" data-copy="columns.size"></span>
               <svg class="col-arrow" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 3.5v9M4.5 9L8 12.5 11.5 9" />
               </svg>
             </button>
             <button class="col-head col-num" data-sort="rate">
-              <span class="col-label">Frequency</span>
+              <span class="col-label" data-copy="columns.frequency"></span>
               <svg class="col-arrow" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 3.5v9M4.5 9L8 12.5 11.5 9" />
               </svg>
@@ -578,7 +607,7 @@
            -->
       <section id="screen-mails" class="screen" hidden>
         <header class="detail-head">
-          <button id="btn-mails-back" class="icon-btn" aria-label="Back to senders">
+          <button id="btn-mails-back" class="icon-btn" data-copy-label="mails.back">
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M9.5 3.5L5 8l4.5 4.5" />
             </svg>
@@ -606,8 +635,8 @@
                 <svg class="picker-icon" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M2.5 4h11M4 8h8M6 12h4" />
                 </svg>
-                <span class="picker-prefix">Sort by:</span>
-                <span id="mail-sort-label" class="picker-value">Date</span>
+                <span class="picker-prefix" data-copy="breakdown.sortBy"></span>
+                <span id="mail-sort-label" class="picker-value" data-copy="sorts.date"></span>
               </button>
 
               <div id="mail-sort-menu" class="picker-menu picker-menu--right" role="menu" hidden>
@@ -615,13 +644,13 @@
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                     <path d="M3.5 8.5l3 3 6-7" />
                   </svg>
-                  <span>Date</span>
+                  <span data-copy="sorts.date"></span>
                 </button>
                 <button class="picker-option" role="menuitemradio" data-mailsort="bytes">
                   <svg class="picker-tick" viewBox="0 0 16 16" aria-hidden="true">
                     <path d="M3.5 8.5l3 3 6-7" />
                   </svg>
-                  <span>Size</span>
+                  <span data-copy="sorts.bytes"></span>
                 </button>
               </div>
             </div>
@@ -635,14 +664,14 @@
                   <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" />
                   <path d="M2.6 2.6v2.6h2.6" />
                 </svg>
-                <span>Restore</span>
+                <span data-copy="actions.restore"></span>
               </button>
               <button id="btn-mail-move" class="btn btn--ghost btn--move btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M2 12.6V3.9h3.7l1.2 1.6h7.1v7.1z" />
                   <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
                 </svg>
-                <span>Move</span>
+                <span data-copy="actions.move"></span>
               </button>
               <!-- About the sender, not the ticks: blocking is a rule, and a
                    rule cannot be about ten particular messages. -->
@@ -651,7 +680,7 @@
                   <circle cx="8" cy="8" r="5.4" />
                   <path d="M4.2 11.8L11.8 4.2" />
                 </svg>
-                <span>Block</span>
+                <span data-copy="actions.block"></span>
               </button>
               <button id="btn-mail-trash" class="btn btn--ghost btn--xs btn--danger">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
@@ -659,7 +688,7 @@
                     d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
                   />
                 </svg>
-                <span>Delete</span>
+                <span data-copy="actions.delete"></span>
               </button>
             </div>
           </div>
@@ -668,23 +697,23 @@
         <main id="mails" class="senders">
           <div id="mail-head" class="mail-head">
             <label class="sender-tick sender-tick--head">
-              <input type="checkbox" id="mail-select-all" aria-label="Select every email listed" />
+              <input type="checkbox" id="mail-select-all" data-copy-label="mails.selectAll" />
             </label>
             <!-- Not a .col-head button: only Size and Date are sortable, and a
                  heading that takes a click without doing anything is worse than
                  one that plainly does not. -->
             <span class="col-head col-head--static">
-              <span class="col-label">Mail</span>
+              <span class="col-label" data-copy="columns.mail"></span>
               <span id="mail-count" class="col-count"></span>
             </span>
             <button class="col-head col-num" data-mailsort="bytes">
-              <span class="col-label">Size</span>
+              <span class="col-label" data-copy="columns.size"></span>
               <svg class="col-arrow" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 3.5v9M4.5 9L8 12.5 11.5 9" />
               </svg>
             </button>
             <button class="col-head col-num" data-mailsort="date">
-              <span class="col-label">Date</span>
+              <span class="col-label" data-copy="columns.date"></span>
               <svg class="col-arrow" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 3.5v9M4.5 9L8 12.5 11.5 9" />
               </svg>
@@ -702,7 +731,7 @@
            "delete" there could only mean permanently. -->
       <section id="screen-message" class="screen" hidden>
         <header class="detail-head">
-          <button id="btn-message-back" class="icon-btn" aria-label="Back to emails">
+          <button id="btn-message-back" class="icon-btn" data-copy-label="message.back">
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M9.5 3.5L5 8l4.5 4.5" />
             </svg>
@@ -719,21 +748,21 @@
                   <path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5" />
                   <path d="M2.6 2.6v2.6h2.6" />
                 </svg>
-                <span>Restore</span>
+                <span data-copy="actions.restore"></span>
               </button>
               <button id="btn-message-move" class="btn btn--ghost btn--move btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M2 12.6V3.9h3.7l1.2 1.6h7.1v7.1z" />
                   <path d="M6.5 9.2h4M8.8 7.5l1.9 1.7-1.9 1.7" />
                 </svg>
-                <span>Move</span>
+                <span data-copy="actions.move"></span>
               </button>
               <button id="btn-message-block" class="btn btn--ghost btn--block btn--xs">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
                   <circle cx="8" cy="8" r="5.4" />
                   <path d="M4.2 11.8L11.8 4.2" />
                 </svg>
-                <span>Block</span>
+                <span data-copy="actions.block"></span>
               </button>
               <button id="btn-message-trash" class="btn btn--ghost btn--xs btn--danger">
                 <svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
@@ -741,7 +770,7 @@
                     d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
                   />
                 </svg>
-                <span>Delete</span>
+                <span data-copy="actions.delete"></span>
               </button>
             </div>
           </div>
@@ -769,13 +798,13 @@
              only useful "back" is the mailbox. Same control as every other
              drill-down's, so it reads the same way. -->
         <header class="detail-head">
-          <button id="btn-rules-home" class="icon-btn" aria-label="Back to mailbox">
+          <button id="btn-rules-home" class="icon-btn" data-copy-label="rules.back">
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M9.5 3.5L5 8l4.5 4.5" />
             </svg>
           </button>
           <h1 class="detail-name">
-            <span>Rules</span>
+            <span data-copy="rules.tab"></span>
             <span id="rules-total" class="detail-total"></span>
             <span id="rules-spinner" class="row-spinner" hidden></span>
           </h1>
@@ -797,7 +826,7 @@
                     d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
                   />
                 </svg>
-                <span>Delete</span>
+                <span data-copy="actions.delete"></span>
               </button>
             </div>
           </div>
@@ -806,14 +835,14 @@
         <main id="rules" class="senders">
           <div id="rule-head" class="rule-head">
             <label class="sender-tick sender-tick--head">
-              <input type="checkbox" id="rules-select-all" aria-label="Select every destination listed" />
+              <input type="checkbox" id="rules-select-all" data-copy-label="rules.selectAllDestinations" />
             </label>
             <span class="col-head col-head--static">
-              <span class="col-label">Destination</span>
+              <span class="col-label" data-copy="columns.destination"></span>
               <span id="rules-count" class="col-count"></span>
             </span>
             <span class="col-head col-head--static col-num">
-              <span class="col-label">Rules</span>
+              <span class="col-label" data-copy="columns.rules"></span>
             </span>
           </div>
           <div id="rule-rows"></div>
@@ -823,7 +852,7 @@
       <!-- ── One destination's rules ─────────────────────────────── -->
       <section id="screen-rule-detail" class="screen" hidden>
         <header class="detail-head">
-          <button id="btn-rules-back" class="icon-btn" aria-label="Back to rules">
+          <button id="btn-rules-back" class="icon-btn" data-copy-label="rules.backToRules">
             <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M9.5 3.5L5 8l4.5 4.5" />
             </svg>
@@ -848,7 +877,7 @@
                     d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"
                   />
                 </svg>
-                <span>Delete</span>
+                <span data-copy="actions.delete"></span>
               </button>
             </div>
           </div>
@@ -857,10 +886,10 @@
         <main id="rule-detail" class="senders">
           <div id="rule-detail-head" class="rule-head rule-head--single">
             <label class="sender-tick sender-tick--head">
-              <input type="checkbox" id="rule-select-all" aria-label="Select every rule listed" />
+              <input type="checkbox" id="rule-select-all" data-copy-label="rules.selectAllRules" />
             </label>
             <span class="col-head col-head--static">
-              <span class="col-label">Rule</span>
+              <span class="col-label" data-copy="columns.rule"></span>
             </span>
           </div>
           <div id="rule-detail-rows"></div>
@@ -874,12 +903,12 @@
            over them, with the status line between the two. Each tab remembers
            where it was left: coming back to Home from Rules lands on the
            breakdown that was open, not back at the folder list. -->
-      <nav id="navbar" class="navbar" aria-label="Sections">
+      <nav id="navbar" class="navbar" data-copy-label="nav.sections">
         <button class="nav-btn" data-tab="home" aria-current="page">
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path d="M2.4 6.6 8 2.4l5.6 4.2v6.1a.9.9 0 0 1-.9.9H3.3a.9.9 0 0 1-.9-.9z" />
           </svg>
-          <span>Home</span>
+          <span data-copy="rules.home"></span>
         </button>
         <button class="nav-btn" data-tab="rules">
           <svg viewBox="0 0 16 16" aria-hidden="true">
@@ -887,7 +916,7 @@
             <circle cx="6" cy="4.4" r="1.5" />
             <circle cx="10.4" cy="11.6" r="1.5" />
           </svg>
-          <span>Rules</span>
+          <span data-copy="rules.tab"></span>
         </button>
       </nav>
     </div>
