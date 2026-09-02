@@ -116,15 +116,15 @@
              control in the bar. -->
         <div class="topbar-actions">
           <button id="btn-refresh" class="btn btn--primary btn--xs">
-            <span id="refresh-icon" class="icon" aria-hidden="true">refresh</span>
+            <svg id="refresh-icon" class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M12.72 9.67A5 5 0 1 1 11.54 4.47L14.11 6.89" />
+              <path d="M14.11 3.56V6.89H10.78" />
+            </svg>
             <svg id="stop-icon" class="stop-icon" viewBox="0 0 16 16" aria-hidden="true" hidden>
               <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
             </svg>
             <span id="refresh-label" data-copy="topbar.refresh"></span>
           </button>
-          <!-- Inline SVG rather than a Material Symbols glyph: "power" is not
-               in the subsetted font, and rebuilding the subset for one
-               button is not worth it. -->
           <button
             id="btn-logout"
             class="icon-btn icon-btn--danger"

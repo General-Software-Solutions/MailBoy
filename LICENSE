@@ -1,0 +1,101 @@
+MailBoy Source-Available License
+Version 1.0
+
+Copyright (c) 2026 General Software Solutions. All rights reserved.
+
+The source code of MailBoy (the "Software") is published so that anyone can
+read it, audit what it does with their mailbox, and check for themselves the
+privacy claims made in its documentation and in its Chrome Web Store listing.
+
+Publishing the source is not a grant of rights. This is NOT open-source
+software, and it is not an OSI-approved license.
+
+
+1. WHAT YOU MAY DO
+
+   At no charge, and without asking permission, you may:
+
+   a. View, read, download and keep a copy of the Software.
+
+   b. Build, load and run the Software on your own machine for your own
+      personal use — including loading it as an unpacked extension in your own
+      browser — with your own OAuth client credentials.
+
+   c. Modify your own copy for your own personal use, and for security
+      research.
+
+   d. Quote excerpts of the Software for review, commentary, teaching,
+      security research, or to report a defect or a vulnerability.
+
+
+2. WHAT YOU MAY NOT DO
+
+   Except as permitted in section 1, and without prior written permission from
+   the copyright holder, you may not:
+
+   a. Redistribute, publish, share, sell, rent, sublicense or otherwise make
+      the Software available to anyone else, in source or in compiled form,
+      whole or in part.
+
+   b. Distribute a fork, derivative work or modified version of the Software.
+
+   c. Publish the Software, or anything derived from it, to the Chrome Web
+      Store or to any other extension, application or package repository.
+
+   d. Use the name "MailBoy", or the MailBoy icon or other marks, to identify
+      any product other than the Software as published by the copyright
+      holder.
+
+   e. Remove or alter this license, the copyright notice, or any attribution
+      contained in the Software.
+
+   Forking this repository within GitHub, using GitHub's own fork feature, is
+   permitted to the extent GitHub's Terms of Service require it. That
+   permission extends no further: it does not allow publishing, distributing
+   or shipping the forked code.
+
+
+3. CONTRIBUTIONS
+
+   If you submit a contribution — a pull request, patch, or any other work —
+   for inclusion in the Software, you grant the copyright holder a perpetual,
+   worldwide, irrevocable, royalty-free, non-exclusive license to use,
+   reproduce, modify, distribute, sublicense and relicense that contribution
+   as part of the Software, under this or any other terms. You confirm that
+   you are legally entitled to grant this, and that the contribution is your
+   own work.
+
+
+4. NO WARRANTY, AND NO LIABILITY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
+   OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+   MailBoy acts on your Gmail account on your instruction, in bulk. You are
+   responsible for the actions you ask it to take.
+
+
+5. OTHER TERMS
+
+   a. This license grants no right in the trademarks, service marks or logos
+      of the copyright holder, beyond the attribution required by section
+      2(e).
+
+   b. If any provision of this license is held unenforceable, the rest of it
+      stays in effect.
+
+   c. The copyright holder may release future versions of the Software under
+      different terms. Doing so does not change the terms that apply to a copy
+      you already hold.
+
+
+For any permission beyond this license, contact
+generalsoftwaresolutionspvt@gmail.com.
+
+MailBoy is an independent project. It is not affiliated with, endorsed by, or
+sponsored by Google LLC. Gmail is a trademark of Google LLC.

@@ -585,8 +585,9 @@ function skeleton() {
   return Object.assign(document.createElement('span'), { className: 'skeleton' });
 }
 
-// Material Symbols is bundled as a subset, so a new glyph would mean rebuilding
-// it. One-offs are inline SVG instead — see README.
+// Every glyph in the panel is inline SVG in a 16-unit viewBox — there is no
+// icon font, deliberately (see sidepanel.css "Icons"). Stroke weight comes from
+// the class the path is mounted under, never from the path itself.
 const ICON_ADD = '<path d="M8 3.5v9M3.5 8h9" />';
 const ICON_BIN =
   '<path d="M3 4.4h10M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4" />';
@@ -596,6 +597,13 @@ const ICON_CLOSE = '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />';
 const ICON_BLOCK = '<circle cx="8" cy="8" r="5.4" /><path d="M4.2 11.8L11.8 4.2" />';
 // Marks a nested folder row, sitting where the dot does on a top-level one.
 const ICON_SUBFOLDER = '<path d="M6 3.5l5 4.5-5 4.5" />';
+// The arc flares tangentially into the arrowhead's corner rather than stopping
+// on the circle: an L-corner sitting directly on the arc reads as a stub, not
+// as an arrow. Same glyph as the top bar's refresh button (sidepanel.html).
+const ICON_REFRESH =
+  '<path d="M12.72 9.67A5 5 0 1 1 11.54 4.47L14.11 6.89" /><path d="M14.11 3.56V6.89H10.78" />';
+// The same power glyph the top bar's Log out carries, for the same action.
+const ICON_LOGOUT = '<path d="M8 1.3V8" /><path d="M12.24 4.43a6 6 0 1 1-8.49 0" />';
 
 /**
  * The Block glyph, sized to sit inline in "(⊘ Blocked mails)".
@@ -4811,17 +4819,21 @@ function technicalDetail(err) {
 }
 
 /**
- * Button with a Material Symbols glyph and a label, returned as parts so the
- * label can change without wiping the icon.
+ * Button with a glyph and a label, returned as parts so the label can change
+ * without wiping the icon.
+ *
+ * @param {string} glyph One of the ICON_* path constants.
  */
 function iconButton(className, glyph, label) {
   const el = document.createElement('button');
   el.className = className;
 
-  const icon = document.createElement('span');
-  icon.className = 'icon';
+  // innerHTML over a module constant, never over anything from the API.
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.setAttribute('class', 'btn-glyph');
+  icon.setAttribute('viewBox', '0 0 16 16');
   icon.setAttribute('aria-hidden', 'true');
-  icon.textContent = glyph;
+  icon.innerHTML = glyph;
 
   const text = document.createElement('span');
   text.textContent = label;
@@ -4845,8 +4857,8 @@ function renderErrorState(err) {
   text.className = 'state-body';
   text.textContent = body;
 
-  const retry = iconButton('btn btn--primary btn--sm', 'refresh', COPY.errors.retry);
-  const signOut = iconButton('btn btn--ghost btn--sm', 'logout', COPY.errors.logout);
+  const retry = iconButton('btn btn--primary btn--sm', ICON_REFRESH, COPY.errors.retry);
+  const signOut = iconButton('btn btn--ghost btn--sm', ICON_LOGOUT, COPY.errors.logout);
 
   signOut.el.addEventListener('click', () => handleLogout());
 
@@ -4854,7 +4866,7 @@ function renderErrorState(err) {
     retry.el.disabled = true;
     signOut.el.disabled = true;
     retry.label.textContent = COPY.errors.retrying;
-    retry.icon.classList.add('icon--spin');
+    retry.icon.classList.add('btn-glyph--spin');
 
     // A repeat failure re-renders an identical state, so without a floor on
     // the pending state the click looks like it did nothing at all.
@@ -4865,7 +4877,7 @@ function renderErrorState(err) {
       retry.el.disabled = false;
       signOut.el.disabled = false;
       retry.label.textContent = COPY.errors.retry;
-      retry.icon.classList.remove('icon--spin');
+      retry.icon.classList.remove('btn-glyph--spin');
     }
   });
 

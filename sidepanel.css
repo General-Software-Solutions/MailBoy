@@ -1,35 +1,15 @@
-/* ── Icon font ───────────────────────────────────────────────── */
-/* Material Symbols, subsetted to the glyphs MailBoy uses and bundled locally.
-   MV3 extensions should not depend on remote resources, and the subset is
-   2.6 KB against ~4 MB for the full family. Adding a new icon means
-   re-downloading the subset — see README. */
-@font-face {
-  font-family: 'Material Symbols Outlined';
-  font-style: normal;
-  font-weight: 400;
-  font-display: block;
-  src: url('resources/fonts/material-symbols-outlined.woff2') format('woff2');
-}
+/* ── Icons ───────────────────────────────────────────────────── */
+/* There is no icon font. Every glyph is inline SVG in a 16-unit viewBox,
+   stroked with currentColor — see .btn-glyph, .icon-btn svg and the ICON_*
+   constants in sidepanel.js.
 
-.icon {
-  flex: 0 0 auto;
-  font-family: 'Material Symbols Outlined';
-  font-weight: 400;
-  font-style: normal;
-  font-size: 16px;
-  line-height: 1;
-  letter-spacing: normal;
-  text-transform: none;
-  white-space: nowrap;
-  word-wrap: normal;
-  direction: ltr;
-  font-feature-settings: 'liga';
-  -webkit-font-feature-settings: 'liga';
-  -webkit-font-smoothing: antialiased;
-  user-select: none;
-}
+   Material Symbols was bundled and subsetted here until it came down to three
+   glyphs (two of them the same arrow), at which point drawing them cost less
+   than the 2.6 KB subset, the rebuild step every new icon needed, and the
+   Apache-2.0 attribution it carried — it was the only third-party asset in the
+   package. Keep it that way: a one-off glyph is cheaper drawn than depended on. */
 
-.icon--spin {
+.btn-glyph--spin {
   animation: spin 0.85s linear infinite;
 }
 
@@ -382,10 +362,6 @@ body {
   font-size: 12px;
   font-weight: 550;
   border-radius: 7px;
-}
-
-.btn--xs .icon {
-  font-size: 15px;
 }
 
 /* ── Top bar ─────────────────────────────────────────────────── */
@@ -1075,8 +1051,8 @@ body {
   color: #fff;
 }
 
-/* Inline SVG rather than a Material Symbols glyph: the icon font is bundled as
-   a subset, so a new glyph means rebuilding it. */
+/* The house glyph: a 16-unit viewBox stroked with currentColor, so an intent
+   button's hue reaches its icon without a rule of its own (decision 25). */
 .btn-glyph {
   flex: 0 0 auto;
   width: 14px;
@@ -2127,14 +2103,20 @@ body {
 }
 
 /* ── Footer and tabs ─────────────────────────────────────────── */
-/* Not a Material Symbols glyph: the font is subsetted to the icons in use, so
-   a one-off square is cheaper drawn than re-subsetted. */
-/* Qualified so it outranks `.icon-btn svg`, which paints strokes rather than
-   fills — the refresh button holds both this and a Material Symbols glyph. */
+/* The refresh button swaps these two through one slot, so they are sized
+   together — a step between them would read as the button resizing. 15px
+   rather than .btn-glyph's 14: this is the one glyph that carries a label in
+   the top bar, and it holds the bar's height on its own. */
+#refresh-icon,
 svg.stop-icon {
   flex: 0 0 auto;
   width: 15px;
   height: 15px;
+}
+
+/* Qualified so it outranks `.btn-glyph`, which paints strokes rather than
+   fills — the refresh button holds one of each. */
+svg.stop-icon {
   fill: currentColor;
   stroke: none;
 }

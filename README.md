@@ -258,33 +258,28 @@ an action settled locally. Filter the console by `open`, `sync`, `listing`,
 
 ### Icons
 
-Inline glyphs come from Material Symbols, bundled at
-`resources/fonts/material-symbols-outlined.woff2` rather than loaded from a CDN
-— MV3 extensions should not depend on remote resources. The file is **subsetted
-to the glyphs actually used** (2.6 KB against roughly 4 MB for the full family),
-so a glyph outside the subset renders as its literal name. Currently bundled:
+**There is no icon font.** Every glyph is inline SVG drawn in a 16-unit
+`viewBox` and stroked with `currentColor`, so a button's intent colour reaches
+its icon without a rule of its own. In markup:
 
-```
-logout, refresh, inbox, label, star, delete,
-send, draft, report, schedule, search, settings
-```
-
-To add one, re-download the subset with the new name appended to `icon_names`,
-keeping the existing entries:
-
-```powershell
-$ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-      '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
-$url = 'https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined' +
-       ':opsz,wght,FILL,GRAD@24,400,0,0&icon_names=logout,refresh,inbox,label'
-$css = (Invoke-WebRequest $url -UserAgent $ua -UseBasicParsing).Content
-$font = [regex]::Match($css, 'url\((https://[^)]+)\)').Groups[1].Value
-Invoke-WebRequest $font -UserAgent $ua -UseBasicParsing `
-  -OutFile resources\fonts\material-symbols-outlined.woff2
+```html
+<svg class="btn-glyph" viewBox="0 0 16 16" aria-hidden="true">
+  <path d="M8 3.5v9M3.5 8h9" />
+</svg>
 ```
 
-Use them as `<span class="icon" aria-hidden="true">logout</span>`; the ligature
-turns the name into the glyph.
+In JavaScript, the path lives in an `ICON_*` constant in `sidepanel.js` and is
+mounted by `actionButton()` or `iconButton()`. Stroke weight comes from the
+class — `.btn-glyph`, `.icon-btn svg`, `.row-action svg` — never from the path,
+so weight stays consistent across sizes. Optical weight is
+`stroke-width ÷ viewBox units`, not `÷ rendered size`: a 9px and an 18px glyph
+from the same 16-unit box at the same stroke are the same weight.
+
+Material Symbols was bundled and subsetted here until it came down to three
+glyphs, two of them the same arrow. Drawing them removed a 2.6 KB binary, the
+re-subsetting step that every new icon needed, and the only third-party asset in
+the package — along with the Apache-2.0 attribution it carried. Adding a glyph
+now means drawing one, not rebuilding a font.
 
 The toolbar icon (`resources/icons/icon{16,32,48,128}.png`) is rasterized from
 `resources/icon-candidates/icon1.svg`, the same mark used on the welcome screen.
@@ -301,3 +296,28 @@ unrecoverable — everything it removes goes to Trash — but the destructive pa
 are not yet proven, so treat them with that in mind.
 
 Chrome 114 or newer.
+
+## Security
+
+Found something? See [SECURITY.md](SECURITY.md). Please report privately rather
+than opening a public issue.
+
+## License
+
+Copyright © 2026 General Software Solutions. All rights reserved.
+
+**Source-available, not open source.** The code is published so that anyone
+using MailBoy can read exactly what it does with their mailbox and check the
+privacy claims above for themselves — an extension holding a Gmail grant should
+not have to be taken on trust.
+
+You may read it, build it, and run your own copy for personal use. You may not
+redistribute it, fork it into a separate product, or publish it to the Chrome
+Web Store. See [LICENSE](LICENSE) for the exact terms, which is also where to
+look before opening a pull request.
+
+MailBoy bundles no third-party code, fonts or assets — every glyph is drawn in
+this repository — so there is nothing else here under anyone else's terms.
+
+MailBoy is an independent project. It is not affiliated with, endorsed by, or
+sponsored by Google LLC. Gmail is a trademark of Google LLC.

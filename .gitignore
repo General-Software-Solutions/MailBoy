@@ -1,2 +1,22 @@
+# Bound to one specific OAuth client and one extension ID. Reusing another
+# deployment's pair routes sign-ins through that project — see README.
 src/config.js
 manifest.json
+
+# Packaged builds. A .zip or .crx here would carry the real manifest "key" and
+# client ID straight back into the repo the two lines above keep them out of.
+*.zip
+*.crx
+*.pem
+
+# Working notes for AI coding assistants. Untracked today; delete this line if
+# you decide to publish them.
+CLAUDE.md
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+node_modules/
