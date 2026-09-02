@@ -1403,15 +1403,26 @@ body {
 }
 
 /* The tick is the only part of a row that toggles — the row itself opens what
-   is behind it — so the label stretches over the whole track, top to bottom.
-   That turns a 15px box into an 18px-by-row-height target, which is what makes
-   picking senders in a list this dense workable at all. */
+   is behind it — so the label claims every pixel between the panel edge and the
+   text beside it, top to bottom. A 15px box is a small thing to hit in a list
+   this dense, and the space either side of it belongs to nothing else: the
+   row's own left padding on one side, the grid gap on the other.
+
+   Negative margins matched by equal padding are what reach them. The content
+   box stays exactly --col-tick wide, so the box still centres in its track and
+   the columns behind the heading are untouched — only the target grows, from
+   18px to --pad-x + --col-tick + --col-gap. It cannot overlap the next column,
+   because the gap is where it stops. */
 .sender-tick {
   display: flex;
   align-self: stretch;
   align-items: center;
   justify-content: center;
   min-width: 0;
+  margin-left: calc(-1 * var(--pad-x));
+  padding-left: var(--pad-x);
+  margin-right: calc(-1 * var(--col-gap));
+  padding-right: var(--col-gap);
   cursor: pointer;
 }
 
