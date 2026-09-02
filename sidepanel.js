@@ -10,10 +10,13 @@ import {
 import {
   AuthCancelled,
   AuthError,
+  capabilities,
   getToken,
   logout,
   rememberAccount,
+  requestScopes,
 } from './src/auth.js';
+import { CAPABILITIES } from './src/config.js';
 import { bulkJobKey, readBulkJob } from './src/bulk.js';
 import {
   MAX_NAME,
@@ -24,6 +27,7 @@ import {
 } from './src/folders.js';
 import {
   GmailError,
+  ScopeError,
   fetchMessageHeaders,
   getMessage,
   getProfile,
@@ -145,6 +149,9 @@ const el = {
   block: document.getElementById('btn-block'),
   trash: document.getElementById('btn-trash'),
   restore: document.getElementById('btn-restore'),
+  permissionDialog: document.getElementById('permission-dialog'),
+  permissionTitle: document.getElementById('permission-title'),
+  permissionText: document.getElementById('permission-text'),
   confirmDialog: document.getElementById('confirm-dialog'),
   confirmVerb: document.getElementById('confirm-verb'),
   confirmCount: document.getElementById('confirm-count'),
@@ -263,6 +270,149 @@ let stopSignal = null;
  *  the details someone just opened to read. */
 let detailsOpen = false;
 
+// ── Permissions ──────────────────────────────────────────────────
+
+/**
+ * What this grant reaches, as `{ read, write, rules }`.
+ *
+ * Google's consent screen lets each Gmail permission be unticked on its own, so
+ * a sign-in can come back partial — and that is a supported way to use MailBoy
+ * rather than a failure. The panel shows what the grant allows, marks what it
+ * does not, and asks again at the moment somebody reaches for one of those.
+ *
+ * Mirrored in memory rather than read per click: `paintCapabilities` runs on
+ * every render path and a storage read there would be a promise in the middle of
+ * a paint. `refreshCapabilities` is the only writer, and every path that can
+ * change a grant goes through it.
+ */
+let caps = { read: false, write: false, rules: false };
+
+async function refreshCapabilities() {
+  caps = await capabilities();
+  trace('auth', 'capabilities', { ...caps });
+  paintCapabilities();
+  return caps;
+}
+
+/**
+ * The controls that act on something the grant may not cover.
+ *
+ * Read as functions because `el` is built before this runs, and re-read on every
+ * paint because these are the same nodes throughout — the rows underneath them
+ * are rebuilt constantly, the tools rows are not.
+ *
+ * Block sits under `rules`, not `write`: it moves no mail at all and its whole
+ * effect is one filter.
+ */
+const GATED = {
+  write: () => [
+    el.move,
+    el.trash,
+    el.restore,
+    el.mailMove,
+    el.mailTrash,
+    el.mailRestore,
+    el.messageMove,
+    el.messageTrash,
+    el.messageRestore,
+  ],
+  rules: () => [el.block, el.mailBlock, el.messageBlock, el.rulesDelete, el.ruleDelete],
+};
+
+/**
+ * Mark what cannot be done yet, without taking it away.
+ *
+ * Deliberately not `disabled`: a control that does nothing and says nothing is
+ * how a permission somebody declined by accident stays declined forever. These
+ * stay pressable and the press is what asks — which is also why the marking is
+ * a class and a title rather than a rewritten label.
+ */
+function paintCapabilities() {
+  for (const [cap, nodes] of Object.entries(GATED)) {
+    for (const node of nodes()) {
+      node.classList.toggle('needs-perm', !caps[cap]);
+      if (caps[cap]) node.removeAttribute('title');
+      else node.title = COPY.permission.needed;
+    }
+  }
+
+  // The folder row's + and bin are rebuilt on every render, so they are marked
+  // from one class on the shell rather than one node at a time.
+  el.app.classList.toggle('app--no-write', !caps.write);
+
+  const rulesTab = el.navbar.querySelector('.nav-btn[data-tab="rules"]');
+  if (!rulesTab) return;
+  rulesTab.classList.toggle('needs-perm', !caps.rules);
+  if (caps.rules) rulesTab.removeAttribute('title');
+  else rulesTab.title = COPY.permission.needed;
+}
+
+/** @returns {Promise<boolean>} whether the user chose to be asked by Google. */
+function confirmPermission(cap) {
+  if (el.permissionDialog.open) return Promise.resolve(false);
+
+  const words = COPY.permission[cap];
+  el.permissionTitle.textContent = words.title;
+  el.permissionText.textContent = words.text;
+  // Escape leaves the previous choice in place, which a second open would then
+  // read as a yes. Same reasoning as the logout dialog.
+  el.permissionDialog.returnValue = '';
+
+  return new Promise((resolve) => {
+    el.permissionDialog.addEventListener(
+      'close',
+      () => resolve(el.permissionDialog.returnValue === 'go'),
+      { once: true }
+    );
+    el.permissionDialog.showModal();
+  });
+}
+
+/**
+ * The gate every action that needs a permission goes through.
+ *
+ * Explains first, then hands over to Google — an OAuth window opening straight
+ * off a button press is alarming, and the dialog is the only chance to say what
+ * the permission is for in MailBoy's own words rather than Google's.
+ *
+ * Only ever asks for the one scope the capability needs. Re-requesting the whole
+ * list would put the permissions somebody has already declined back in front of
+ * them every time they press anything.
+ *
+ * @param {'read' | 'write' | 'rules'} cap
+ * @returns {Promise<boolean>} whether the action may now go ahead
+ */
+async function requireCapability(cap) {
+  if (caps[cap]) return true;
+  if (!(await confirmPermission(cap))) return false;
+
+  try {
+    caps = await requestScopes([CAPABILITIES[cap].ask]);
+  } catch (err) {
+    // Closing Google's window is a choice, not a failure worth shouting about.
+    if (!(err instanceof AuthCancelled)) {
+      console.error('[MailBoy] could not request permission:', err);
+      flash(COPY.permission.failed, 'error');
+    }
+    return false;
+  } finally {
+    paintCapabilities();
+  }
+
+  // Google's screen offers the same checkbox again, so "granted" is not the
+  // only way back from it.
+  if (!caps[cap]) {
+    flash(COPY.permission.declined, 'error');
+    return false;
+  }
+
+  flash(COPY.permission.granted);
+  // Whatever the newly permitted thing was is the caller's to get on with — this
+  // reports, it does not act, or the screens that ask before they load would run
+  // their load twice.
+  return true;
+}
+
 // ── Screens ──────────────────────────────────────────────────────
 
 function showWelcome(message) {
@@ -358,7 +508,14 @@ function showTab(tab) {
     showScreen(rootedScreen(lastScreen[tab]));
   }
 
-  if (tab === 'rules') void loadRules();
+  // Nothing on the Rules screen can be read without the settings permission, so
+  // the tab is where it is asked for. The screen is shown either way — a tab
+  // that refuses to open says less than one that explains itself — which is what
+  // the render before the ask is for: a declined ask leaves that note standing.
+  if (tab === 'rules') {
+    renderRules();
+    void requireCapability('rules').then((ok) => ok && loadRules());
+  }
 }
 
 /**
@@ -613,6 +770,48 @@ function renderSkeleton(groups) {
   // list is a reason to redraw them — most visibly on the first load, where the
   // Rules tab can be reached before there are any names to draw with.
   if (!el.rulesScreen.hidden || !el.ruleDetailScreen.hidden) renderRules();
+}
+
+/**
+ * The whole of Home when the mailbox may not be read.
+ *
+ * Every other permission is marked on a control that is still there to press;
+ * this one has no controls to mark, because without it there are no folders,
+ * no counts and no rows — so it takes the screen and carries its own button.
+ *
+ * `currentGroups` is deliberately left alone. Anything cached from an earlier,
+ * wider grant is still a true account of the folder list, and the Rules screen
+ * names its destinations from it.
+ */
+function renderNeedsRead() {
+  const card = document.createElement('section');
+  card.className = 'permission-card';
+
+  const title = document.createElement('h2');
+  title.className = 'permission-card-title';
+  title.textContent = COPY.permission.read.title;
+
+  const text = document.createElement('p');
+  text.className = 'permission-card-text';
+  text.textContent = COPY.permission.read.text;
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'btn btn--primary btn--sm';
+  button.textContent = COPY.permission.read.action;
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      if (await requireCapability('read')) await load({ force: true });
+    } finally {
+      // Only matters where the ask was declined — a grant replaces this card
+      // with the folder list.
+      button.disabled = false;
+    }
+  });
+
+  card.append(title, text, button);
+  el.groups.replaceChildren(card);
 }
 
 /**
@@ -2035,6 +2234,9 @@ async function saveSnapshot() {
 
 /** Short enough for the status line or the editor, with the detail in the log. */
 function describeWriteError(err) {
+  // Before the AuthError branch it is a subclass of: reconnecting fixes a stale
+  // token and does nothing at all for a permission that was never granted.
+  if (err instanceof ScopeError) return COPY.writeErrors.missing;
   if (err instanceof AuthError) return COPY.writeErrors.expired;
 
   if (err instanceof GmailError) {
@@ -3186,8 +3388,13 @@ const senderWas = new WeakMap();
  *   in the sentence — a quoted folder name, or `Trash`
  */
 function paintRuleBoxes(boxes, material, copy) {
-  const senders = material?.senders ?? [];
-  const subject = material?.subject ?? null;
+  // Without permission to make rules there is no honest version of these: they
+  // are an extra offered alongside a move or a delete, and interrupting that
+  // action with a second permission dialog for something nobody came here for
+  // is worse than not offering it. The Rules tab is where the permission is
+  // asked for, and it is where the boxes come back from.
+  const senders = caps.rules ? (material?.senders ?? []) : [];
+  const subject = caps.rules ? (material?.subject ?? null) : null;
   const domains = domainsIn(senders);
 
   boxes.senderRow().hidden = senders.length === 0;
@@ -4103,6 +4310,9 @@ function ruleTick(checked, label) {
  * rather than collapsing to one sentence that describes the wrong half.
  */
 function ruleNote() {
+  // Ahead of the error, because a declined permission is not a fault and there
+  // is nothing to try again in a moment.
+  if (!caps.rules) return COPY.rules.needsPermission;
   if (rulesError) return COPY.rules.readFailed;
   if (!rulesLoaded) return COPY.rules.readingRules;
   return COPY.rules.noneAtAll;
@@ -4120,10 +4330,20 @@ function renderRuleGroups() {
   // Before the folder list exists every destination would render as a folder
   // that no longer exists, which is a much more alarming thing to say than
   // "still reading". The load calls back in through renderSkeleton.
-  if (!currentGroups) {
+  //
+  // Not where the rules permission is missing, though: there are no rules to
+  // name, and announcing a read of the folder list would describe a wait that is
+  // not happening. That case falls through to `ruleNote`, which says so.
+  //
+  // A grant covering rules but not mail is the other way round — every rule is
+  // readable and none of them is nameable, and no wait will fix it, so it says
+  // that instead of promising a list that is not coming.
+  if (caps.rules && !currentGroups) {
     listedGroups = [];
     el.rulesHead.hidden = true;
-    el.ruleRows.replaceChildren(emptyNote(COPY.rules.readingFolders));
+    el.ruleRows.replaceChildren(
+      emptyNote(caps.read ? COPY.rules.readingFolders : COPY.rules.needsFolders)
+    );
     paintRuleSelection();
     return;
   }
@@ -4518,6 +4738,11 @@ function deletePickedRules() {
  */
 async function rulesForFolders(labelIds) {
   const wanted = new Set(labelIds);
+  // Without permission to read filters there are none of MailBoy's to tidy up
+  // after — nothing could have made one. Skipping the call keeps the delete off
+  // a 403 it would only swallow anyway.
+  if (!caps.rules) return [];
+
   try {
     const { rules: found } = await listRules();
     rules = found;
@@ -4896,6 +5121,17 @@ async function writeSnapshot(generatedAt, groups, counts, when) {
 async function load({ force = false } = {}) {
   if (loading) return;
 
+  // Not an error and not a retry: the mailbox is unreadable because somebody
+  // said so on the consent screen, and the only way forward is to ask again.
+  // Every path below this reads Gmail, so the gate is here rather than at each
+  // of them.
+  if (!caps.read) {
+    trace('open', 'no permission to read the mailbox');
+    setBusy(false);
+    renderNeedsRead();
+    return;
+  }
+
   trace('open', force ? 'asked for a full listing' : 'deciding how to catch up');
 
   // Before either path, and it blocks both. See `jobOutstanding`.
@@ -5134,6 +5370,9 @@ el.connect.addEventListener('click', async () => {
 
   try {
     await getToken({ interactive: true });
+    // Before anything is drawn: the grant may be partial, and every screen from
+    // here is painted against what it allows.
+    await refreshCapabilities();
     showMain();
     // Header first, so it is populated even if the mailbox load fails — and
     // because identity is what names the account whose cache the next two
@@ -5277,6 +5516,17 @@ addEventListener('pagehide', () => {
 });
 
 /**
+ * The + that stands where a pressed one stood, after a render replaced it.
+ *
+ * There is only ever one heading +, so a press with no row behind it can only
+ * have been that one.
+ */
+function liveAddButton(labelId) {
+  const within = labelId ? `.row[data-label-id="${CSS.escape(labelId)}"]` : '.group-head';
+  return el.groups.querySelector(`${within} .row-action[data-action="add"]`);
+}
+
+/**
  * The + on a row nests inside it; the + on the heading makes a top-level
  * folder. Either way the editor opens where the folder will appear.
  */
@@ -5302,11 +5552,33 @@ el.groups.addEventListener('click', (event) => {
   const action = event.target.closest('.row-action');
   if (action) {
     event.stopPropagation();
-    if (action.dataset.action === 'add') handleAdd(action);
-    else if (action.dataset.action === 'delete') {
-      void confirmDelete(action.closest('.row')?.dataset.labelId);
-    }
+
     // 'cancel' belongs to the editor and is wired where it is built.
+    const kind = action.dataset.action;
+    const labelId = action.closest('.row')?.dataset.labelId;
+
+    // Both change the mailbox, so both are gated — but only the ungranted path
+    // pays for it. With the permission in hand this stays synchronous, which is
+    // what it has always been and what keeps the editor opening on the node that
+    // was actually pressed.
+    if (caps.write) {
+      if (kind === 'add') handleAdd(action);
+      else if (kind === 'delete') void confirmDelete(labelId);
+      return;
+    }
+
+    void requireCapability('write').then((ok) => {
+      if (!ok) return;
+      if (kind === 'delete') {
+        void confirmDelete(labelId);
+        return;
+      }
+      // A dialog and a round trip to Google are seconds, and the list is rebuilt
+      // whenever sizes land — so the + that was pressed may be out of the
+      // document. Opening the editor into a detached row would put it nowhere.
+      const live = liveAddButton(labelId);
+      if (live) handleAdd(live);
+    });
     return;
   }
 
@@ -5380,13 +5652,25 @@ el.selectAll.addEventListener('change', () => {
   syncSelection();
 });
 
-el.trash.addEventListener('click', () => void startTrash(resolveSelection()));
-el.restore.addEventListener('click', () => void startRestore(resolveSelection()));
-el.move.addEventListener('click', () => startMove(resolveSelection()));
+// Every one of these is gated on a permission the grant may not carry, and the
+// gate is what asks for it. `resolveSelection` is read *after* the gate rather
+// than passed into it: the dialog and Google's window are seconds during which a
+// measuring pass keeps adding to these senders.
+el.trash.addEventListener('click', async () => {
+  if (await requireCapability('write')) void startTrash(resolveSelection());
+});
+el.restore.addEventListener('click', async () => {
+  if (await requireCapability('write')) void startRestore(resolveSelection());
+});
+el.move.addEventListener('click', async () => {
+  if (await requireCapability('write')) startMove(resolveSelection());
+});
 // No `resolveSelection` and no `canAct`: a block moves no mail, so there is
 // nothing to resolve to ids and no reason a running job should hold it up —
 // filters are a different Gmail surface with its own quota.
-el.block.addEventListener('click', () => void startBlock(blockFromSelection()));
+el.block.addEventListener('click', async () => {
+  if (await requireCapability('rules')) void startBlock(blockFromSelection());
+});
 el.moveConfirm.addEventListener('click', confirmMove);
 el.moveCancel.addEventListener('click', closeMoveDialog);
 
@@ -5458,10 +5742,18 @@ el.mailHead.addEventListener('click', (event) => {
   setMailSort(key, key === mailSortKey ? (mailSortDir === 'asc' ? 'desc' : 'asc') : undefined);
 });
 
-el.mailTrash.addEventListener('click', () => void startTrash(resolveMailSelection()));
-el.mailRestore.addEventListener('click', () => void startRestore(resolveMailSelection()));
-el.mailMove.addEventListener('click', () => startMove(resolveMailSelection()));
-el.mailBlock.addEventListener('click', () => void startBlock(blockOpenSender()));
+el.mailTrash.addEventListener('click', async () => {
+  if (await requireCapability('write')) void startTrash(resolveMailSelection());
+});
+el.mailRestore.addEventListener('click', async () => {
+  if (await requireCapability('write')) void startRestore(resolveMailSelection());
+});
+el.mailMove.addEventListener('click', async () => {
+  if (await requireCapability('write')) startMove(resolveMailSelection());
+});
+el.mailBlock.addEventListener('click', async () => {
+  if (await requireCapability('rules')) void startBlock(blockOpenSender());
+});
 
 // ── Rules ────────────────────────────────────────────────────────
 
@@ -5530,8 +5822,15 @@ el.ruleSelectAll.addEventListener('change', () => {
   syncRuleRows(el.ruleDetailRows, '.rule', 'rule', selectedRules);
 });
 
-el.rulesDelete.addEventListener('click', deletePickedGroups);
-el.ruleDelete.addEventListener('click', deletePickedRules);
+// Gated for completeness rather than because it can be reached without the
+// permission: nothing is listed to tick without it. Cheap, and it means the
+// screen has no button that silently does nothing.
+el.rulesDelete.addEventListener('click', async () => {
+  if (await requireCapability('rules')) void deletePickedGroups();
+});
+el.ruleDelete.addEventListener('click', async () => {
+  if (await requireCapability('rules')) void deletePickedRules();
+});
 
 // The hint appears only once something is ticked, in whichever dialog is up.
 // The wording is already right — only the hint has to react, and the sender box
@@ -5557,10 +5856,18 @@ for (const box of [el.trashRuleSender, el.trashRuleDomain, el.trashRuleSubject])
 
 el.messageBack.addEventListener('click', closeMessage);
 
-el.messageTrash.addEventListener('click', () => void startTrash(resolveOpenMessage()));
-el.messageRestore.addEventListener('click', () => void startRestore(resolveOpenMessage()));
-el.messageMove.addEventListener('click', () => startMove(resolveOpenMessage()));
-el.messageBlock.addEventListener('click', () => void startBlock(blockOpenSender()));
+el.messageTrash.addEventListener('click', async () => {
+  if (await requireCapability('write')) void startTrash(resolveOpenMessage());
+});
+el.messageRestore.addEventListener('click', async () => {
+  if (await requireCapability('write')) void startRestore(resolveOpenMessage());
+});
+el.messageMove.addEventListener('click', async () => {
+  if (await requireCapability('write')) startMove(resolveOpenMessage());
+});
+el.messageBlock.addEventListener('click', async () => {
+  if (await requireCapability('rules')) void startBlock(blockOpenSender());
+});
 
 // The hint appears only once the box is ticked, and the count it carries is the
 // box's doing.
@@ -5624,6 +5931,7 @@ document.addEventListener('keydown', (event) => {
   // close the breakdown standing behind it.
   if (
     el.logoutDialog.open ||
+    el.permissionDialog.open ||
     el.deleteDialog.open ||
     el.confirmDialog.open ||
     el.blockDialog.open ||
@@ -5674,6 +5982,11 @@ document.addEventListener('keydown', (event) => {
     showWelcome(null);
     return;
   }
+
+  // A local read, and everything below is painted against it — including
+  // `load`, which shows the permission card instead of reading a mailbox it is
+  // not allowed to.
+  await refreshCapabilities();
 
   await painting;
   showMain();

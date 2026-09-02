@@ -36,6 +36,17 @@ export class GmailError extends Error {
   }
 }
 
+/**
+ * The token is fine; it simply does not carry the permission this call needs.
+ *
+ * An `AuthError` subclass so everything that already treats one as "reconnect
+ * and this may work" keeps behaving — but the panel can tell the two apart and
+ * offer the permission itself rather than sending someone back through a full
+ * sign-in for a scope they turned down on the consent screen. This is the
+ * backstop: the UI gates on `capabilities()` before it gets here.
+ */
+export class ScopeError extends AuthError {}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -128,15 +139,16 @@ async function request(
       return backoffRetry(endpoint, params, { units, attempt, method, body });
     }
 
+    // A permission that was never granted, as opposed to a token that has gone
+    // stale: reconnecting fixes the second and does nothing for the first.
+    if (reason === 'insufficientPermissions' || reason === 'ACCESS_TOKEN_SCOPE_INSUFFICIENT') {
+      throw new ScopeError(message);
+    }
+
     // Only a token problem is worth sending the user back to sign in. A
     // disabled API or a project misconfiguration returns 403 too, and telling
     // someone to reconnect for those loops forever.
-    const tokenProblem =
-      res.status === 401 ||
-      reason === 'insufficientPermissions' ||
-      reason === 'ACCESS_TOKEN_SCOPE_INSUFFICIENT';
-
-    throw tokenProblem
+    throw res.status === 401
       ? new AuthError(message)
       : new GmailError(message, { status: res.status, reason });
   }

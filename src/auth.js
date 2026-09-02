@@ -11,7 +11,7 @@
 // browser. The cost is a ~1 hour token and no refresh token; renewal happens
 // silently via prompt=none while the user has a live Google session.
 
-import { CLIENT_ID, SCOPES } from './config.js';
+import { CAPABILITIES, CLIENT_ID, REQUIRED_SCOPES, SCOPES } from './config.js';
 import { trace } from './trace.js';
 
 const AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -19,6 +19,18 @@ const REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke';
 
 const TOKEN_KEY = 'token';
 const HINT_KEY = 'accountHint';
+
+/**
+ * What Google actually granted, kept on disk rather than in session storage
+ * alongside the token.
+ *
+ * It has to outlive the token, for one reason that is easy to get wrong: a
+ * `prompt=none` renewal asking for a scope the user declined is refused
+ * outright, so an hour after a partial grant the panel would drop to an
+ * interactive sign-in — every hour, forever. Renewal asks for exactly what is
+ * recorded here instead. It is a list of permission names, not a credential.
+ */
+const GRANT_KEY = 'grantedScopes';
 
 /**
  * Set by an explicit logout, cleared by an explicit connect.
@@ -43,15 +55,17 @@ function redirectUri() {
   return chrome.identity.getRedirectURL();
 }
 
-function buildAuthUrl({ state, prompt, loginHint }) {
+function buildAuthUrl({ state, prompt, loginHint, scopes }) {
   const url = new URL(AUTH_ENDPOINT);
   url.searchParams.set('client_id', CLIENT_ID);
   url.searchParams.set('response_type', 'token');
   url.searchParams.set('redirect_uri', redirectUri());
-  url.searchParams.set('scope', SCOPES.join(' '));
+  url.searchParams.set('scope', scopes.join(' '));
+  // Incremental authorization: a later request for one more permission comes
+  // back with a token covering everything granted so far, not just the new one.
   url.searchParams.set('include_granted_scopes', 'true');
   url.searchParams.set('state', state);
-  url.searchParams.set('prompt', prompt);
+  if (prompt) url.searchParams.set('prompt', prompt);
   if (loginHint) url.searchParams.set('login_hint', loginHint);
   return url.toString();
 }
@@ -118,7 +132,13 @@ function launch(url, interactive) {
   });
 }
 
-async function authorize(interactive) {
+/**
+ * @param {boolean} interactive
+ * @param {{ want?: string[], prompt?: string }} [options]
+ *   `want` is the scope list to request, defaulting to whatever is already
+ *   granted — see GRANT_KEY. `prompt` overrides the default for the flow.
+ */
+async function authorize(interactive, { want, prompt } = {}) {
   if (!CLIENT_ID) {
     throw new AuthError(
       'No OAuth client ID is configured. Set CLIENT_ID in src/config.js — see README.md.'
@@ -127,13 +147,21 @@ async function authorize(interactive) {
 
   const state = crypto.randomUUID();
   const { [HINT_KEY]: loginHint } = await chrome.storage.local.get(HINT_KEY);
+  const held = await grantedScopes();
+
+  // Asking for the full list again on every renewal would re-request scopes the
+  // user has already turned down — silently fatal for `prompt=none`, and a
+  // nagging consent screen otherwise. A first connect has nothing recorded, so
+  // it asks for everything and lets the user choose.
+  const scopes = want ?? (held.length ? held : SCOPES);
 
   const url = buildAuthUrl({
     state,
     // Silent renewal must never draw UI. An explicit connect should let the
     // user choose which account to hand over.
-    prompt: interactive ? 'select_account' : 'none',
+    prompt: prompt ?? (interactive ? 'select_account' : 'none'),
     loginHint,
+    scopes,
   });
 
   const redirectUrl = await launch(url, interactive);
@@ -149,32 +177,106 @@ async function authorize(interactive) {
   const accessToken = params.get('access_token');
   if (!accessToken) throw new AuthError('Google returned no access token.');
 
-  const granted = (params.get('scope') ?? '').split(' ');
-  const missing = SCOPES.filter((scope) => !granted.includes(scope));
+  const granted = (params.get('scope') ?? '').split(' ').filter(Boolean);
+  const withheld = scopes.filter((scope) => !granted.includes(scope));
 
   // What Google actually handed over, which is the only authority on it — the
   // scope list configured in Cloud Console is about the consent screen and about
   // verification, not about what a token carries. Worth tracing because a token
   // cached in session storage from before a scope was added keeps working and
-  // skips the check below entirely, so "it works" can mean either thing.
+  // skips this entirely, so "it works" can mean either thing.
   trace('auth', 'token granted', {
     granted: granted.length,
     // Names, not the token: which permissions were given is exactly the
     // question, and none of this is mail data.
-    scopes: granted.map((scope) => scope.replace(/^https:\/\/www\.googleapis\.com\/auth\//, '')),
+    scopes: granted.map(shortScope),
+    withheld: withheld.map(shortScope),
   });
 
+  // A withheld Gmail scope is a choice the user made on the consent screen, not
+  // an error: the panel reads what it can and asks again for the rest at the
+  // moment somebody reaches for it. Identity is the one thing that cannot be
+  // worked around — without `sub` there is no account to key anything by.
+  const missing = REQUIRED_SCOPES.filter((scope) => !granted.includes(scope));
   if (missing.length) {
-    console.error('[MailBoy] Google withheld scopes:', missing);
-    throw new AuthError('MailBoy needs permission to read your mail to show folder counts.');
+    console.error('[MailBoy] Google withheld required scopes:', missing);
+    throw new AuthError('MailBoy needs to know which Google account it is reading.');
+  }
+
+  if (withheld.length) {
+    console.warn('[MailBoy] Google withheld scopes:', withheld.map(shortScope).join(', '));
   }
 
   const expiresAt = Date.now() + Number(params.get('expires_in') || 3600) * 1000;
   // Session storage keeps the token in memory only — it never touches disk.
   await chrome.storage.session.set({ [TOKEN_KEY]: { accessToken, expiresAt } });
+  // Recorded from the response rather than from the request: Google is the
+  // authority on what was granted, and `include_granted_scopes` means this
+  // already carries everything an earlier consent handed over.
+  await chrome.storage.local.set({ [GRANT_KEY]: granted });
   await chrome.storage.local.remove(OUT_KEY);
 
   return accessToken;
+}
+
+function shortScope(scope) {
+  return scope.replace(/^https:\/\/www\.googleapis\.com\/auth\//, '');
+}
+
+/** Every scope this account has handed over, as of the last authorization. */
+export async function grantedScopes() {
+  const { [GRANT_KEY]: granted } = await chrome.storage.local.get(GRANT_KEY);
+  return Array.isArray(granted) ? granted : [];
+}
+
+/**
+ * Which parts of the product the current grant reaches, as
+ * `{ read, write, rules }`.
+ *
+ * Read from storage on every call rather than memoised: the same reasoning as
+ * the active account in `account.js` — the panel and the service worker each
+ * holding their own idea of what is permitted is a disagreement nothing can
+ * detect, and this is one small local read.
+ */
+export async function capabilities() {
+  const { [GRANT_KEY]: recorded } = await chrome.storage.local.get(GRANT_KEY);
+
+  // No record at all means a token minted before grants were recorded — and
+  // until then a partial grant was refused outright, so a token that exists with
+  // nothing beside it was a full one. Reading this as "nothing is permitted"
+  // would put a "MailBoy cannot see your mail" screen in front of somebody whose
+  // permissions are perfectly fine, on the first open after an update. The next
+  // renewal writes a real record over it.
+  const granted = new Set(Array.isArray(recorded) ? recorded : SCOPES);
+
+  const caps = {};
+  for (const [name, { needs }] of Object.entries(CAPABILITIES)) {
+    caps[name] = needs.some((scope) => granted.has(scope));
+  }
+  return caps;
+}
+
+/**
+ * Ask for one more permission, from a user gesture, and report what the grant
+ * looks like afterwards.
+ *
+ * `prompt=consent` rather than no prompt at all: Google may decide it has asked
+ * about this scope already and return the same narrow grant without drawing
+ * anything, which reads as the button having done nothing. Forcing the screen
+ * costs a re-tick of what is already granted and guarantees the user sees the
+ * question. `include_granted_scopes` is what keeps the resulting token wide
+ * rather than narrowing it to the one scope asked about here.
+ *
+ * @param {string[]} scopes
+ * @returns {Promise<Record<string, boolean>>}
+ */
+export async function requestScopes(scopes) {
+  const held = await grantedScopes();
+  const want = [...new Set([...REQUIRED_SCOPES, ...held, ...scopes])];
+
+  trace('auth', 'requesting more', { asking: scopes.map(shortScope) });
+  await authorize(true, { want, prompt: 'consent' });
+  return capabilities();
 }
 
 /**
@@ -230,6 +332,9 @@ export async function logout() {
   }
 
   await chrome.storage.session.remove(TOKEN_KEY);
-  await chrome.storage.local.remove(HINT_KEY);
+  // The grant record goes with it, so the next connect asks for the full list
+  // again rather than silently inheriting a partial grant somebody may have
+  // signed out precisely to get away from.
+  await chrome.storage.local.remove([HINT_KEY, GRANT_KEY]);
   await chrome.storage.local.set({ [OUT_KEY]: true });
 }

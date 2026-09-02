@@ -340,6 +340,14 @@ export const COPY = {
     readingFolders: 'Reading your folders…',
     readingRules: 'Reading your rules…',
     readFailed: 'Could not read your rules. Try again in a moment.',
+    // What the screen says when the permission was declined. Press Rules again
+    // to be asked once more — the tab is the way back in, so this points at it
+    // rather than carrying a second button of its own.
+    needsPermission: 'MailBoy needs permission to see your rules. Press Rules to allow it.',
+    // Rules are named after the folder they send mail to, and the folder list
+    // comes from the mailbox — so the one grant that covers rules and not mail
+    // can read every rule and name none of them.
+    needsFolders: 'Rules are named after your folders, which MailBoy cannot see yet.',
     // Both sections carry a heading whether or not they have anything under
     // them: a heading that comes and goes makes the list look like a different
     // screen each visit.
@@ -425,11 +433,55 @@ export const COPY = {
   /** One line for the footer or an inline field, with the detail left to the log. */
   writeErrors: {
     expired: 'Signed out. Connect again.',
+    missing: 'MailBoy does not have permission for that yet.',
     duplicate: 'That folder already exists.',
     badName: 'That name is not allowed.',
     refused: 'Gmail refused that change.',
     unreachable: 'Could not reach Gmail.',
     unknown: 'Something went wrong.',
+  },
+
+  /**
+   * Asking for a permission that was turned down at sign-in.
+   *
+   * Each one says what the permission buys and nothing about scopes, tokens or
+   * consent screens. The title is the thing somebody just tried to do, so the
+   * dialog answers the click rather than announcing itself.
+   */
+  permission: {
+    allow: 'Continue',
+    later: 'Not now',
+    granted: 'Permission granted.',
+    declined: 'Google did not grant that permission.',
+    failed: 'Could not ask for that permission.',
+    /** Marks a control that will ask before it does anything. */
+    needed: 'Needs permission',
+
+    read: {
+      title: 'MailBoy cannot see your mail',
+      text:
+        'Reading your mailbox is how MailBoy shows what is in it — folders, ' +
+        'who fills them, and how much space they take. Nothing leaves this browser.',
+      // The one screen that has nothing at all to show without it, so it gets
+      // its own button rather than a marked-up control somebody has to find.
+      action: 'Give access to my mail',
+    },
+
+    write: {
+      title: 'MailBoy cannot change your mail',
+      text:
+        'Making and deleting folders, and moving mail between them, needs ' +
+        'permission to change your mailbox. Anything deleted goes to Trash.',
+      action: 'Allow changes',
+    },
+
+    rules: {
+      title: 'MailBoy cannot manage your rules',
+      text:
+        'Rules send future mail to a folder, or straight to Trash, on their ' +
+        'own. Making and removing them needs permission to change your Gmail settings.',
+      action: 'Allow rules',
+    },
   },
 };
 

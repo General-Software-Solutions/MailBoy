@@ -2246,3 +2246,64 @@ svg.stop-icon {
   background: var(--accent-soft);
 }
 
+
+/* ── Permissions the grant does not reach ────────────────────── */
+/* Google's consent screen lets each Gmail permission be unticked on its own, so
+   a sign-in can come back partial and the panel runs on what it got. These
+   controls stay pressable — the press is what asks for the permission, and a
+   control that is merely disabled is how a permission declined by accident
+   stays declined forever.
+
+   What they lose is the hue. Every action button's colour states which of Move,
+   Block and Delete it is (decision 25), and a control that cannot act yet has
+   no intent to state; going neutral is the same information the intents carry,
+   said by its absence. Setting the two tokens is the whole of it, because
+   everything downstream already reads them — text, edge, hover tint, and the
+   glyph through currentColor.
+
+   Must stay below the .btn--* and .row-action--danger blocks: it overrides them
+   at equal specificity, so source order is what decides it. */
+.needs-perm,
+.app--no-write .row-action {
+  --intent: var(--muted);
+  --intent-soft: var(--surface);
+}
+
+.needs-perm.btn--ghost {
+  color: var(--muted);
+  box-shadow: inset 0 0 0 1px var(--edge);
+}
+
+/* The one mark that cannot be a hue: the bar is muted at rest already. Never
+   while the tab is the one showing — a dimmed active tab reads as broken rather
+   than as unavailable. */
+.nav-btn.needs-perm:not([aria-current]) {
+  opacity: 0.55;
+}
+
+/* Reading the mailbox is the one permission with no control to mark, because
+   without it Home has no rows, no counts and nothing to press. So it takes the
+   screen. Shaped like the notice card rather than like an error: nothing has
+   gone wrong, and the answer is one button away. */
+.permission-card {
+  margin: 10px var(--pad-x);
+  padding: 14px;
+  background: var(--surface);
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--edge);
+}
+
+.permission-card-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 620;
+  letter-spacing: -0.005em;
+  color: var(--text);
+}
+
+.permission-card-text {
+  margin: 7px 0 12px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
