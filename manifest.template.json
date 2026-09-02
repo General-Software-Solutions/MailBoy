@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "MailBoy",
   "version": "0.1.0",
-  "description": "A calm, clutter-free view of your Gmail labels and where your mail actually lives.",
+  "description": "Clear out and organize your Gmail in bulk: bin what you never wanted, file what you keep, block the rest.",
   "minimum_chrome_version": "114",
   "permissions": ["identity", "storage", "unlimitedStorage", "sidePanel", "alarms"],
   "host_permissions": [
