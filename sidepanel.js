@@ -661,16 +661,16 @@ function renderRow(item, { editable = false, counted = true, removable = true } 
   const name = document.createElement('span');
   name.className = 'row-name';
 
-  // Depth is already conveyed by indent (data-depth in CSS); the icon repeats
-  // it in a way that reads at a glance without counting padding — a dot for a
-  // top-level folder, a chevron for anything nested, whatever the depth.
+  // A dot marks a leaf — nothing nests under it — and a chevron marks a
+  // folder that holds others, whatever depth either sits at. Depth is already
+  // conveyed by indent (data-depth in CSS); this is about whether the folder
+  // is a container, not where it sits.
   const icon = document.createElement('span');
   icon.className = 'row-icon';
   icon.setAttribute('aria-hidden', 'true');
-  icon.innerHTML =
-    (item.depth ?? 0) > 0
-      ? `<svg class="row-icon-chevron" viewBox="0 0 16 16">${ICON_SUBFOLDER}</svg>`
-      : '•';
+  icon.innerHTML = item.hasChildren
+    ? `<svg class="row-icon-chevron" viewBox="0 0 16 16">${ICON_SUBFOLDER}</svg>`
+    : '•';
 
   name.append(icon, document.createTextNode(item.name));
 

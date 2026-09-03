@@ -83,11 +83,18 @@ export function buildTree(labels) {
     for (let i = 1; i < parts.length; i++) {
       if (present.has(parts.slice(0, i).join('/'))) depth = i;
     }
+    // Whether anything nests under this one — not the same question as depth,
+    // which is about this folder's own position. A top-level folder with
+    // subfolders and a three-deep leaf are both real, and the row icon marks
+    // which kind a folder is (see renderRow), not how deep it sits.
+    const prefix = `${label.name}/`;
+    const hasChildren = sorted.some((other) => other.name.startsWith(prefix));
     return {
       id: label.id,
       name: parts.slice(depth).join('/'),
       fullName: label.name,
       depth: Math.min(depth, 3),
+      hasChildren,
       // Counts what arrived under this folder, not what you wrote in it. Gmail
       // labels threads, so a conversation you replied to puts that label on
       // your own replies too — and with Sent and Drafts no longer shown, a row
@@ -124,9 +131,16 @@ function googleFolders(system) {
     hideWhenEmpty: true,
   }));
 
-  const at = rows.findIndex((row) => row.id === 'INBOX');
-  if (at === -1) return [...rows, ...categories];
-  return [...rows.slice(0, at + 1), ...categories, ...rows.slice(at + 1)];
+  // Inbox is the one default folder that is ever a container in the tree —
+  // the categories nest under it, whether or not any of them end up hidden
+  // for being empty (that is decided later, per row, from the count).
+  const withChildren = rows.map((row) =>
+    row.id === 'INBOX' && categories.length > 0 ? { ...row, hasChildren: true } : row
+  );
+
+  const at = withChildren.findIndex((row) => row.id === 'INBOX');
+  if (at === -1) return [...withChildren, ...categories];
+  return [...withChildren.slice(0, at + 1), ...categories, ...withChildren.slice(at + 1)];
 }
 
 /**
