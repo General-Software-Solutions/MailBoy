@@ -17,14 +17,8 @@ import {
   requestScopes,
 } from './src/auth.js';
 import { CAPABILITIES } from './src/config.js';
-import { bulkJobKey, readBulkJob } from './src/bulk.js';
-import {
-  MAX_NAME,
-  createFolder,
-  deleteJobKey,
-  readDeleteJob,
-  validateFolderName,
-} from './src/folders.js';
+import { MAX_NAME, createFolder, validateFolderName } from './src/folders.js';
+import { enqueueTask, legacyKeys, readTasks, taskId, tasksKey } from './src/tasks.js';
 import {
   GmailError,
   ScopeError,
@@ -126,6 +120,15 @@ const el = {
   progressBar: document.getElementById('progress-bar'),
   progressDone: document.getElementById('progress-done'),
   progressLeft: document.getElementById('progress-left'),
+
+  // The task card, which stands under every signed-in screen beside the footer.
+  taskCard: document.getElementById('task-card'),
+  taskTitle: document.getElementById('task-title'),
+  taskDone: document.getElementById('task-done'),
+  taskQueued: document.getElementById('task-queued'),
+  taskProgress: document.getElementById('task-progress'),
+  taskProgressBar: document.getElementById('task-progress-bar'),
+  taskStop: document.getElementById('btn-task-stop'),
   detail: document.getElementById('screen-detail'),
   back: document.getElementById('btn-back'),
   detailLabel: document.getElementById('detail-label'),
@@ -265,6 +268,28 @@ let stopRequested = false;
 
 /** Resolves the moment stop is pressed, so nothing has to wait out a reply. */
 let stopSignal = null;
+
+/**
+ * Ends the wait for the pass itself, rather than for the worker.
+ *
+ * A Gmail request already in flight cannot be recalled, and since the task queue
+ * arrived it can be sitting in the shared quota pacer for tens of seconds before
+ * it is even sent (decision 39). Stop has to mean "stop waiting for it", or the
+ * button does nothing for as long as that takes.
+ *
+ * @type {(() => void) | null}
+ */
+let abortLoad = null;
+
+/**
+ * Which pass is the current one.
+ *
+ * An abandoned pass carries on running — nothing can cancel a request — so it
+ * has to be told to stop *painting*, saving membership, and stamping snapshots.
+ * `stopRequested` alone cannot say that: the next load clears it, which would
+ * hand the orphan its permissions straight back. A token cannot be un-revoked.
+ */
+let passId = 0;
 
 /** Survives the re-render a failed retry causes, so the panel doesn't collapse
  *  the details someone just opened to read. */
@@ -1052,9 +1077,14 @@ function secondsRemaining({ done, total, startedAt, startDone }) {
 }
 
 /**
- * A folder being created or removed. It owns the status line for as long as it
- * runs — it is the thing the user just asked for, and the load status it covers
- * is still there afterwards.
+ * A short write the user just asked for — a folder being created, rules being
+ * removed. It owns the status line for as long as it runs, and the load status
+ * it covers is still there afterwards.
+ *
+ * **Not the long jobs.** Moving mail about has its own card now, because it runs
+ * for minutes and a queue can hold several of them; putting that in a line that
+ * also has to report a refresh was one slot doing two jobs. What still reaches
+ * the footer from a task is its *outcome*, as a flash.
  */
 let actionStatus = null;
 
@@ -1157,6 +1187,23 @@ function setFooter(timestamp = lastLoaded) {
     return;
   }
 
+  // Busy, but not counting yet: the pass has not reached enumeration. That gap
+  // used to be milliseconds and now is not — a refresh started while the task
+  // queue is running waits its turn in the shared quota pacer, which can be tens
+  // of seconds (see decision 39). Leaving "Updated 5 minutes ago" up through it
+  // says the panel is idle and up to date while it is visibly neither.
+  //
+  // **Measuring is deliberately not included.** By then enumeration has finished
+  // and the counts on screen really are final, so the timestamp is the honest
+  // thing to show and the size pass has the card.
+  if (busy && !progress) {
+    paintFooter(COPY.main.loading);
+    return;
+  }
+
+  // Measuring with nothing ever loaded. The branch above covers every case that
+  // reaches here in practice — `onSizes` stamps the timestamp before it sets the
+  // measuring phase — so this is the safety net rather than a path.
   if (!timestamp) {
     paintFooter(busy ? COPY.main.loading : '');
     return;
@@ -2446,22 +2493,25 @@ function addFolder(label) {
 
 // ── Deleting ─────────────────────────────────────────────────────
 
-/** The delete in flight, if any. @type {{ids: string[], name: string} | null} */
-let deleteState = null;
-
 /**
- * Dim the folders a delete is working through.
+ * Dim the folders a queued delete is working through.
  *
  * They keep their numbers and stay on screen until the job actually finishes —
  * removing a row at the click would claim a completion that a ten-minute Trash
  * pass has not reached. Re-applied after every render, since the rows are
  * rebuilt from scratch each time.
+ *
+ * Reads the queue rather than one job, so two deletes queued back to back both
+ * dim from the moment they are asked for.
  */
 function markWorkingRows() {
   for (const row of el.groups.querySelectorAll('.row--working')) {
     row.classList.remove('row--working');
   }
-  for (const id of deleteState?.ids ?? []) rowFor(id)?.classList.add('row--working');
+  for (const task of tasks) {
+    if (task.kind !== 'folder-delete') continue;
+    for (const id of task.labels ?? []) rowFor(id)?.classList.add('row--working');
+  }
 }
 
 /** The hint tracks the box, because the two outcomes are genuinely different. */
@@ -2546,10 +2596,6 @@ let askingDelete = false;
 
 async function confirmDelete(labelId) {
   if (askingDelete || el.deleteDialog.open) return;
-  if (jobRunning()) {
-    flash(COPY.actions.busy, 'error');
-    return;
-  }
 
   const rows = folderRows();
   const target = rows.find((row) => row.id === labelId);
@@ -2596,10 +2642,6 @@ async function confirmDelete(labelId) {
     rules = rules.filter((rule) => !gone.has(rule.filterId));
   }
 
-  deleteState = { ids: familyIds, name: target.name };
-  markWorkingRows();
-  setAction(COPY.deleteFolder.working(target.name));
-
   // The folder empties straight away, the same as it does for a selection —
   // and, the same as a selection, the mail does not turn up where it is going
   // until the job says it has arrived. The rows themselves stay until the job
@@ -2609,27 +2651,25 @@ async function confirmDelete(labelId) {
   // The inbox path takes the folder's own rows as what it vacates rather than
   // `shedding`, because that is all it does — mail keeps every other folder it
   // is in, which is what makes it a rescue rather than a filing decision.
-  projectAction(
-    family.flatMap((row) => idsIn(row.id)),
-    choice.trash
-      ? { action: 'trash', from: shedding('TRASH'), destination: 'TRASH' }
-      : { action: 'restore-folder', from: familyIds, destination: 'INBOX' }
-  );
-
-  folderChannel().postMessage({
-    type: 'delete',
-    job: {
-      trash: choice.trash,
-      labels: family.map((row) => ({
-        id: row.id,
-        name: row.name,
-        fullName: row.fullName ?? row.name,
-      })),
-      // No ratio worth reporting on the inbox path: it is one batchModify per
-      // thousand messages and over in about a second.
-      total: choice.trash ? messages : 0,
-    },
+  queueTask({
+    kind: 'folder-delete',
+    action: choice.trash ? 'trash' : 'restore-folder',
+    ids: family.flatMap((row) => idsIn(row.id)),
+    from: choice.trash ? shedding('TRASH') : familyIds,
+    destination: choice.trash ? 'TRASH' : 'INBOX',
+    trash: choice.trash,
+    labels: family.map((row) => ({
+      id: row.id,
+      name: row.name,
+      fullName: row.fullName ?? row.name,
+    })),
+    // Both paths report a ratio now. The inbox one is over in about a second
+    // and simply jumps to full, which is better than being the one task in the
+    // queue with no bar.
+    total: messages,
   });
+
+  markWorkingRows();
 }
 
 /** Take deleted folders off the screen and out of the cache. */
@@ -2677,12 +2717,20 @@ function summariseDelete(message, name) {
 // same two filters the breakdown rows do. That is what keeps the figure in the
 // dialog and the mail that moves the same set.
 
-/** The selection job in flight, if any. @type {{action: string, total: number,
- *  target: string} | null} */
-let bulkState = null;
+/**
+ * The task queue as the worker last described it, oldest first.
+ *
+ * Summaries only — `{id, kind, action, target, total, done, labels, name}` — so
+ * this can be re-sent on every batch without a 40,000-id array crossing the port
+ * a few times a second. The ids live on the record and travel once, at the
+ * ending, where a settlement is worked out from them.
+ *
+ * @type {object[]}
+ */
+let tasks = [];
 
-/** One long job at a time: they share a status line and a quota budget. */
-const jobRunning = () => Boolean(deleteState || bulkState);
+/** Whether anything is moving mail. Not a gate on starting more: see `canAct`. */
+const jobRunning = () => tasks.length > 0;
 
 /**
  * What a move takes the mail out of: **everywhere except where it is going.**
@@ -2733,7 +2781,7 @@ function shedding(targetId) {
 // difference in the meantime.
 //
 // This is a promise the panel makes on the job's behalf, so it has to be
-// settled honestly on every ending — see `resolveAction`.
+// settled honestly on every ending — see `settleTask`.
 
 /** Whether the rows are showing an action's intent rather than a real load. */
 let projected = false;
@@ -2749,16 +2797,22 @@ let projected = false;
 let countsSettled = true;
 
 /**
- * The projection outstanding, kept so the ending can complete it or undo it.
+ * The projection each outstanding task is holding, by task id.
  *
- * `removed` is what came out of which row, which is the only way to put back the
- * part of a job that never ran. Memory only: a panel that adopted a job from a
- * previous open has none of this, and takes the full listing instead.
+ * `ids` is everything the action was dispatched over and `vacated` is what came
+ * out of which row — together they are the only way to finish a job off honestly:
+ * whatever landed goes to its destination, whatever did not goes back where it
+ * came from.
  *
- * @type {{action: string, ids: string[], destination: string | null,
- *   removed: Record<string, string[]>} | null}
+ * **Both are read off the task record**, not merely remembered. That is the
+ * whole reason the record carries them, and it is what lets a panel opened
+ * hours later stop a job and put the mail back — which the old memory-only
+ * projection could not do, and paid for with a full listing every time.
+ *
+ * @type {Map<string, {action: string, ids: string[], destination: string | null,
+ *   vacated: Record<string, string[]>}>}
  */
-let pendingProjection = null;
+const projections = new Map();
 
 /**
  * Which rows an action takes the mail **out of**, in the rows MailBoy shows.
@@ -2805,16 +2859,19 @@ function paintPatched(touched) {
  * Take the mail out of the rows it is leaving, and remember enough to finish the
  * job off when the worker reports back.
  *
- * @param {string[]} ids
- * @param {{action: string, from: string[], destination?: string | null}} where
+ * @param {string} id the task holding it
+ * @param {{action: string, ids: string[], from: string[],
+ *   destination?: string | null}} where
+ * @returns {Record<string, string[]>} what came out of which row
  */
-function projectAction(ids, { action, from, destination = null }) {
+function projectTask(id, { action, ids, from, destination = null }) {
   const { touched, removed } = patchMessages(ids, { remove: from });
 
-  pendingProjection = { action, ids: [...ids], destination, removed };
+  projections.set(id, { action, ids: [...ids], destination, vacated: removed });
   projected = true;
 
   trace('action', `${action} dispatched — showing the mail leaving`, {
+    task: id,
     messages: ids.length,
     leaving: touched,
     // Nothing appears here until the job reports back. That is the point.
@@ -2825,96 +2882,144 @@ function projectAction(ids, { action, from, destination = null }) {
   // The freshness gate means the next open may run no load at all, so a
   // projection that lives only in memory would be undone by closing the panel.
   void saveSnapshot();
+
+  return removed;
 }
 
 /**
- * Finish a projection off: put the mail that landed into its destination, put
- * back whatever never moved, and move the change-log bookmark past the job.
+ * Put an outstanding task's projection back over freshly listed counts.
  *
- * @param {string[]} landed ids Gmail confirmed it moved
- * @param {string[]} stranded ids it did not
+ * A refresh no longer waits for the queue to drain — somebody who has just asked
+ * a folder's worth of mail to move should still be able to re-read the mailbox —
+ * and an enumeration finds that mail exactly where it still is, because the job
+ * has not moved it yet. Without this, a refresh mid-move would put every hidden
+ * email back on screen and then take it away again when the job ended.
+ *
+ * It also *replaces* what each task believes it vacated, since the rows it is
+ * patching are new. That keeps a later stop honest against the counts actually
+ * on screen rather than against a set from before the listing.
  */
-function completeProjection(landed, stranded) {
-  const destination = pendingProjection?.destination;
-  const removed = pendingProjection?.removed ?? {};
-  const touched = new Set();
+function reprojectTasks() {
+  if (!projections.size) return;
 
-  trace('action', 'settled from the job’s own outcome — no listing', {
-    landed: landed.length,
-    putBack: stranded.length,
-    destination,
+  // Every id the task was dispatched over, not merely the part still
+  // outstanding — the queue reports how far along it is, never which ids went.
+  // That costs nothing, because removing an id a row no longer holds is a no-op:
+  // mail the job has already moved was enumerated where it now is, so it is not
+  // in the rows being vacated to begin with.
+  const touched = new Set();
+  for (const projection of projections.values()) {
+    const from = Object.keys(projection.vacated);
+    if (!from.length) continue;
+
+    const { touched: rows, removed } = patchMessages(projection.ids, { remove: from });
+    projection.vacated = removed;
+    for (const rowId of rows) touched.add(rowId);
+  }
+
+  trace('action', 're-applied what the queue is holding over a fresh listing', {
+    tasks: projections.size,
+    rows: [...touched],
   });
 
-  if (destination && landed.length) {
-    for (const rowId of patchMessages(landed, { add: [destination] }).touched) {
+  paintPatched([...touched]);
+}
+
+/**
+ * Settle one task however it ended: put the mail that landed into its
+ * destination, put back whatever never moved.
+ *
+ * **The full listing is the fallback, not the rule.** It used to run on every
+ * ending, which meant a clean move of three messages re-listed every row in the
+ * mailbox to confirm something the job had already reported. Where the record
+ * says exactly which messages are still outstanding and the panel knows where
+ * the rest were going, that is the answer — no re-read can improve on it.
+ *
+ * What is left needing a listing is what is genuinely unknown: a restore, whose
+ * destinations were lost when the mail was trashed, and a stopped folder delete,
+ * which never tracked ids to begin with.
+ *
+ * @param {string} id
+ * @param {{remaining?: string[], listing?: boolean, why?: string}} outcome
+ *   `remaining` are the ids that did **not** move; everything else landed.
+ */
+function settleTask(id, { remaining = [], listing = false, why } = {}) {
+  const projection = projections.get(id);
+  projections.delete(id);
+  projected = projections.size > 0;
+
+  if (!projection) {
+    // Nothing here projected this one — a job adopted from a build before the
+    // record carried its own bookkeeping, or an ending arriving twice.
+    takeListing(why ?? 'this panel never projected that task');
+    return;
+  }
+
+  if (listing || projection.action === 'restore' || projection.destination === null) {
+    takeListing(why ?? 'a restore lands in folders nothing here can know');
+    return;
+  }
+
+  const stranded = new Set(remaining);
+  const landed = projection.ids.filter((mail) => !stranded.has(mail));
+  const touched = new Set();
+
+  trace('action', 'settled from the task’s own record — no listing', {
+    task: id,
+    landed: landed.length,
+    putBack: stranded.size,
+    destination: projection.destination,
+  });
+
+  if (landed.length) {
+    for (const rowId of patchMessages(landed, { add: [projection.destination] }).touched) {
       touched.add(rowId);
     }
   }
 
-  if (stranded.length) {
+  if (stranded.size) {
     // Only the rows these actually came out of, so a message that was never in
     // a row does not get invented into one.
     const back = {};
-    const missing = new Set(stranded);
-    for (const [rowId, ids] of Object.entries(removed)) {
-      const mine = ids.filter((id) => missing.has(id));
+    for (const [rowId, ids] of Object.entries(projection.vacated)) {
+      const mine = ids.filter((mail) => stranded.has(mail));
       if (mine.length) back[rowId] = mine;
     }
     for (const rowId of unpatchMessages(back)) touched.add(rowId);
   }
 
-  pendingProjection = null;
-  projected = false;
-
   paintPatched([...touched]);
   void saveSnapshot();
-
-  // Membership now describes the mailbox after the job, so the log up to here is
-  // accounted for and replaying it next open would be work for nothing.
-  //
-  // The cost is anything *else* that happened while the job ran — new mail, a
-  // change made in Gmail on another device — which is skipped until the weekly
-  // listing. Milliseconds for a move; minutes for a large trash.
-  void getProfile()
-    .then((profile) => stampHistoryId(profile.historyId))
-    .catch((err) => console.warn('[MailBoy] could not move the bookmark on:', err));
+  stampBookmarkIfSettled();
 }
 
-/**
- * Settle the projection however the job ended.
- *
- * **The full listing is the fallback, not the rule.** It used to run on every
- * ending, which meant a clean move of three messages re-listed every row in the
- * mailbox to confirm something the job had already reported. Where the outcome
- * says exactly which messages landed and the panel knows where they were going,
- * that is the answer — no re-read can improve on it.
- *
- * What is left needing a listing is what is genuinely unknown: a restore, whose
- * destinations were lost when the mail was trashed; a stopped trash, which does
- * not report which of its messages went; and any hard failure, whose extent
- * nothing describes.
- *
- * @param {{landed?: string[], stranded?: string[], listing?: boolean}} outcome
- */
-function resolveAction({ landed, stranded, listing = false, why }) {
-  if (!projected && !listing) {
-    trace('action', 'nothing to settle');
-    return;
-  }
-
-  if (!listing && pendingProjection) {
-    completeProjection(landed ?? [], stranded ?? []);
-    return;
-  }
-
-  trace('action', `settling by listing the mailbox — ${why ?? 'nothing to settle from'}`);
-
-  pendingProjection = null;
-  projected = false;
-
+/** The fallback: re-read the mailbox, because what happened is not knowable. */
+function takeListing(why) {
+  trace('action', `settling by listing the mailbox — ${why}`);
   // A load already running is on its way to those numbers; starting a second
   // one would only be turned away.
   if (!loading) void load({ force: true });
+}
+
+/**
+ * Move the change-log bookmark past a settled queue.
+ *
+ * **Only once nothing is outstanding.** Membership describes the mailbox after
+ * the jobs, so replaying their own log entries next open would be work for
+ * nothing — but a queue with a task still in it is holding mail out of rows
+ * Gmail has not moved yet, and bookmarking past that is the one failure the sync
+ * cannot detect afterwards.
+ *
+ * The cost is anything *else* that happened while the queue ran — new mail, a
+ * change made in Gmail on another device — which is skipped until the weekly
+ * listing.
+ */
+function stampBookmarkIfSettled() {
+  if (projections.size || tasks.length) return;
+
+  void getProfile()
+    .then((profile) => stampHistoryId(profile.historyId))
+    .catch((err) => console.warn('[MailBoy] could not move the bookmark on:', err));
 }
 
 /** How the dialogs name where the mail is coming from. */
@@ -2930,6 +3035,109 @@ function periodClause() {
 }
 
 /**
+ * Ids of tasks this panel has queued but not yet seen the worker acknowledge.
+ *
+ * The worker's broadcast is the authority on what is in the queue, and it can
+ * land in the gap between the optimistic paint below and the record reaching
+ * disk. Without this the card would blink the new task out and back in again.
+ *
+ * @type {Set<string>}
+ */
+const enqueuing = new Set();
+
+/**
+ * Put an action in the queue: hide the mail it is taking, write the record, and
+ * tell the worker there is work.
+ *
+ * Nothing here waits on anything already running. That is the point of the
+ * queue — pressing Move while a Delete is grinding through a folder used to be
+ * refused, which is an implementation detail wearing the clothes of a rule.
+ *
+ * @param {{kind?: 'bulk' | 'folder-delete', action: string, ids: string[],
+ *   from: string[], destination?: string | null, add?: string[],
+ *   remove?: string[], target?: string, source?: string, total?: number,
+ *   labels?: object[], trash?: boolean}} spec `from` is the rows the mail
+ *   leaves, which is not the same list as the labels the job sends Gmail — see
+ *   `vacating`.
+ */
+function queueTask({
+  kind = 'bulk',
+  action,
+  ids,
+  from,
+  destination = null,
+  add,
+  remove,
+  target = '',
+  source = '',
+  total,
+  labels,
+  trash,
+}) {
+  const id = taskId();
+
+  // Take the mail out of the rows it is leaving, now. The job takes minutes, and
+  // every re-render until it ends would otherwise redraw the mail exactly where
+  // it was — including in the folder it is being taken out of. Where it is
+  // *going* waits for the job to say it got there.
+  const vacated = projectTask(id, { action, ids, from, destination });
+
+  const task = {
+    id,
+    kind,
+    action,
+    startedAt: Date.now(),
+    total: total ?? ids.length,
+    done: 0,
+    add,
+    remove,
+    target,
+    source,
+    destination,
+    vacated,
+    labels,
+    trash,
+    // A folder delete re-derives its work by listing its own labels, so carrying
+    // ids for it would be dead weight — and its `vacated` above is what a
+    // settlement puts back. Everything else has to carry its own, because
+    // nothing in Gmail records which senders somebody ticked.
+    ...(kind === 'bulk' ? { ids: [...ids], remaining: [...ids] } : {}),
+  };
+
+  // On screen before the record has even reached disk: the card is the answer to
+  // the button, and a write plus a round trip to the worker is long enough to
+  // read as nothing having happened.
+  enqueuing.add(id);
+  tasks = [...tasks, taskSummary(task)];
+  paintTasks();
+
+  void enqueueTask(task)
+    .then(() => folderChannel().postMessage({ type: 'run' }))
+    .catch((err) => {
+      console.error('[MailBoy] could not queue that action:', err);
+      flash(COPY.move.failed, 'error');
+      tasks = tasks.filter((queued) => queued.id !== id);
+      paintTasks();
+      settleTask(id, { listing: true, why: 'the task could not be written down' });
+    })
+    .finally(() => enqueuing.delete(id));
+}
+
+/** The same shape the worker broadcasts, so the two are interchangeable. */
+function taskSummary(task) {
+  return {
+    id: task.id,
+    kind: task.kind,
+    action: task.action,
+    target: task.target ?? '',
+    total: task.total ?? 0,
+    done: task.done ?? 0,
+    labels: task.labels?.map((label) => label.id) ?? [],
+    name: task.labels?.at(-1)?.name ?? '',
+  };
+}
+
+/**
  * Resolve the ticks to messages and hand the job over.
  *
  * The selection is cleared at the hand-over rather than at the end: the action
@@ -2940,22 +3148,20 @@ function periodClause() {
  * showing is on its way somewhere else, and leaving it up would be showing a
  * message in a folder it is leaving.
  */
-function dispatchBulk(job, { total, action, target, status }) {
-  bulkState = { action, total, target };
-  setAction(status);
-
-  // Take the mail out of the rows it is leaving, now. The job takes minutes, and
-  // the three re-renders below would otherwise redraw it exactly where it was —
-  // including in the folder it is being taken out of. Where it is *going* waits
-  // for the job to say it got there.
-  projectAction(job.ids, {
+function dispatchBulk(job, { action, target }) {
+  queueTask({
     action,
+    ids: job.ids,
     // `target` here is the folder's display name; the id is what a row is keyed
     // on and what `shedding` compares against.
     from: vacating(action, job.add?.[0]),
     // A restore's destinations were lost when the mail was trashed, so there is
-    // nothing to complete it with and its ending pays for a listing.
+    // nothing to settle it with and its ending pays for a listing.
     destination: action === 'trash' ? 'TRASH' : action === 'move' ? job.add?.[0] : null,
+    add: job.add,
+    remove: job.remove,
+    target,
+    source: job.source,
   });
 
   clearSelection();
@@ -2964,8 +3170,6 @@ function dispatchBulk(job, { total, action, target, status }) {
   if (!el.messageScreen.hidden) closeMessage();
   else if (!el.mailsScreen.hidden) renderMails();
   else renderBreakdown();
-
-  folderChannel().postMessage({ type: 'bulk', job });
 }
 
 /**
@@ -3049,16 +3253,15 @@ function askConfirm({
 let confirmRule = null;
 
 /**
- * Whether an action can be started at all — one long job at a time, and there
- * has to be a folder for the removal set to be built against.
+ * Whether an action can be started at all.
+ *
+ * There has to be a folder for the removal set to be built against, and that is
+ * the whole of it. A job already running is **not** a reason to refuse: actions
+ * are queued now, so the answer to "MailBoy is busy" is one more task rather
+ * than a message telling somebody to come back later.
  */
 function canAct() {
-  if (!openLabel) return false;
-  if (jobRunning()) {
-    flash(COPY.actions.busy, 'error');
-    return false;
-  }
-  return true;
+  return Boolean(openLabel);
 }
 
 /**
@@ -3173,15 +3376,10 @@ async function startTrash(picked) {
   });
   if (!ok) return;
 
-  dispatchBulk(
-    { action: 'trash', ids, target: 'Trash', source: openLabel.name },
-    {
-      total: ids.length,
-      action: 'trash',
-      target: 'Trash',
-      status: COPY.trash.status(ids.length),
-    }
-  );
+  dispatchBulk({ action: 'trash', ids, target: 'Trash', source: openLabel.name }, {
+    action: 'trash',
+    target: 'Trash',
+  });
 
   // After the dispatch, for the same reason a move's rules are: the projection
   // is what makes the button look like it worked, and a refused filter must not
@@ -3213,15 +3411,10 @@ async function startRestore(picked) {
   });
   if (!ok) return;
 
-  dispatchBulk(
-    { action: 'restore', ids, add: ['INBOX'], remove: ['TRASH'], target: 'Inbox' },
-    {
-      total: ids.length,
-      action: 'restore',
-      target: 'Inbox',
-      status: COPY.restore.status(ids.length),
-    }
-  );
+  dispatchBulk({ action: 'restore', ids, add: ['INBOX'], remove: ['TRASH'], target: 'Inbox' }, {
+    action: 'restore',
+    target: 'Inbox',
+  });
 }
 
 // ── Choosing where a move goes ───────────────────────────────────
@@ -3621,12 +3814,7 @@ function confirmMove() {
       target: name,
       source: openLabel.name,
     },
-    {
-      total: ids.length,
-      action: 'move',
-      target: name,
-      status: COPY.move.status(ids.length, name),
-    }
+    { action: 'move', target: name }
   );
 
   // After the dispatch, not before it: the projection is what makes the button
@@ -3871,23 +4059,86 @@ async function startBlock(material) {
   if (specs.length) void applyRules(specs, COPY.rules.trash, COPY.block.ruleFailed);
 }
 
-// ── Reporting a selection job ────────────────────────────────────
+// ── The task card ────────────────────────────────────────────────
+//
+// Its own card, beside the footer rather than inside a screen, because mail is
+// moved from four different screens and a report that only appears on one of
+// them is not a report. The load keeps its own card in its own place above this
+// one, so a refresh started mid-move says what it always said.
+//
+// **The bar is determinate**, and honestly so: a queue knows exactly how many
+// emails it set out to move and exactly how many it has. No time estimate — a
+// queue can hold a move that takes a second behind a trash that takes twenty
+// minutes, so a single rate would be a number that means nothing. What the body
+// says instead is why it is slow, which is the thing somebody actually wants to
+// know.
 
-function bulkStatus(done, total) {
-  const action = bulkState?.action;
-  const lead =
-    action === 'trash'
-      ? COPY.trash.progress
-      : action === 'restore'
-        ? COPY.restore.progress
-        : COPY.move.progress(bulkState?.target ?? '');
+/** What the head of the queue is doing, in one line. */
+function taskTitle(task) {
+  if (!task) return COPY.tasks.title.working;
+  if (task.kind === 'folder-delete') {
+    return task.name ? COPY.tasks.title.emptying(task.name) : COPY.tasks.title.deleting;
+  }
+  if (task.action === 'trash') return COPY.tasks.title.trash;
+  if (task.action === 'restore') return COPY.tasks.title.restore;
+  if (task.action === 'move' && task.target) return COPY.tasks.title.move(task.target);
+  return COPY.tasks.title.working;
+}
 
-  // `done` is capped: a move reports its whole chunk at once and the totals are
-  // built from different sums, so overshooting by a few is possible.
-  const ratio = total
-    ? ` ${Math.min(done, total).toLocaleString()} of ${total.toLocaleString()}`
-    : '';
-  return `${lead}…${ratio}`;
+function paintTasks() {
+  const [head, ...waiting] = tasks;
+  el.taskCard.hidden = !head;
+  if (!head) return;
+
+  el.taskTitle.textContent = taskTitle(head);
+  el.taskQueued.textContent = waiting.length ? COPY.tasks.queued(waiting.length) : '';
+
+  // `done` can overshoot: a message under both a parent's folder and a child's
+  // is counted once per row, and Gmail moves it once.
+  const total = tasks.reduce((sum, task) => sum + (task.total ?? 0), 0);
+  const done = Math.min(
+    tasks.reduce((sum, task) => sum + (task.done ?? 0), 0),
+    total
+  );
+
+  el.taskDone.textContent = total ? COPY.tasks.done(done, total) : '';
+  el.taskProgress.classList.toggle('progress--indeterminate', !total);
+
+  if (!total) {
+    el.taskProgressBar.style.width = '';
+    el.taskProgress.removeAttribute('aria-valuenow');
+    return;
+  }
+
+  const percent = Math.round((done / total) * 100);
+  el.taskProgressBar.style.width = `${percent}%`;
+  el.taskProgress.setAttribute('aria-valuenow', String(percent));
+}
+
+/**
+ * Stop everything queued.
+ *
+ * One button for the whole queue rather than one per task: they are one piece of
+ * work as far as the mailbox is concerned, and a card offering four stops in a
+ * side panel is a worse answer than a card offering one.
+ *
+ * The panel does not wait to hear back. The worker empties the queue and reports
+ * each task's outstanding ids, which is what `settleTask` puts back — but the
+ * card should go the moment the button is pressed, or a stop reads as having
+ * done nothing for as long as the batch in flight takes.
+ */
+function stopTasks() {
+  if (!tasks.length) return;
+  trace('job', 'stop pressed — calling off the whole queue', { tasks: tasks.length });
+  chrome.runtime.sendMessage({ type: 'stop', job: 'tasks' }).catch(() => {});
+
+  // The card goes now, not when the worker gets round to answering. Same call
+  // `stopLoad` makes: the panel has no reason to sit through a batch already in
+  // flight, and a stop button that leaves the thing it stopped on screen reads
+  // as not having worked. The mail comes back as each ending lands.
+  tasks = [];
+  paintTasks();
+  markWorkingRows();
 }
 
 function summariseBulk(message, action, target) {
@@ -3900,20 +4151,7 @@ function summariseBulk(message, action, target) {
   return COPY.move.done(message.moved ?? 0, target);
 }
 
-/**
- * Adopt a selection job still running from a previous open, or one the worker
- * was killed partway through — the same reasoning as `adoptPendingDelete`.
- */
-async function adoptPendingBulk() {
-  const job = await readBulkJob();
-  if (!job || bulkState) return;
-
-  bulkState = { action: job.action, total: job.ids.length, target: job.target ?? '' };
-  setAction(bulkStatus(0, job.ids.length));
-  folderChannel();
-}
-
-// ── Talking to the worker about deletes ──────────────────────────
+// ── Talking to the worker about the queue ────────────────────────
 
 /** @type {chrome.runtime.Port | null} */
 let folderPort = null;
@@ -3939,187 +4177,149 @@ function folderChannel() {
   return port;
 }
 
-/** Nothing here re-sends the job: the worker owns it, and the record it wrote
- *  before starting is what makes reconnecting safe. */
+/**
+ * Nothing here re-sends a task: the worker owns the queue, and the record on
+ * disk is what makes reconnecting safe.
+ *
+ * Two kinds of message. `tasks` is the queue as it stands and is purely a
+ * report — it paints the card and dims the folders being emptied, and never
+ * settles anything. `task-ended` is the one that changes numbers, because only
+ * an ending knows which mail actually moved.
+ */
 function onFolderMessage(message) {
-  const name = deleteState?.name ?? message?.name ?? 'Folder';
+  if (message?.type === 'tasks') {
+    // A task this panel has just queued may not be in the worker's answer yet.
+    // Dropping it here would blink it out of the card and back in again.
+    const known = new Set(message.queue.map((task) => task.id));
+    const mine = tasks.filter((task) => enqueuing.has(task.id) && !known.has(task.id));
 
-  if (message?.type === 'delete-progress') {
-    // `done` can fall short of `total`: a message under both a parent and a
-    // child is counted once per row that holds it, but Gmail only moves it
-    // once. Completion is the worker saying so, never the two meeting.
-    setAction(
-      message.total
-        ? COPY.deleteFolder.progress(name, Math.min(message.done, message.total), message.total)
-        : COPY.deleteFolder.working(name)
-    );
+    tasks = [...message.queue, ...mine];
+    paintTasks();
+    markWorkingRows();
     return;
   }
 
-  if (message?.type === 'delete-done') {
-    const ids = deleteState?.ids ?? (message.labels ?? []).map((label) => label.id);
-    deleteState = null;
-    setAction(null);
+  if (message?.type !== 'task-ended') return;
 
-    removeFolders(ids);
+  const name = message.name || 'Folder';
+
+  // Neither of these settles anything. The task is still in the worker's queue
+  // and will be tried again, so the mail it is holding stays held — putting it
+  // back now would show it moving, moving back, and then moving again. The card
+  // stays up for the same reason, and because the stop button on it is the way
+  // out.
+  if (message.ending === 'throttled') {
+    // Not an error, and not worded as one: nothing failed and nothing was
+    // refused. Google is limiting how fast mail can be moved, which is the one
+    // thing about this product a user cannot be expected to guess.
+    trace('job', 'task throttled — it stays queued', { task: message.id });
+    flash(COPY.tasks.throttled);
+    return;
+  }
+
+  if (message.ending === 'failed') {
+    console.error('[MailBoy] task failed:', message.message);
+    flash(COPY.tasks.retrying, 'error');
+    return;
+  }
+
+  tasks = tasks.filter((task) => task.id !== message.id);
+  paintTasks();
+
+  const stopped = message.ending === 'stopped';
+
+  if (message.kind === 'folder-delete') {
+    if (stopped) {
+      markWorkingRows();
+      flash(COPY.deleteFolder.stopped(name));
+      // A folder delete keeps no ids of its own — it re-derives its work by
+      // listing — so what it managed before the stop is genuinely unknown.
+      settleTask(message.id, { listing: true, why: 'the delete was stopped partway' });
+      return;
+    }
+
+    removeFolders((message.labels ?? []).map((label) => label.id));
     flash(summariseDelete(message, name));
-
     // Both paths have a destination the panel knows — Trash, or the inbox — so
-    // a completed one settles from the outcome. The job lists its own labels
+    // a completed one settles from the record. The job lists its own labels
     // rather than taking the ids the panel projected, so the two sets can differ
     // slightly where mail arrived mid-job; the weekly listing squares that up.
-    resolveAction(settlementOf(message));
+    settleTask(message.id, { remaining: [] });
     return;
   }
 
-  if (message?.type === 'delete-stopped') {
-    deleteState = null;
-    markWorkingRows();
-    setAction(null);
-    flash(COPY.deleteFolder.stopped(name));
-    // Some of the mail moved and some did not, and the job does not say which.
-    resolveAction({ listing: true, why: 'the delete was stopped partway' });
-    return;
-  }
+  const summary = summariseBulk(message, message.action, message.target ?? '');
+  flash(stopped ? COPY.tasks.stopped(message.remaining?.length ?? 0) : summary);
 
-  if (message?.type === 'delete-failed') {
-    console.error('[MailBoy] deleting folder failed:', message.message);
-    deleteState = null;
-    markWorkingRows();
-    setAction(null);
-    flash(COPY.deleteFolder.failed(name), 'error');
-    resolveAction({ listing: true, why: 'the delete failed outright' });
-    return;
-  }
-
-  // A panel opened mid-job is told what is running before it knows itself, so
-  // the worker's word stands in where there is no local state.
-  if (message?.type === 'bulk-progress') {
-    bulkState ??= { action: message.action, total: message.total, target: message.target ?? '' };
-    setAction(bulkStatus(message.done, message.total));
-    return;
-  }
-
-  if (message?.type === 'bulk-done' || message?.type === 'bulk-stopped') {
-    const action = bulkState?.action ?? message.action;
-    const target = bulkState?.target ?? message.target ?? '';
-    const stopped = message.type === 'bulk-stopped';
-    bulkState = null;
-    setAction(null);
-
-    flash(
-      stopped
-        ? COPY.move.stopped(summariseBulk(message, action, target))
-        : summariseBulk(message, action, target)
-    );
-
-    resolveAction(settlementOf(message, stopped));
-    return;
-  }
-
-  if (message?.type === 'bulk-failed') {
-    console.error('[MailBoy] selection job failed:', message.message);
-    bulkState = null;
-    setAction(null);
-    flash(COPY.move.failed, 'error');
-    // The rows are showing mail gone from somewhere it may never have left.
-    resolveAction({ listing: true, why: 'the selection job failed outright' });
-  }
+  // `remaining` is exactly the mail that did not move — refusals on a completed
+  // run, everything untouched on a stopped one — and the record carried it, so
+  // there is nothing here that needs a re-read to find out.
+  settleTask(message.id, { remaining: message.remaining ?? [] });
 }
 
 /**
- * Read a job's outcome as a settlement: which of the projected messages landed,
- * which did not, and whether the answer is knowable at all.
+ * Whether the queue has been read off disk and turned into panel state.
  *
- * The panel already receives everything this needs and used to discard it. What
- * it can work out depends on the call the job was built from:
- *
- * - **`batchModify`** — a move, and the folder delete's hand-back to the inbox.
- *   It runs in chunks of a thousand, in order, and a chunk either succeeds
- *   whole or throws (see `modifyMessages` in gmail.js). So `moved` names a
- *   prefix of the ids, exactly: everything before it landed, everything after
- *   it did not.
- * - **`messages.trash`** — one call per message, and it reports the ids it would
- *   not move. On a completed run everything except those landed. **Stopped is
- *   the exception**: its batches run three at a time, so which ones got through
- *   is not a prefix and is not reported, and there is nothing to settle from.
- * - **A restore** has no destination to settle *into*, whatever it reports.
- */
-function settlementOf(message, stopped = false) {
-  if (!pendingProjection) {
-    return { listing: true, why: 'this panel adopted the job and never projected it' };
-  }
-
-  const { action, ids } = pendingProjection;
-  if (action === 'restore') {
-    return { listing: true, why: 'a restore lands in folders nothing here can know' };
-  }
-
-  if (action === 'trash') {
-    if (stopped) return { listing: true, why: 'a stopped trash does not report which went' };
-    const refused = new Set(message.failed ?? []);
-    return {
-      landed: ids.filter((id) => !refused.has(id)),
-      stranded: [...refused],
-    };
-  }
-
-  // The folder delete's hand-back to the inbox. It only ever reaches here having
-  // completed — a stop or a failure takes the listing above — so all of it
-  // landed. Deliberately **not** sliced by `restored`: that figure counts what
-  // the job's own re-listing found, which has no relationship to the order or
-  // the length of the ids the panel projected, so slicing by it would strand an
-  // arbitrary handful.
-  if (action === 'restore-folder') return { landed: ids, stranded: [] };
-
-  // A move. `batchModify` runs chunks of a thousand in order over this very
-  // array, and a chunk either succeeds whole or throws, so `moved` is an exact
-  // prefix of it.
-  const moved = Number.isFinite(message.moved) ? message.moved : ids.length;
-  return { landed: ids.slice(0, moved), stranded: ids.slice(moved) };
-}
-
-/**
- * Adopt a delete that is still running from a previous open, or one the worker
- * was killed partway through.
- *
- * Without this the panel would look idle while folders quietly disappeared out
- * from under it, and the rows involved would invite a second delete.
- */
-/**
- * Whether the pending job records have been read and turned into panel state.
- *
- * Until they have, `jobOutstanding` has to fall back to the records themselves;
- * afterwards it must not, since a record outlives the stop that ended its job.
+ * Until it has, `jobOutstanding` falls back to the record itself; afterwards it
+ * must not, since the worker's word is the current one.
  */
 let jobsAdopted = false;
 
-/** Housekeeping at boot, so a failure here costs the dimming, never the panel. */
+/**
+ * Housekeeping at boot, so a failure here costs the dimming, never the panel.
+ *
+ * Hands back the promise because one caller has to wait on it: a full listing
+ * run before the queue is in hand would put every email a task is holding back
+ * onto the rows it is leaving, with nothing left to hide it again.
+ */
 function watchPendingJobs() {
-  const adopted = Promise.all([
-    adoptPendingDelete().catch((err) => {
-      console.warn('[MailBoy] could not pick up the pending delete:', err);
-    }),
-    adoptPendingBulk().catch((err) => {
-      console.warn('[MailBoy] could not pick up the pending selection job:', err);
-    }),
-  ]);
-
-  void adopted.then(() => {
-    jobsAdopted = true;
-  });
+  return adoptPendingTasks()
+    .catch((err) => console.warn('[MailBoy] could not pick up the task queue:', err))
+    .finally(() => {
+      jobsAdopted = true;
+    });
 }
 
-async function adoptPendingDelete() {
-  const job = await readDeleteJob();
-  if (!job || deleteState) return;
+/**
+ * Pick up whatever the queue is still holding — a job from a previous open, or
+ * one the worker was killed partway through.
+ *
+ * **This is what makes the hiding survive a reopen.** The record carries what
+ * each task took out of which row, so the panel can re-establish the projection
+ * it never made, finish it off when the task ends, and put the mail back if
+ * somebody presses stop. The old memory-only projection could do none of that,
+ * and paid for a full listing every time instead.
+ */
+async function adoptPendingTasks() {
+  const queued = await readTasks();
+  if (!queued.length) return;
 
-  deleteState = {
-    ids: job.labels.map((label) => label.id),
-    name: job.labels.at(-1)?.name ?? '',
-  };
+  for (const task of queued) {
+    if (projections.has(task.id)) continue;
+
+    const vacated = task.vacated ?? {};
+    projections.set(task.id, {
+      action: task.action,
+      // A folder delete keeps no id list of its own — it re-derives its work by
+      // listing its labels — so what it hid is read back out of `vacated`. That
+      // is the right set either way: settling only ever concerns mail that was
+      // actually taken out of a row.
+      ids: task.ids ?? [...new Set(Object.values(vacated).flat())],
+      destination: task.destination ?? null,
+      vacated,
+    });
+  }
+
+  projected = projections.size > 0;
+  tasks = queued.map(taskSummary);
+
+  trace('job', 'adopted the queue left by a previous open', {
+    tasks: tasks.length,
+    holding: queued.reduce((sum, task) => sum + (task.remaining?.length ?? 0), 0),
+  });
+
+  paintTasks();
   markWorkingRows();
-  setAction(COPY.deleteFolder.working(deleteState.name));
   folderChannel();
 }
 
@@ -4657,11 +4857,11 @@ function closeRuleGroup() {
  */
 async function confirmRuleDelete(doomed, where) {
   if (!doomed.length) return;
-  if (jobRunning()) {
-    flash(COPY.actions.busy, 'error');
-    return;
-  }
 
+  // Deliberately not gated on the queue. Deleting a filter is a settings write
+  // that moves no mail and costs 5 quota units, so there is nothing for it to
+  // race and nothing for it to starve — and refusing it while a folder empties
+  // would be exactly the arbitrary "come back later" the queue exists to end.
   const ticked = new Set(doomed.map((rule) => rule.id));
   const filterIds = new Set(doomed.map((rule) => rule.filterId));
   const alsoGoing = rules.filter(
@@ -4934,10 +5134,17 @@ function stopLoad() {
   // Tell the worker, but do not wait to hear back. It stops on its own; the
   // panel has no reason to sit through a batch that is already in flight.
   //
-  // Named, because this button is about refreshing. A delete has its own
-  // lifetime and pressing stop on a refresh must not abandon one half-done.
+  // Named, because this button is about refreshing. A task has its own lifetime
+  // and pressing stop on a refresh must not abandon one half-done.
   chrome.runtime.sendMessage({ type: 'stop', job: 'measure' }).catch(() => {});
   stopSignal?.();
+
+  // And the same for the pass in this page. `stopRequested` only takes effect at
+  // the next check inside `collect`, which is on the far side of whatever
+  // request is in flight — and while the task queue is spending the same quota
+  // budget, that request may not even have been sent yet. Without this the
+  // button did nothing visible for tens of seconds, which reads as broken.
+  abortLoad?.();
   setFooter();
 }
 
@@ -5055,38 +5262,35 @@ async function isFresh() {
 }
 
 /**
- * Whether a job the worker owns is still moving mail about.
+ * Whether the queue is still moving mail about.
  *
- * Nothing reads the mailbox while one is: a listing would enumerate a mailbox
- * that is changing under it, so its numbers would be wrong on arrival, and it
- * would stamp the change-log bookmark at a position membership does not
- * describe — the one failure the sync cannot detect afterwards. It would also be
- * spending quota against the job it is racing.
+ * It no longer *blocks* a load, which is the change a queue forced: a job can
+ * now run for the best part of an hour while more are added behind it, and
+ * refusing to re-read the mailbox for all of that is refusing the one button
+ * that fixes a wrong number. What it does instead is decide two things:
  *
- * **`deleteState`/`bulkState` are the signal, not the job records.** A record
- * outlives a stop by design, so that the alarm or the next open can resume it —
- * reading records here would mean one stopped job blocked every load for the
- * next 24 hours. The panel's own state is set on dispatch and on adoption and
- * cleared on every ending, which is exactly the question being asked.
+ * - **An open with nothing to prove skips the read entirely.** A change-log sync
+ *   would be patching onto a projection rather than onto Gmail's own answer, and
+ *   a full listing costs thousands of units against the job it is racing. The
+ *   numbers on screen are the projection, which is the honest picture until the
+ *   queue drains.
+ * - **A refresh someone actually pressed goes ahead**, and puts the projection
+ *   back over the fresh counts afterwards — see `reprojectTasks`.
  *
- * The records are consulted for the one moment that state cannot cover: the
- * first load of a session, which runs before `watchPendingJobs` has had a
- * chance to adopt anything.
+ * **The queue is the signal, not a stale record.** The worker's broadcast keeps
+ * `tasks` current; the record is consulted only for the first load of a session,
+ * which runs before `watchPendingJobs` has had a chance to read it.
  */
 async function jobOutstanding() {
   if (jobRunning()) return true;
   if (jobsAdopted) return false;
 
   try {
-    const [remainingDelete, remainingBulk] = await Promise.all([readDeleteJob(), readBulkJob()]);
-    const pending = Boolean(remainingDelete || remainingBulk);
-    if (pending) {
-      trace('job', 'a record was left behind by a previous open', {
-        delete: Boolean(remainingDelete),
-        bulk: Boolean(remainingBulk),
-      });
+    const queued = await readTasks();
+    if (queued.length) {
+      trace('job', 'the queue was left running by a previous open', { tasks: queued.length });
     }
-    return pending;
+    return queued.length > 0;
   } catch (err) {
     console.warn('[MailBoy] could not check for a pending job:', err);
     return false;
@@ -5123,15 +5327,21 @@ async function syncFromHistory() {
 }
 
 /**
- * A complete load's snapshot. No `projected` flag — these numbers are Gmail's
- * own, which is exactly what makes the next open able to patch from them.
+ * A complete load's snapshot.
+ *
+ * The `projected` flag rides along from the live state rather than being fixed
+ * at false. These numbers are Gmail's own **except** where a task in the queue
+ * has had its projection put back over them, and a refresh is allowed to run
+ * mid-move now — so a pass can finish and still be describing what MailBoy was
+ * asked to do rather than what Gmail has done. Flagging it is what makes the
+ * next open pay that debt instead of syncing onto a prediction.
  */
 async function writeSnapshot(generatedAt, groups, counts, when) {
   try {
     const key = await scopedKey(CACHE_NAME);
     if (!key) return;
-    await chrome.storage.local.set({ [key]: { generatedAt, groups, counts } });
-    trace('snapshot', `saved — ${when}`);
+    await chrome.storage.local.set({ [key]: { generatedAt, groups, counts, projected } });
+    trace('snapshot', `saved — ${when}`, { projected });
   } catch (err) {
     console.warn('[MailBoy] could not cache this pass:', err);
   }
@@ -5157,13 +5367,13 @@ async function load({ force = false } = {}) {
 
   trace('open', force ? 'asked for a full listing' : 'deciding how to catch up');
 
-  // Before either path, and it blocks both. See `jobOutstanding`.
-  if (await jobOutstanding()) {
-    trace('open', 'a job is still moving mail — reading nothing');
+  // Before either path. A queue in flight rules out the cheap one either way —
+  // a sync would patch the change log onto a projection — and rules out the
+  // expensive one unless somebody actually asked for it. See `jobOutstanding`.
+  const queueBusy = await jobOutstanding();
+  if (queueBusy && !force) {
+    trace('open', 'the queue is still moving mail — reading nothing');
     membershipReady = restoreMembership();
-    // Someone who pressed the button is owed an answer; an open that quietly
-    // skipped its sync is not worth interrupting for.
-    if (force) flash(COPY.actions.busy, 'error');
     return;
   }
 
@@ -5187,13 +5397,35 @@ async function load({ force = false } = {}) {
   // when its own enumeration lands.
   membershipReady = restoreMembership();
 
+  const mine = ++passId;
   loading = true;
   stopRequested = false;
   stopSignal = null;
   setBusy(true);
 
-  try {
+  /**
+   * Whether this pass is still the one whose word counts.
+   *
+   * An abandoned pass keeps running — a Gmail request cannot be recalled — so
+   * every hook below is gated on this rather than left to repaint rows, save
+   * membership or stamp a snapshot on behalf of a load nobody is waiting for.
+   */
+  const current = () => mine === passId && !stopRequested;
+
+  /** Resolved by `stopLoad`, which is how the button stops meaning "eventually". */
+  const abandoned = Symbol('stopped');
+  const stopped = new Promise((resolve) => {
+    abortLoad = () => resolve(abandoned);
+  });
+
+  async function runPass() {
     const labels = await listLabels();
+    // The wait above is where a stop most often lands now — the label list is
+    // this pass's first request, and it queues behind whatever the task queue is
+    // spending. Rebuilding the rows for a pass that has been called off would
+    // blank numbers that are on screen and correct.
+    if (!current()) return abandoned;
+
     const groups = buildGroups(labels);
     renderSkeleton(groups);
     // Rows were just rebuilt; put back whatever was already known so a refresh
@@ -5206,10 +5438,26 @@ async function load({ force = false } = {}) {
     const counts = await collect(groups, {
       // Deliberately not stamping the timestamp here: counts land in stages,
       // and "Updated just now" while later rows are still filling in is a lie.
-      onCounts: paintRecords,
-      onCounting: (done, total) => setProgress('counting', done, total),
+      onCounts: (records) => {
+        if (current()) paintRecords(records);
+      },
+      onCounting: (done, total) => {
+        if (current()) setProgress('counting', done, total);
+      },
       onSizes: (records, done, total) => {
+        if (!current()) return;
         paintRecords(records);
+
+        // Enumeration has just finished and replaced `counts` with Gmail's own
+        // answer — which still holds every email the queue is in the middle of
+        // moving. Hiding it again is what keeps a refresh started mid-move from
+        // putting all of that mail back on the rows it is leaving. After
+        // `paintRecords` rather than before it: this pass's first payload was
+        // built before the hook ran, and nothing is drawn between the two.
+        //
+        // Only at the first firing. From the second on, `collect` re-derives
+        // patched rows on its own way out.
+        if (!countsSettled) reprojectTasks();
         // Sizes arriving behind an open list should show up in it.
         refreshOpenLists();
         // Enumeration is finished by the time this first fires, so the counts
@@ -5224,28 +5472,47 @@ async function load({ force = false } = {}) {
         // bookmark by now, so the next open would re-list a mailbox it had just
         // read. Nothing here claims the sizes are done: rows keep spinning, and
         // the worker keeps measuring whether the panel is open or not.
+        //
+        // `painted` rather than `records`: this payload was built before the
+        // re-projection above ran, and what is on screen is the thing worth
+        // keeping.
         if (!countsSettled) {
           countsSettled = true;
-          void writeSnapshot(generatedAt, groups, records, 'counts final, sizes still coming');
+          void writeSnapshot(generatedAt, groups, painted, 'counts final, sizes still coming');
         }
       },
       measure: measureInWorker,
-      stopped: () => stopRequested,
+      // Not `stopRequested`: the next load clears that, and an orphan whose
+      // stop had been lifted would go on to save membership and a bookmark for
+      // a pass nobody is waiting for. A pass token cannot be un-revoked.
+      stopped: () => !current(),
     });
 
+    return { groups, counts, generatedAt };
+  }
+
+  try {
+    // The pass, or the stop — whichever answers first. A request already in
+    // flight cannot be recalled, so an abandoned pass is left to unwind on its
+    // own: `current()` keeps it from painting or writing anything, and nothing
+    // here waits for it.
+    const outcome = await Promise.race([runPass(), stopped]);
+    if (outcome === abandoned || !current()) {
+      trace('listing', 'pass abandoned — stop pressed');
+      return;
+    }
+
+    const { groups, counts, generatedAt } = outcome;
     paintRecords(counts);
     setProgress(null);
-    setBusy(false);
     setFooter(generatedAt);
 
-    // Enumeration has replaced whatever an action projected, so the panel is no
-    // longer owed a resolution. A stopped pass is partial and settles nothing.
-    if (!stopRequested) {
-      projected = false;
-      pendingProjection = null;
-      countsSettled = true;
-      await writeSnapshot(generatedAt, groups, counts, 'pass complete');
-    }
+    // Enumeration has replaced whatever an action projected — **except** for
+    // anything the queue is still holding, which `reprojectTasks` put straight
+    // back and which nothing but the job's own ending can settle.
+    projected = projections.size > 0;
+    countsSettled = true;
+    await writeSnapshot(generatedAt, groups, counts, 'pass complete');
   } catch (err) {
     setProgress(null);
     console.error('[MailBoy] load failed:', err);
@@ -5257,8 +5524,14 @@ async function load({ force = false } = {}) {
       renderErrorState(err);
     }
   } finally {
-    loading = false;
-    setBusy(false);
+    // A load that has already been superseded must not put the chrome back:
+    // the pass that replaced it owns the button and the card now.
+    if (mine === passId) {
+      loading = false;
+      abortLoad = null;
+      setProgress(null);
+      setBusy(false);
+    }
   }
 }
 
@@ -5320,16 +5593,17 @@ function forgetMailbox() {
   closeEditor();
   closeMoveDialog();
   // Whatever was being deleted or moved belonged to the mailbox being left. The
-  // job records survive under that account's namespace; this is only the panel
-  // letting go of them.
-  deleteState = null;
-  bulkState = null;
-  // The next mailbox has its own pending jobs, and they have not been looked
-  // for yet — so the records have to be consulted again on its first load.
+  // queue survives under that account's namespace; this is only the panel
+  // letting go of it.
+  tasks = [];
+  enqueuing.clear();
+  paintTasks();
+  // The next mailbox has its own queue, and it has not been looked for yet — so
+  // the record has to be consulted again on its first load.
   jobsAdopted = false;
   // Nothing on screen is a projection any more, because nothing is on screen.
   projected = false;
-  pendingProjection = null;
+  projections.clear();
   setAction(null);
   // Rules belong to the mailbox that made them, and a subject rule carries a
   // real mail subject — the same reason the mail screens are cleared. Nothing
@@ -5406,9 +5680,10 @@ el.connect.addEventListener('click', async () => {
     // An unreadable cache is an emptier first frame, never a failed connect.
     await paintCache().catch((err) => console.warn('[MailBoy] cache unreadable:', err));
     await load();
-    // Signing back in within the retention window can find a job that was
-    // interrupted by the sign-out still outstanding.
-    watchPendingJobs();
+    // Signing back in within the retention window can find a queue that was
+    // halted by the sign-out still outstanding — a logout stops the tasks and
+    // deliberately keeps them, since they belong to that mailbox.
+    void watchPendingJobs();
   } catch (err) {
     // Closing the Google window is a choice, not a failure worth shouting about.
     if (err instanceof AuthCancelled) {
@@ -5430,12 +5705,14 @@ async function eraseAccountData(id) {
   await chrome.storage.local.remove([
     keyFor(id, CACHE_NAME),
     keyFor(id, IDENTITY_NAME),
-    // A half-finished delete is intent, not data, but it is keyed the same way
-    // and there is nothing left for it to act on once the rest of this is gone.
-    deleteJobKey(id),
-    // This one *is* mail data — a selection job carries the message ids it is
-    // working through, since nothing in the mailbox can re-derive them.
-    bulkJobKey(id),
+    // The queue *is* mail data: a task carries the message ids it is working
+    // through, since nothing in the mailbox can re-derive which senders somebody
+    // ticked. A folder delete in it is intent rather than data, but it is keyed
+    // the same way and has nothing left to act on once the rest of this is gone.
+    tasksKey(id),
+    // Anything an older build left behind, which the queue would otherwise
+    // adopt on the next open of an account that has just been erased.
+    ...legacyKeys(id),
   ]);
 }
 
@@ -5493,7 +5770,8 @@ async function handleLogout() {
   // A pass still reading messages has no account to file them under once the
   // sign-out lands, and its token is about to be revoked. The worker is told
   // directly as well: it may be measuring from an earlier open, with this
-  // panel idle and unaware of it.
+  // panel idle and unaware of it. Naming no job stops the queue too, for the
+  // same reason — the token every task is spending is about to go.
   stopLoad();
   chrome.runtime.sendMessage({ type: 'stop' }).catch(() => {});
 
@@ -5516,6 +5794,11 @@ async function handleLogout() {
 el.logout.addEventListener('click', () => handleLogout());
 
 el.refresh.addEventListener('click', () => (busy ? stopLoad() : load({ force: true })));
+
+// Never disabled, for the same reason the refresh button is not: it is the only
+// way to call the queue off, and a queue that cannot be called off is the thing
+// somebody will close the browser over.
+el.taskStop.addEventListener('click', stopTasks);
 
 /**
  * Keep what the panel has worked out when it is closed.
@@ -6020,9 +6303,19 @@ document.addEventListener('keydown', (event) => {
   // The silent renewal came back as a different mailbox from the one this open
   // painted and loaded — everything on screen belongs to the account left
   // behind, and `forgetMailbox` has already cleared it. Read the new one.
-  if (switched) await load({ force: true });
+  //
+  // The queue is adopted *first* here, unlike the ordinary path below: the load
+  // that follows is a full listing, and it would find every email a task is
+  // moving still sitting where it was. `reprojectTasks` is what hides it again,
+  // and it can only do that for tasks the panel has read.
+  if (switched) {
+    await watchPendingJobs();
+    await load({ force: true });
+    return;
+  }
 
-  // Last, because it dims rows the load has to have drawn first — and after
-  // any account switch, so it never adopts the outgoing mailbox's job.
-  watchPendingJobs();
+  // Last on the ordinary path, because it dims rows the load has to have drawn
+  // first. Nothing above it re-lists: an open with a queue outstanding reads
+  // nothing at all, which is what makes the ordering safe here.
+  void watchPendingJobs();
 })();

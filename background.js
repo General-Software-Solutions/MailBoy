@@ -1,47 +1,79 @@
 // MailBoy service worker.
 //
-// Four jobs: open the side panel from the toolbar, own the slow half of the
-// data pass — reading every message for its size and sender — empty a folder
-// that is being deleted, and carry out an action on a selection of senders.
+// Three jobs: open the side panel from the toolbar, own the slow half of the
+// data pass — reading every message for its size and sender — and work through
+// the task queue, which is every action that moves mail about.
 //
-// All three of the long ones live here rather than in the panel because they
-// take minutes, and requiring someone to sit with the panel open for that is
-// not a reasonable thing to ask.
+// Both of the long ones live here rather than in the panel because they take
+// minutes, and requiring someone to sit with the panel open for that is not a
+// reasonable thing to ask.
 //
-// None keeps a cursor. The measuring queue is rebuilt from scratch on every
-// wake and the message cache filters out whatever is already known; a delete
-// re-lists its labels, and mail it has already moved no longer comes back in
-// that listing. So "start" and "resume" are one code path, which is what makes
-// a termination at any instant harmless — Chrome ends a worker after roughly 30
-// seconds of inactivity, and while a batch every couple of seconds keeps it
-// alive, that is a happy accident and never something to depend on.
+// **Measuring keeps no state at all.** Its queue is rebuilt from scratch on
+// every wake and the message cache filters out whatever is already known, so
+// "start" and "resume" are one code path and a termination at any instant is
+// harmless — Chrome ends a worker after roughly 30 seconds of inactivity, and
+// while a batch every couple of seconds keeps it alive, that is a happy accident
+// and never something to depend on.
 //
-// A delete carries one small record all the same — which folders, and what to
-// do with their mail. That is intent, not progress: nothing in the mailbox can
-// tell the worker whether the user asked for Trash or for the inbox. A
-// selection job carries a much larger one, because the ids themselves cannot be
-// re-derived from anything Gmail holds; see src/bulk.js.
+// **The task queue is the opposite, and deliberately so.** A folder delete could
+// re-derive its work by listing its labels; a sender selection cannot, because
+// nothing in Gmail records which senders somebody ticked. So a task carries its
+// own outstanding ids and checkpoints them as it goes — see src/tasks.js. The
+// queue is worked through one task at a time, because they share one quota
+// budget and running two only splits the same rate between them; what the queue
+// buys is that nothing has to be *refused* while one runs.
 
 import { activeAccount } from './src/account.js';
 import { AuthError } from './src/auth.js';
-import { clearBulkJob, readBulkJob, runBulkJob, saveBulkJob } from './src/bulk.js';
-import { clearDeleteJob, readDeleteJob, runDeleteJob, saveDeleteJob } from './src/folders.js';
+import { runBulkJob } from './src/bulk.js';
+import { runDeleteJob } from './src/folders.js';
 import { buildQueue } from './src/mailbox.js';
 import { ensureMeta, flushMessages } from './src/messages.js';
+import { clearTasks, dropTask, readTasks, summarise, updateTask } from './src/tasks.js';
 import { trace } from './src/trace.js';
 
 const PORT_NAME = 'measure';
 const ALARM = 'measure';
 
-const FOLDER_PORT = 'folders';
-const DELETE_ALARM = 'folder-delete';
-const BULK_ALARM = 'bulk-job';
+const TASK_PORT = 'folders';
+const TASK_ALARM = 'tasks';
 
 /** Safety net: if the worker is killed mid-pass, this starts it again. */
 const RESUME_MINUTES = 1;
 
 /** After a hard failure, stop hammering and try again much later. */
 const RETRY_MINUTES = 15;
+
+/**
+ * After Gmail rate-limits a task to a standstill.
+ *
+ * Much sooner than a hard failure, because nothing is broken — the limit that
+ * refuses is per *minute*, so it clears on its own.
+ *
+ * It eases off when a run achieves nothing at all, because that means something
+ * else is holding the whole budget — nearly always a measuring pass, which can
+ * run for eighteen minutes — and coming straight back to be refused again only
+ * adds to the contention it is waiting on. A run that moved *some* mail is
+ * making progress and comes back at the short end.
+ */
+const THROTTLED_MINUTES = 2;
+const THROTTLED_MAX_MINUTES = 15;
+
+/**
+ * How often a running task writes down what is left of it.
+ *
+ * Effectively every batch, and deliberately so — a trash lands one batch of 100
+ * every few seconds and a move one chunk of 1,000 twice a second, so this is a
+ * coalescing window rather than a real throttle. It is only there because
+ * `trashMessages` runs three batches at once and their landings arrive together.
+ *
+ * The interval is what a stop can be wrong by: whatever moved since the last
+ * write is reported as still outstanding, so the panel puts it back onto a row
+ * it has actually left. Re-acting on it is a no-op and the next full listing
+ * corrects the number, but the shorter this is the smaller that window — which
+ * is why it is a second and not the ten it could comfortably be.
+ */
+const CHECKPOINT_MS = 1000;
 
 function openOnClick() {
   chrome.sidePanel
@@ -52,10 +84,9 @@ function openOnClick() {
 chrome.runtime.onInstalled.addListener(openOnClick);
 chrome.runtime.onStartup.addListener(openOnClick);
 
-// A browser restart takes the alarms with it, so a job interrupted by one would
-// otherwise sit half-done until somebody opened the panel and noticed.
-chrome.runtime.onStartup.addListener(() => void resumeDelete());
-chrome.runtime.onStartup.addListener(() => void resumeBulk());
+// A browser restart takes the alarms with it, so a queue interrupted by one
+// would otherwise sit half-done until somebody opened the panel and noticed.
+chrome.runtime.onStartup.addListener(() => void runQueue());
 
 // ── Talking to the panel ─────────────────────────────────────────
 
@@ -63,27 +94,43 @@ chrome.runtime.onStartup.addListener(() => void resumeBulk());
 const ports = new Set();
 
 /** @type {Set<chrome.runtime.Port>} */
-const folderPorts = new Set();
+const taskPorts = new Set();
 
 /** Last progress seen, so a panel opening mid-pass is not left guessing. */
 let progress = null;
 
-/** The same, for a delete: `{done, total, name}`. */
-let deleteProgress = null;
-
-/** And for a selection job: `{done, total, action, target}`. */
-let bulkProgress = null;
+/** The queue as the panel should see it: summaries, never ids. */
+let queueView = [];
 
 let running = false;
 
 /** Set by a stop from the panel; cleared when a fresh pass begins. */
 let stopping = false;
 
-let deleting = false;
-let stoppingDelete = false;
+let workingTasks = false;
+let stoppingTasks = false;
 
-let bulking = false;
-let stoppingBulk = false;
+/**
+ * What the stop in progress means, if there is one.
+ *
+ * `'discard'` is the card's stop button: call the tasks off and give the mail
+ * back. `'halt'` is a logout: the token every task is spending is about to be
+ * revoked, so they have to stop — but the queue is namespaced to that account
+ * and is exactly what should be waiting when somebody signs back in.
+ *
+ * @type {'discard' | 'halt' | null}
+ */
+let stopKind = null;
+
+/**
+ * Gags `publishQueue` between a discard and the moment the queue is actually
+ * emptied, so a checkpoint from the task still winding down cannot redraw a card
+ * the user has just dismissed. Lifted by `endTasks`, which has the real answer.
+ */
+let discardingTasks = false;
+
+/** The discard in progress, so a pass can wait for it. @type {Promise<void>} */
+let endingTasks = Promise.resolve();
 
 function broadcast(message, to = ports) {
   for (const port of to) {
@@ -96,23 +143,36 @@ function broadcast(message, to = ports) {
   }
 }
 
+/** What the panel draws its task card from. Sent on every change. */
+function publishQueue(queue) {
+  queueView = discardingTasks ? [] : queue.map(summarise);
+  broadcast({ type: 'tasks', queue: queueView }, taskPorts);
+}
+
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === FOLDER_PORT) {
-    folderPorts.add(port);
-    port.onDisconnect.addListener(() => folderPorts.delete(port));
+  if (port.name === TASK_PORT) {
+    taskPorts.add(port);
+    port.onDisconnect.addListener(() => taskPorts.delete(port));
 
-    if (deleteProgress) port.postMessage({ type: 'delete-progress', ...deleteProgress });
-    if (bulkProgress) port.postMessage({ type: 'bulk-progress', ...bulkProgress });
+    // Whatever is already under way, said immediately — a panel opened ten
+    // minutes into a trash pass should not have to wait for the next batch.
+    //
+    // Only when there is something to say: a worker that has just been woken up
+    // holds an empty view until it has read the queue, and announcing that as
+    // "nothing is running" would blank the panel's card for a moment before
+    // `runQueue` below fills it in.
+    if (queueView.length) port.postMessage({ type: 'tasks', queue: queueView });
 
-    // Opening the panel is a recovery path in its own right. A job whose alarm
+    // Opening the panel is a recovery path in its own right. A queue whose alarm
     // was lost — cleared by a logout, or gone with a browser restart — would
-    // otherwise sit there with its folders half emptied and nothing to wake it.
-    if (!deleting) void resumeDelete();
-    if (!bulking) void resumeBulk();
+    // otherwise sit there with mail half moved and nothing to wake it.
+    void runQueue();
 
     port.onMessage.addListener((message) => {
-      if (message?.type === 'delete') void startDelete(message.job);
-      if (message?.type === 'bulk') void startBulk(message.job);
+      // The panel has just added something. The record is already on disk; this
+      // only says "there is work", so a queue standing idle starts at once
+      // instead of waiting out the alarm.
+      if (message?.type === 'run') void runQueue();
     });
     return;
   }
@@ -132,16 +192,16 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-// ── The job ──────────────────────────────────────────────────────
+// ── Stopping ─────────────────────────────────────────────────────
 
 /**
  * Stop arrives as a one-off message rather than over the port, so it lands
  * even if the panel is between reconnects. It also clears the alarm — a pass
  * the user stopped must not quietly resume a minute later.
  *
- * `job` names which one to call off. The refresh button stops measuring only; a
- * logout names nothing and stops everything, because the token both of them are
- * using is about to be revoked.
+ * `job` names which one to call off. The refresh button stops measuring only;
+ * the task card's stop names `tasks`; a logout names nothing and stops
+ * everything, because the token they all share is about to be revoked.
  */
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type !== 'stop') return;
@@ -151,22 +211,39 @@ chrome.runtime.onMessage.addListener((message) => {
     void chrome.alarms.clear(ALARM);
   }
 
-  if (!message.job || message.job === 'delete') {
-    stoppingDelete = true;
-    void chrome.alarms.clear(DELETE_ALARM);
+  if (!message.job || message.job === 'tasks') {
+    stoppingTasks = true;
+    stopKind = message.job === 'tasks' ? 'discard' : 'halt';
+    void chrome.alarms.clear(TASK_ALARM);
   }
 
-  if (!message.job || message.job === 'bulk') {
-    stoppingBulk = true;
-    void chrome.alarms.clear(BULK_ALARM);
+  // **Only a named stop empties the queue.** The card's stop button means "call
+  // this off and give me my emails back", so the record has to go. A logout
+  // names no job at all and means something quite different: the token every
+  // task is spending is about to be revoked, so they have to halt — but the
+  // queue is namespaced to that account and is exactly what should be waiting
+  // when somebody signs back in.
+  //
+  // Emptied here rather than after the running task notices, because a stop is
+  // an answer to a button press and the panel should not sit through a batch
+  // already in flight. Safe to run twice: the second call finds nothing.
+  if (message.job === 'tasks') {
+    discardingTasks = true;
+    // Stamped now, spent later: `endTasks` only takes what was already queued
+    // when the button was pressed. See `clearTasks`. The promise is held because
+    // the pass winding down has to know when the queue has actually been emptied
+    // before it can decide whether anything is left to run.
+    endingTasks = endTasks('stopped', Date.now());
+    void endingTasks;
   }
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) void measure();
-  if (alarm.name === DELETE_ALARM) void resumeDelete();
-  if (alarm.name === BULK_ALARM) void resumeBulk();
+  if (alarm.name === TASK_ALARM) void runQueue();
 });
+
+// ── Measuring ────────────────────────────────────────────────────
 
 /**
  * @param {string[]} [order] the panel's queue when it has one; otherwise the
@@ -229,185 +306,378 @@ async function measure(order) {
   }
 }
 
-// ── Deleting folders ─────────────────────────────────────────────
+// ── The task queue ───────────────────────────────────────────────
+
+/** Something asked for the queue while a pass was already going. See below. */
+let queueWanted = false;
 
 /**
- * Take a delete from the panel.
+ * Work through the queue until it is empty, one task at a time.
  *
- * The record is written before any work starts, so a worker killed on its very
- * first await still leaves something for the alarm to find. Everything after
- * this point goes through `runDelete`, which is also what the alarm calls —
- * there is no separate resume path.
- */
-async function startDelete(job) {
-  if (deleting) return;
-  const stamped = { ...job, startedAt: Date.now() };
-  await saveDeleteJob(stamped);
-  await runDelete(stamped);
-}
-
-/** What the alarm and a browser restart both come back to. */
-async function resumeDelete() {
-  if (deleting) return;
-  const job = await readDeleteJob();
-  if (job) await runDelete(job);
-}
-
-/**
- * Move a folder's mail, then remove the folder.
+ * Everything reaches this: a panel dispatching, the alarm after a killed worker,
+ * a browser restart, and a panel merely connecting. They are all the same code
+ * path, because the queue on disk is the whole of the state.
  *
- * The record is cleared only on a completed run. A stop or a crash leaves it in
- * place with the labels still there, which is exactly the state `runDeleteJob`
- * knows how to pick up from — it re-lists each label and finds only the mail it
- * has not dealt with yet.
+ * **The trampoline is not decoration.** A pass winds down for two reasons that
+ * both leave work behind: a stop calls off the tasks that were queued *when the
+ * button was pressed* and not one added a moment later, and a `run` from the
+ * panel arrives while a task is mid-batch. Either would leave a task sitting
+ * there — a stop clears the alarm, so nothing else would ever wake it. So a call
+ * that finds a pass already going notes it, and the pass rounds again.
  */
-async function runDelete(job) {
-  if (deleting) return;
-  deleting = true;
-  stoppingDelete = false;
+async function runQueue() {
+  if (workingTasks) {
+    queueWanted = true;
+    return;
+  }
 
+  workingTasks = true;
   try {
-    // Signed out there is no token to spend and no mailbox to act on. The job
-    // record is namespaced to the account, so it waits rather than being lost.
-    if (!(await activeAccount())) {
-      await chrome.alarms.clear(DELETE_ALARM);
-      return;
-    }
-
-    // Before the first await that can be interrupted, same as the size pass.
-    chrome.alarms.create(DELETE_ALARM, { periodInMinutes: RESUME_MINUTES });
-
-    const name = job.labels.at(-1)?.name ?? '';
-    deleteProgress = { done: 0, total: job.total ?? 0, name };
-    broadcast({ type: 'delete-progress', ...deleteProgress }, folderPorts);
-
-    const outcome = await runDeleteJob(job, {
-      onProgress: (done, total) => {
-        deleteProgress = { done, total, name };
-        broadcast({ type: 'delete-progress', done, total, name }, folderPorts);
-      },
-      stopped: () => stoppingDelete,
-    });
-
-    deleteProgress = null;
-    await chrome.alarms.clear(DELETE_ALARM);
-
-    if (!outcome.complete) {
-      // Stopped, not finished. The record stays and the alarm above is gone, so
-      // nothing resumes until the panel asks again — which is what a stop means.
-      trace('job', 'folder delete stopped', outcome);
-      broadcast({ type: 'delete-stopped', ...outcome, name }, folderPorts);
-      return;
-    }
-
-    await clearDeleteJob();
-    trace('job', `folder delete finished — ${job.trash ? 'to Trash' : 'to the inbox'}`, {
-      trashed: outcome.trashed,
-      restored: outcome.restored,
-      refused: outcome.failed.length,
-      folders: job.labels.length,
-    });
-    broadcast({ type: 'delete-done', ...outcome, name, labels: job.labels }, folderPorts);
-  } catch (err) {
-    console.error('[MailBoy] deleting folder failed:', err);
-    deleteProgress = null;
-    broadcast({ type: 'delete-failed', message: err?.message ?? String(err) }, folderPorts);
-
-    // Same reasoning as the size pass: nothing here can re-grant a token, and
-    // hammering a refused API every minute helps no one. The record survives
-    // either way, so signing back in and reopening the panel picks it up.
-    await chrome.alarms.clear(DELETE_ALARM);
-    if (!(err instanceof AuthError)) {
-      chrome.alarms.create(DELETE_ALARM, { delayInMinutes: RETRY_MINUTES });
-    }
+    let round;
+    do {
+      queueWanted = false;
+      // A fresh pass is a fresh decision: whatever was called off has been
+      // called off, and the tasks in hand now have not.
+      stoppingTasks = false;
+      discardingTasks = false;
+      stopKind = null;
+      round = await drainQueue();
+    } while (round === 'again' || (round === 'drained' && queueWanted));
   } finally {
-    deleting = false;
+    workingTasks = false;
   }
 }
 
-// ── Acting on a sender selection ─────────────────────────────────
-//
-// Same shape as the delete above, and for the same two reasons: trashing is 5
-// quota units a message, so a large selection is minutes, and a worker can be
-// ended at any moment. The difference is that this job's record carries the
-// message ids themselves — a sender selection is a choice made in the panel and
-// nothing in the mailbox records it, so there is nothing to re-derive it from.
-// See src/bulk.js.
+/**
+ * One pass over the queue.
+ *
+ * @returns {Promise<'drained' | 'again' | 'stop'>} `again` means a discard took
+ *   the tasks it was aimed at and left something behind it, which nothing else
+ *   would wake — the alarm is gone. `stop` ends the trampoline: a hard failure,
+ *   with the task still at the head of the queue and its retry alarm set, or a
+ *   logout, which halts deliberately and keeps everything.
+ */
+async function drainQueue() {
+  try {
+    // Signed out there is no token to spend and no mailbox to act on. The queue
+    // is namespaced to the account, so it waits rather than being lost.
+    if (!(await activeAccount())) {
+      await chrome.alarms.clear(TASK_ALARM);
+      return 'stop';
+    }
 
-async function startBulk(job) {
-  if (bulking) return;
-  const stamped = { ...job, startedAt: Date.now() };
-  await saveBulkJob(stamped);
-  await runBulk(stamped);
+    let queue = await readTasks();
+    publishQueue(queue);
+    if (!queue.length) {
+      await chrome.alarms.clear(TASK_ALARM);
+      return 'drained';
+    }
+
+    // Before the first await that can be interrupted: if the worker dies
+    // mid-task, this is what brings it back.
+    chrome.alarms.create(TASK_ALARM, { periodInMinutes: RESUME_MINUTES });
+
+    while (queue.length && !stoppingTasks) {
+      const ending = await runTask(queue[0]);
+      if (ending === 'failed') return 'stop';
+      if (ending === 'stopped') break;
+      queue = await readTasks();
+      publishQueue(queue);
+    }
+
+    if (stoppingTasks) {
+      // A logout: halt where we are, keep everything, and do not touch the
+      // alarm again — the handler already cleared it.
+      if (stopKind !== 'discard') return 'stop';
+
+      // A discard: wait for the queue to have actually been emptied before
+      // deciding whether anything is left. A task queued in the moment after the
+      // button was pressed survives it (see `clearTasks`), and with the alarm
+      // gone the round after this is the only thing that would ever run it.
+      await endingTasks;
+      return 'again';
+    }
+
+    await chrome.alarms.clear(TASK_ALARM);
+    return 'drained';
+  } catch (err) {
+    console.error('[MailBoy] task queue failed:', err);
+    await chrome.alarms.clear(TASK_ALARM);
+    if (!(err instanceof AuthError)) {
+      chrome.alarms.create(TASK_ALARM, { delayInMinutes: RETRY_MINUTES });
+    }
+    return 'stop';
+  }
 }
 
-/** What the alarm and a browser restart both come back to. */
-async function resumeBulk() {
-  if (bulking) return;
-  const job = await readBulkJob();
-  if (job) await runBulk(job);
-}
+/**
+ * Run one task to its end.
+ *
+ * @returns {Promise<'done' | 'stopped' | 'failed'>} `failed` leaves the task at
+ *   the head of the queue with the retry alarm on it.
+ */
+async function runTask(task) {
+  const base = task.done ?? 0;
 
-async function runBulk(job) {
-  if (bulking) return;
-  bulking = true;
-  stoppingBulk = false;
+  /** Landed ids, held back until the checkpoint clock comes round. */
+  let banked = [];
+  let done = base;
+  let dirty = false;
+  let wroteAt = Date.now();
+
+  /** Writes go one at a time. Two in flight could land out of order, and the
+   *  older one would put back pruning the newer had already done. */
+  let writes = Promise.resolve();
+
+  /**
+   * Write down what is left.
+   *
+   * `remaining` is the whole point: a killed worker resumes on exactly the mail
+   * that has not moved, and the panel — which may be a *different* panel, opened
+   * long after the action was taken — settles against it. `vacated` is pruned in
+   * step so that a stop puts back only what never went.
+   */
+  const checkpoint = (force = false) => {
+    if (!dirty && !force) return writes;
+    if (!force && Date.now() - wroteAt < CHECKPOINT_MS) return writes;
+
+    // Everything up to the first await is synchronous, so concurrent batches
+    // cannot bank the same ids twice or race the clock.
+    const landed = new Set(banked);
+    banked = [];
+    dirty = false;
+    wroteAt = Date.now();
+
+    const patch = { done };
+    if (task.kind === 'bulk' && landed.size) {
+      task.remaining = (task.remaining ?? task.ids ?? []).filter((id) => !landed.has(id));
+      patch.remaining = task.remaining;
+    }
+
+    writes = writes
+      .then(() => updateTask(task.id, patch))
+      .then(publishQueue)
+      // A checkpoint that cannot be written costs a resume some repeated work,
+      // never the job. It must not take the job down with it.
+      .catch((err) => console.warn('[MailBoy] could not check the task in:', err));
+
+    return writes;
+  };
 
   try {
-    // Signed out there is no token to spend and no mailbox to act on. The
-    // record is namespaced to the account, so it waits rather than being lost.
-    if (!(await activeAccount())) {
-      await chrome.alarms.clear(BULK_ALARM);
-      return;
+    trace('job', `${task.action} started`, { id: task.id, kind: task.kind, done: base });
+
+    const outcome =
+      task.kind === 'folder-delete'
+        ? await runDeleteJob(task, {
+            onProgress: (moved) => {
+              // A folder delete re-derives its own work by listing, so there is
+              // nothing to bank — only how far along to say it is.
+              done = base + moved;
+              dirty = true;
+              void checkpoint();
+            },
+            stopped: () => stoppingTasks,
+          })
+        : await runBulkJob(task, {
+            onLanded: (ids, moved) => {
+              banked.push(...ids);
+              done = base + moved;
+              dirty = true;
+              void checkpoint();
+            },
+            stopped: () => stoppingTasks,
+          });
+
+    await checkpoint(true);
+
+    // Gmail would not get to all of it. Nothing has failed — this mail has not
+    // been *tried* to a conclusion — so the task stays queued with the rest of
+    // its work in `remaining`, keeps holding that mail out of the rows, and
+    // comes back. Reporting it as refused is what produced "346 moved. 399 could
+    // not be moved."
+    if (!outcome.complete && outcome.unfinished && !stoppingTasks) {
+      // `outcome.done` counts this run only — a resumed task starts it at zero —
+      // so anything above zero means the run got somewhere.
+      return retryLater(task, {
+        moved: outcome.done > 0,
+        outstanding: outcome.unfinished,
+      });
     }
-
-    // Before the first await that can be interrupted, same as the other two.
-    chrome.alarms.create(BULK_ALARM, { periodInMinutes: RESUME_MINUTES });
-
-    const shape = { action: job.action, target: job.target ?? '', total: job.ids.length };
-    bulkProgress = { done: 0, ...shape };
-    broadcast({ type: 'bulk-progress', ...bulkProgress }, folderPorts);
-
-    const outcome = await runBulkJob(job, {
-      onProgress: (done) => {
-        bulkProgress = { done, ...shape };
-        broadcast({ type: 'bulk-progress', ...bulkProgress }, folderPorts);
-      },
-      stopped: () => stoppingBulk,
-    });
-
-    bulkProgress = null;
-    await chrome.alarms.clear(BULK_ALARM);
 
     if (!outcome.complete) {
-      // Stopped, not finished. The record stays and the alarm is gone, so
-      // nothing resumes until the panel asks again — which is what a stop means.
-      trace('job', `${job.action} stopped`, outcome);
-      broadcast({ type: 'bulk-stopped', ...outcome, ...shape }, folderPorts);
-      return;
+      // Stopped, one of two ways. The card's stop button has already emptied the
+      // queue and told the panel what to put back, so there is nothing left to
+      // report; a logout halted this without discarding anything, and the record
+      // is meant to be waiting when somebody signs back in. Either way the
+      // checkpoint above is what makes the resume exact.
+      trace('job', `${task.action} stopped`, { id: task.id, done: outcome.done });
+      return 'stopped';
     }
 
-    await clearBulkJob();
-    trace('job', `${job.action} finished`, {
+    const queue = await dropTask(task.id);
+    publishQueue(queue);
+
+    trace('job', `${task.action} finished`, {
+      id: task.id,
       moved: outcome.moved,
       trashed: outcome.trashed,
+      restored: outcome.restored,
       refused: outcome.failed.length,
-      of: job.ids.length,
     });
-    broadcast({ type: 'bulk-done', ...outcome, ...shape }, folderPorts);
-  } catch (err) {
-    console.error('[MailBoy] selection job failed:', err);
-    bulkProgress = null;
+
     broadcast(
-      { type: 'bulk-failed', action: job.action, message: err?.message ?? String(err) },
-      folderPorts
+      {
+        type: 'task-ended',
+        ending: 'done',
+        id: task.id,
+        kind: task.kind,
+        action: task.action,
+        target: task.target ?? '',
+        name: task.labels?.at(-1)?.name ?? '',
+        labels: task.labels ?? [],
+        // What never moved: refusals on a completed run. The panel puts exactly
+        // these back and treats everything else as landed.
+        remaining: task.kind === 'bulk' ? (task.remaining ?? []) : [],
+        moved: outcome.moved,
+        trashed: outcome.trashed,
+        restored: outcome.restored,
+        failed: outcome.failed,
+      },
+      taskPorts
     );
 
-    await chrome.alarms.clear(BULK_ALARM);
-    if (!(err instanceof AuthError)) {
-      chrome.alarms.create(BULK_ALARM, { delayInMinutes: RETRY_MINUTES });
+    return 'done';
+  } catch (err) {
+    // A move gives up by throwing rather than by reporting — `batchModify` has
+    // no per-message outcome to report — so a rate limit reaches here as an
+    // exception. It is the same thing as the branch above and takes the same
+    // path: nothing failed, and the task is owed another go soon rather than in
+    // a quarter of an hour.
+    if (rateLimit(err) && !stoppingTasks) {
+      return retryLater(task, { moved: done > base, outstanding: 0 });
     }
-  } finally {
-    bulking = false;
+
+    console.error('[MailBoy] task failed:', err);
+
+    // The task stays in the queue with whatever it checkpointed, so the mail it
+    // is holding out of the rows stays held — the panel must not put it back
+    // over a failure that is about to be retried. **Nothing here drops it**: a
+    // queued task is only ever ended by finishing or by the user, so even a
+    // failure nobody understands comes back round.
+    broadcast(
+      {
+        type: 'task-ended',
+        ending: 'failed',
+        id: task.id,
+        kind: task.kind,
+        action: task.action,
+        target: task.target ?? '',
+        name: task.labels?.at(-1)?.name ?? '',
+        message: err?.message ?? String(err),
+      },
+      taskPorts
+    );
+
+    await chrome.alarms.clear(TASK_ALARM);
+    // Nothing here can re-grant a token, and hammering a refused API every
+    // minute helps no one. The queue survives either way, so signing back in or
+    // reopening the panel picks it up — both of which run the queue.
+    if (!(err instanceof AuthError)) {
+      chrome.alarms.create(TASK_ALARM, { delayInMinutes: RETRY_MINUTES });
+    }
+    return 'failed';
+  }
+}
+
+/** Whether a thrown error is Gmail saying "not now" rather than "no". */
+function rateLimit(err) {
+  if (err?.status === 429) return true;
+  const reason = err?.reason ?? '';
+  if (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded') return true;
+  return /rate ?limit|quota exceeded|too many concurrent/i.test(err?.message ?? '');
+}
+
+/**
+ * Put a task back on the clock without ending it.
+ *
+ * The task keeps its place, its checkpoint and the mail it is holding; only the
+ * card's line changes. **This is the shape of the completion guarantee** — there
+ * is no path out of here that drops work.
+ *
+ * @param {{moved: boolean, outstanding: number}} how `moved` says the run
+ *   achieved something, which is what decides how soon it is worth coming back.
+ */
+async function retryLater(task, { moved, outstanding }) {
+  // A run that moved nothing at all means something else holds the whole budget
+  // — nearly always a measuring pass, which can run for eighteen minutes — and
+  // coming straight back to be refused again only adds to the contention it is
+  // waiting on. One that moved some mail is getting through and comes back at
+  // the short end.
+  const held = moved ? 0 : (task.throttledRuns ?? 0) + 1;
+  const minutes = Math.min(THROTTLED_MINUTES * 2 ** held, THROTTLED_MAX_MINUTES);
+
+  trace('job', `${task.action} throttled — leaving it queued`, {
+    id: task.id,
+    outstanding,
+    moved,
+    retryIn: `${minutes}m`,
+  });
+
+  const queue = await updateTask(task.id, { throttledRuns: held });
+  publishQueue(queue);
+
+  broadcast(
+    {
+      type: 'task-ended',
+      ending: 'throttled',
+      id: task.id,
+      kind: task.kind,
+      action: task.action,
+      target: task.target ?? '',
+      name: task.labels?.at(-1)?.name ?? '',
+    },
+    taskPorts
+  );
+
+  await chrome.alarms.clear(TASK_ALARM);
+  chrome.alarms.create(TASK_ALARM, { delayInMinutes: minutes });
+  return 'failed';
+}
+
+/**
+ * Empty the queue and tell the panel what each task was still holding.
+ *
+ * This is the whole of a stop. The running task notices `stoppingTasks` and
+ * returns what it achieved, but the mail it is holding out of the rows can only
+ * be put back from the record — which is why the record is what is broadcast.
+ */
+async function endTasks(ending, before) {
+  const removed = await clearTasks(undefined, before);
+
+  // Whatever was queued in the moment after the stop — see `clearTasks` — is
+  // still work, so it is what the card goes back to showing. The gag comes off
+  // first, or this would publish the empty view it was put there to hold.
+  // Unconditional: leaving the gag on would silence every later checkpoint.
+  discardingTasks = false;
+  publishQueue(await readTasks());
+
+  for (const task of removed) {
+    broadcast(
+      {
+        type: 'task-ended',
+        ending,
+        id: task.id,
+        kind: task.kind,
+        action: task.action,
+        target: task.target ?? '',
+        name: task.labels?.at(-1)?.name ?? '',
+        remaining: task.kind === 'bulk' ? (task.remaining ?? task.ids ?? []) : [],
+        // A stop leaves the extent genuinely unknown for a folder delete, which
+        // never tracked ids; the panel takes the listing for those.
+        exact: task.kind === 'bulk',
+      },
+      taskPorts
+    );
   }
 }

@@ -578,6 +578,50 @@ body {
   }
 }
 
+/* ── A task under way ────────────────────────────────────────── */
+/* The same card, in a different place and with a button in its head. It sits in
+   .app beside the footer rather than inside a screen, because mail is moved
+   from four different screens and the report has to stand under all of them —
+   and because the load's card keeps its own place above this one, so a refresh
+   started mid-move reports where it always did.
+
+   Same tint as the load's card on purpose: both are MailBoy working, and giving
+   them two colours would say they are two kinds of thing. What tells them apart
+   is position, the words, and the fact that only this one can be stopped. */
+.notice-card--task {
+  margin: 8px var(--pad-x);
+}
+
+/* Carries a folder name, and a side panel is narrow. Wrapped to two lines
+   rather than ellipsed on one: "Moving emails to “Receipts and invoi…" is a
+   worse answer than two lines, since the name is the whole of what the line is
+   there to say. Two is the cap, so a pathological name cannot push the bar off
+   the bottom of the panel. */
+#task-title {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+/* Ghost rather than filled, and danger rather than neutral: it is the only
+   control in the card, but what it does is call off work already under way and
+   put mail back — which is closer to Delete than to Refresh. */
+#btn-task-stop {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+
+/* The top bar's stop glyph holds that bar's height on its own; here it sits
+   beside 12.5px type in a card, so it comes down to the .btn-glyph size. */
+#btn-task-stop svg.stop-icon {
+  width: 11px;
+  height: 11px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .notice-spinner {
     animation-duration: 2.4s;

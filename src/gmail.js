@@ -557,9 +557,13 @@ const MODIFY_CHUNK = 1000;
  *
  * @param {string[]} ids
  * @param {{add?: string[], remove?: string[]}} change
+ * @param {() => boolean} [stopped]
+ * @param {(chunk: string[]) => void} [onChunk] the ids a chunk moved, as it
+ *   lands. A chunk either succeeds whole or throws, so this is also exactly what
+ *   a long job needs in order to checkpoint what is left of it.
  * @returns {Promise<number>} how many were moved before a stop, if any
  */
-export async function modifyMessages(ids, { add = [], remove = [] } = {}, stopped) {
+export async function modifyMessages(ids, { add = [], remove = [] } = {}, stopped, onChunk) {
   let moved = 0;
 
   for (let at = 0; at < ids.length; at += MODIFY_CHUNK) {
@@ -577,6 +581,7 @@ export async function modifyMessages(ids, { add = [], remove = [] } = {}, stoppe
     );
 
     moved += chunk.length;
+    onChunk?.(chunk);
   }
 
   return moved;
@@ -645,7 +650,37 @@ const BATCH_SIZE = 100;
 /** Enough in flight to hide latency; the quota pacer sets the real rate. */
 const BATCH_CONCURRENCY = 3;
 
+/**
+ * Rounds a batch job gets before it hands back what is left.
+ *
+ * **A round refused about rate does not spend one.** A queued task is guaranteed
+ * to finish (see CLAUDE.md, *The task queue*), so being told "not now" can never
+ * be the thing that ends it — and four rounds of 0.5–4s cannot outlast a
+ * `Quota exceeded … per minute` anyway, which clears when the minute does rather
+ * than when the backoff does.
+ *
+ * Everything else retryable — a 5xx, a sub-request that came back with no answer
+ * at all — does spend one, and what is left after that is handed back as
+ * **unfinished**, never as refused. That is not giving up either: the queue
+ * retries it on its own clock, which survives the worker being killed where a
+ * loop in here would not.
+ */
 const MAX_ATTEMPTS = 4;
+
+/**
+ * Total rounds in one run, throttled or not — roughly two minutes of patience.
+ *
+ * **Not a give-up point.** Looping in here until the throttle lifts would hold
+ * the worker in a tight-ish retry against Gmail for as long as something else
+ * holds the budget — nearly always a measuring pass, which runs for eighteen
+ * minutes — and would add to the contention it is waiting on. Handing back
+ * instead lets the queue wait on its own clock, which backs off when a run
+ * achieves nothing, survives the worker being killed, and never ends the task.
+ */
+const MAX_ROUNDS = 12;
+
+/** Where the round-level backoff stops doubling. */
+const MAX_BACKOFF_ROUNDS = 6;
 
 /**
  * Size, sender and date for each id, as a Map of id → `{bytes, from, date}`.
@@ -834,7 +869,12 @@ export function getMessage(id) {
  *
  * @returns {Promise<{text: string, contentType: string | null} | null>}
  */
-async function postBatch(ids, line, units, retry) {
+/**
+ * @param {{throttled: boolean}} [signal] set when a refusal turns out to be
+ *   about rate. The caller's round loop reads it to decide whether an attempt
+ *   was really spent — see `trashMessages`.
+ */
+async function postBatch(ids, line, units, retry, signal) {
   const boundary = `mailboy_${crypto.randomUUID()}`;
 
   const body =
@@ -883,6 +923,7 @@ async function postBatch(ids, line, units, retry) {
       // A pass is the biggest thing spending this mailbox's quota, so it is the
       // thing that has to give way — and the panel shares the budget with it.
       if (rate) {
+        if (signal) signal.throttled = true;
         trace('quota', 'batch refused, cooling off', { status: res.status, reason, of: ids.length });
         void coolOff(coolOffFor(message));
       }
@@ -908,7 +949,7 @@ async function postBatch(ids, line, units, retry) {
  * ids that came back with no part at all, go onto `retry` before `handle` ever
  * sees them.
  */
-function eachPart(text, contentType, ids, retry, handle) {
+function eachPart(text, contentType, ids, retry, handle, signal) {
   const declared = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(contentType ?? '');
   if (!declared) {
     retry.push(...ids);
@@ -953,6 +994,9 @@ function eachPart(text, contentType, ids, retry, handle) {
         trace('quota', 'batch parts throttled, cooling off', { of: ids.length });
         void coolOff(coolOffFor(body));
       }
+      // A 5xx is Gmail having a moment rather than a statement about rate, so it
+      // spends an attempt the way it always did. The other two do not.
+      if (signal && code < 500) signal.throttled = true;
       retry.push(id);
       continue;
     }
@@ -994,19 +1038,42 @@ function rateLimited(body) {
  * something to wait on — a thousand messages is a minute of quota on its own.
  * The multipart endpoint cuts the round trips but not the quota.
  *
- * `onBatch(count)` fires as each batch lands so a long run can report progress.
+ * `onBatch(ids)` fires as each batch lands, with the ids that batch actually
+ * moved. Deliberately the ids and not a count: a long job checkpoints what is
+ * left of it to disk as it goes, and "how many" cannot say which.
  *
- * @returns {Promise<{trashed: number, failed: string[]}>} `failed` are ids Gmail
- *   would not move and would not retry — reported rather than swallowed, since
- *   the folder is about to be deleted out from under them.
+ * @returns {Promise<{trashed: number, failed: string[], pending: string[]}>}
+ *   **`failed` and `pending` are different answers and must not be merged.**
+ *   `failed` is Gmail refusing *these messages* — a permission, a malformed id,
+ *   something no amount of retrying changes. `pending` is work that ran out of
+ *   patience, which is nearly always a rate limit and says nothing about the
+ *   messages at all.
+ *
+ *   Merging them is exactly the bug this had: everything still on the retry list
+ *   after four rounds was declared refused, so a throttled trash reported
+ *   hundreds of messages it had never been allowed to try. The caller leaves
+ *   `pending` outstanding and comes back to it.
  */
 export async function trashMessages(ids, onBatch, stopped) {
   const trashed = new Set();
   const failed = new Set();
   let pending = [...ids];
 
-  for (let attempt = 0; pending.length && attempt < MAX_ATTEMPTS && !stopped?.(); attempt++) {
-    if (attempt) await sleep(2 ** attempt * 500 + Math.random() * 400);
+  /** Rounds that were about something other than rate. Only these run out. */
+  let spent = 0;
+  /** Every round, for the backoff — a throttled one still has to wait. */
+  let round = 0;
+
+  while (pending.length && spent < MAX_ATTEMPTS && round < MAX_ROUNDS && !stopped?.()) {
+    // Capped, and capped twice: the exponent stops doubling at
+    // MAX_BACKOFF_ROUNDS because a throttled job can go round indefinitely, and
+    // the result is held under MAX_BACKOFF_MS because the shared cool-off is
+    // already pacing the whole extension.
+    if (round) {
+      const step = 2 ** Math.min(round, MAX_BACKOFF_ROUNDS) * 500;
+      await sleep(Math.min(step, MAX_BACKOFF_MS) + Math.random() * 400);
+    }
+    round++;
 
     const chunks = [];
     for (let i = 0; i < pending.length; i += BATCH_SIZE) {
@@ -1014,6 +1081,7 @@ export async function trashMessages(ids, onBatch, stopped) {
     }
 
     const retry = [];
+    const signal = { throttled: false };
     let cursor = 0;
 
     await Promise.all(
@@ -1023,29 +1091,38 @@ export async function trashMessages(ids, onBatch, stopped) {
           // whether or not we wait for the answer, so its results matter.
           if (stopped?.()) return;
           const chunk = chunks[cursor++];
-          const moved = await runTrashBatch(chunk, retry, failed);
+          const moved = await runTrashBatch(chunk, retry, failed, signal);
           for (const id of moved) trashed.add(id);
-          if (moved.length) onBatch?.(moved.length);
+          if (moved.length) onBatch?.(moved);
         }
       })
     );
 
     pending = retry;
+
+    // A round refused about rate has not spent an attempt on these messages — it
+    // never got to them. Not counting it is what makes the difference between
+    // waiting out a busy minute and reporting a folder's worth of mail as
+    // unmovable, and it is what makes a queued task's completion a guarantee
+    // rather than a hope.
+    if (signal.throttled) {
+      if (round % 5 === 0) {
+        trace('quota', 'still throttled — waiting it out rather than giving up', {
+          outstanding: pending.length,
+          moved: trashed.size,
+          round,
+        });
+      }
+    } else {
+      spent++;
+    }
   }
 
-  // Retries exhausted: never moved, and nothing further will move them, so they
-  // belong with the refusals rather than being forgotten.
-  //
-  // Not after a stop, though — what is left there was simply never attempted,
-  // and reporting it as refused would turn "you called this off" into "Gmail
-  // would not do it".
-  if (!stopped?.()) for (const id of pending) failed.add(id);
-
-  return { trashed: trashed.size, failed: [...failed] };
+  return { trashed: trashed.size, failed: [...failed], pending };
 }
 
 /** @returns {Promise<string[]>} the ids this batch actually moved */
-async function runTrashBatch(ids, retry, failed) {
+async function runTrashBatch(ids, retry, failed, signal) {
   const reply = await postBatch(
     ids,
     (id) =>
@@ -1055,19 +1132,27 @@ async function runTrashBatch(ids, retry, failed) {
       // parser should not have to infer that from a bare blank line.
       'Content-Length: 0\r\n\r\n',
     ids.length * UNIT_COST.write,
-    retry
+    retry,
+    signal
   );
 
   const moved = [];
   if (!reply) return moved;
 
-  eachPart(reply.text, reply.contentType, ids, retry, (id, code) => {
-    // 404 is a message that has already gone — deleted from another client
-    // mid-pass, or trashed by an earlier attempt of this same job. Either way
-    // it is out of the folder, which is what was asked for.
-    if (code === 200 || code === 204 || code === 404) moved.push(id);
-    else failed.add(id);
-  });
+  eachPart(
+    reply.text,
+    reply.contentType,
+    ids,
+    retry,
+    (id, code) => {
+      // 404 is a message that has already gone — deleted from another client
+      // mid-pass, or trashed by an earlier attempt of this same job. Either way
+      // it is out of the folder, which is what was asked for.
+      if (code === 200 || code === 204 || code === 404) moved.push(id);
+      else failed.add(id);
+    },
+    signal
+  );
 
   return moved;
 }

@@ -24,7 +24,6 @@
 // way that only holds while the labels are still there, which is why they are
 // deleted last.
 
-import { activeAccount, keyFor } from './account.js';
 import { createLabel, deleteLabel, listMessageIds, modifyMessages, trashMessages } from './gmail.js';
 
 /** Gmail's ceiling on a label name, counted across the whole path. */
@@ -97,72 +96,12 @@ export async function createFolder(name) {
 }
 
 // ── The delete job ───────────────────────────────────────────────
-
-const JOB_NAME = 'folder-delete';
-
-/** The one key a mailbox's pending delete occupies, for erasing it. */
-export const deleteJobKey = (id) => keyFor(id, JOB_NAME);
-
-/**
- * How long a half-finished delete may sit before it is abandoned.
- *
- * The alarm brings an interrupted job back within a minute, so anything still
- * here a day later did not fail — the browser was closed, or nobody signed back
- * in. Resuming a destructive action out of that much context is worse than
- * leaving the folder visibly half-emptied for the user to decide about again.
- */
-const MAX_JOB_AGE_MS = 24 * 60 * 60 * 1000;
-
-/**
- * @typedef {object} DeleteJob
- * @property {number} startedAt
- * @property {boolean} trash whether the mail goes to Trash, or to the inbox
- * @property {{id: string, name: string, fullName?: string}[]} labels the whole
- *   subtree, deepest first
- * @property {number} total messages to move, as counted when the job was built;
- *   0 where there is no ratio worth reporting
- */
-
-/** Persist the job so a killed worker can pick it up from the alarm. */
-export async function saveDeleteJob(job) {
-  const account = await activeAccount();
-  if (!account) return;
-  await chrome.storage.local.set({ [deleteJobKey(account)]: job });
-}
-
-/**
- * The pending job, or null. An expired one is cleared as it is read, so this is
- * also what retires a job nobody came back for.
- *
- * @returns {Promise<DeleteJob | null>}
- */
-export async function readDeleteJob() {
-  try {
-    const account = await activeAccount();
-    if (!account) return null;
-
-    const key = deleteJobKey(account);
-    const { [key]: job } = await chrome.storage.local.get(key);
-    if (!job?.labels?.length) return null;
-
-    if (Date.now() - (job.startedAt ?? 0) > MAX_JOB_AGE_MS) {
-      await chrome.storage.local.remove(key);
-      return null;
-    }
-
-    return job;
-  } catch (err) {
-    console.warn('[MailBoy] pending delete unreadable:', err);
-    return null;
-  }
-}
-
-/** Defaults to the signed-in mailbox; an explicit id is how a sweep erases one. */
-export async function clearDeleteJob(account) {
-  const id = account ?? (await activeAccount());
-  if (!id) return;
-  await chrome.storage.local.remove(deleteJobKey(id));
-}
+//
+// It has no record of its own any more: it is one task in the queue, like a
+// move or a trash — see src/tasks.js. What it carries there is *intent* rather
+// than progress, which is the one thing the mailbox cannot say: nothing in Gmail
+// records whether the user asked for Trash or for the inbox. Everything else it
+// re-derives by listing its own labels, which is why it needs no `remaining`.
 
 /**
  * Do the job: move the mail, then remove the labels.
@@ -173,17 +112,17 @@ export async function clearDeleteJob(account) {
  * unlabelled, un-trashed and untraceable. Deleting last means an interrupted
  * job simply re-lists and carries on.
  *
- * A stop returns what was achieved with `complete: false`, leaving the job
- * record for the alarm to resume. Only `complete: true` should clear it.
+ * A stop returns what was achieved with `complete: false`, leaving the task in
+ * the queue. Only `complete: true` should take it out.
  *
- * @param {DeleteJob} job
+ * @param {import('./tasks.js').Task} job carrying `labels` and `trash`
  * @param {{onProgress?: (done: number, total: number) => void,
  *   stopped?: () => boolean}} hooks
  * @returns {Promise<{done: number, trashed: number, restored: number,
- *   failed: string[], complete: boolean}>}
+ *   failed: string[], unfinished: number, complete: boolean}>}
  */
 export async function runDeleteJob(job, { onProgress, stopped } = {}) {
-  const outcome = { done: 0, trashed: 0, restored: 0, failed: [], complete: false };
+  const outcome = { done: 0, trashed: 0, restored: 0, failed: [], unfinished: 0, complete: false };
   const halted = () => stopped?.() ?? false;
 
   for (const label of job.labels) {
@@ -202,13 +141,14 @@ export async function runDeleteJob(job, { onProgress, stopped } = {}) {
       const result = await trashMessages(
         ids,
         (moved) => {
-          outcome.done += moved;
+          outcome.done += moved.length;
           onProgress?.(outcome.done, job.total);
         },
         stopped
       );
       outcome.trashed += result.trashed;
       outcome.failed.push(...result.failed);
+      outcome.unfinished += result.pending.length;
     } else {
       // Everything the folder holds, not just the archived part of it. The
       // promise is one line — the emails turn up in your inbox — and it can
@@ -233,6 +173,14 @@ export async function runDeleteJob(job, { onProgress, stopped } = {}) {
   }
 
   if (halted()) return outcome;
+
+  // **Mail Gmail would not get to keeps the labels alive.** Rate limiting is not
+  // a refusal about these messages, so there is more to move — and the label is
+  // the only handle on it. Deleting now would leave that mail unlabelled,
+  // un-trashed and untraceable, which is the exact failure the delete-last
+  // ordering above exists to prevent. The task stays queued, re-lists, and
+  // finds only what is left.
+  if (outcome.unfinished) return outcome;
 
   // Deepest first, so an interruption partway through can never orphan a child
   // under a parent that has already gone.

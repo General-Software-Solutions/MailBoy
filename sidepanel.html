@@ -924,6 +924,50 @@
         </main>
       </section>
 
+      <!-- ── A task under way ────────────────────────────────────── -->
+      <!-- Its own card, and out here beside the footer rather than inside a
+           screen, for two reasons. It has to stand under every signed-in
+           screen, because actions are started from the breakdown, from a
+           sender's mail and from an open message — not from the folder list.
+           And the load's own card (#notice, inside the mailbox screen) keeps
+           its place above this one, so a refresh started while mail is moving
+           reports where it always did rather than fighting for one slot.
+
+           The bar is determinate: a queue knows how many emails it set out to
+           move and how many it has, and both are exact. -->
+      <section id="task-card" class="notice-card notice-card--task" hidden>
+        <div class="notice-head">
+          <span class="notice-spinner" aria-hidden="true"></span>
+          <h2 id="task-title" class="notice-title"></h2>
+          <button
+            id="btn-task-stop"
+            class="btn btn--ghost btn--xs btn--danger"
+            data-copy-title="tasks.stopTitle"
+            data-copy-label="tasks.stopTitle"
+          >
+            <svg class="stop-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
+            </svg>
+            <span data-copy="tasks.stop"></span>
+          </button>
+        </div>
+        <p class="notice-body" data-copy="tasks.body"></p>
+        <div class="progress-stats">
+          <span id="task-done"></span>
+          <span id="task-queued" class="progress-left"></span>
+        </div>
+        <div
+          id="task-progress"
+          class="progress"
+          role="progressbar"
+          data-copy-label="tasks.progressLabel"
+          aria-valuemin="0"
+          aria-valuemax="100"
+        >
+          <div id="task-progress-bar" class="progress-bar"></div>
+        </div>
+      </section>
+
       <footer id="footer" class="footer"></footer>
 
       <!-- ── The two tabs ────────────────────────────────────────── -->

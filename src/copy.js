@@ -115,6 +115,42 @@ export const COPY = {
     updated: (ago) => `Updated ${ago}`,
   },
 
+  /**
+   * The task card: what is happening to mail right now.
+   *
+   * Its own card rather than a line in the footer, because it stands for minutes
+   * and can be joined by a refresh saying something else entirely. The body is
+   * the one place the product explains a limit that is not its own — people
+   * reasonably read a twenty-minute delete as broken, and it is not.
+   */
+  tasks: {
+    title: {
+      move: (target) => `Moving emails to “${target}”`,
+      trash: 'Moving emails to Trash',
+      restore: 'Restoring emails to your inbox',
+      emptying: (name) => `Emptying “${name}”`,
+      deleting: 'Deleting a folder',
+      working: 'Moving your emails',
+    },
+    body:
+      'Google limits how fast email can be moved, so this can take a while. It ' +
+      'keeps going until it finishes or you stop it, and you can close the panel.',
+    queued: (n) => `${n.toLocaleString()} more waiting`,
+    done: (done, total) => `${done.toLocaleString()} of ${total.toLocaleString()} emails`,
+    progressLabel: 'Moving emails',
+    stop: 'Stop',
+    stopTitle: 'Stop and put the rest back',
+    stopped: (n) => (n ? `Stopped. ${emails(n)} stayed where they were.` : 'Stopped.'),
+    // A task that hit a wall stays queued and is tried again, so this says what
+    // is going to happen rather than asking for anything.
+    retrying: 'Could not finish that. MailBoy will try again shortly.',
+    // Deliberately not an error, and it does not say "could not": nothing
+    // failed and no email was refused. Google caps how fast mail can be moved,
+    // and saying so is the difference between a wait somebody understands and
+    // one that looks like a bug.
+    throttled: 'Google is limiting how fast this can go. MailBoy will keep trying.',
+  },
+
   // ── Making and removing folders ────────────────────────────────
   folders: {
     newFolder: 'New folder',
@@ -147,15 +183,13 @@ export const COPY = {
     trashHint: 'They go to Trash, where Gmail keeps them for 30 days. You can close the panel while this runs.',
     inboxHint: 'These emails move to your inbox.',
     confirm: 'Delete folder',
-    working: (name) => `Deleting “${name}”…`,
-    progress: (name, done, total) =>
-      `Deleting “${name}”… ${done.toLocaleString()} of ${total.toLocaleString()}`,
+    // No progress line of its own any more: a delete is one task in the queue,
+    // and the task card reports every one of them the same way.
     done: (name) => `Deleted “${name}”.`,
     trashed: (n) => `${emails(n)} moved to Trash.`,
     restored: (n) => `${emails(n)} moved to your inbox.`,
     someStuck: (n) => `${n.toLocaleString()} could not be moved.`,
     stopped: (name) => `Stopped deleting “${name}”. The folder is still there.`,
-    failed: (name) => `Could not finish deleting “${name}”.`,
   },
 
   // ── The breakdown ──────────────────────────────────────────────
@@ -229,7 +263,6 @@ export const COPY = {
     thisFolder: 'this folder',
     thisSender: 'this sender',
     yourInbox: 'your inbox',
-    busy: 'MailBoy is still finishing the last job.',
     gone: 'Those emails are no longer in this folder.',
     foldersNotReady: 'MailBoy is still reading your folders.',
     fromSenders: (n) => (n === 1 ? 'one sender' : `${n.toLocaleString()} senders`),
@@ -249,8 +282,6 @@ export const COPY = {
     where: 'to Trash',
     text: (line) => `${line} Gmail keeps trashed mail for 30 days. You can close the panel while this runs.`,
     confirm: 'Move to Trash',
-    status: (n) => `Moving ${emails(n)} to Trash…`,
-    progress: 'Moving to Trash',
     done: (n) => `${emails(n)} moved to Trash.`,
     someStuck: (n) => `${n.toLocaleString()} could not be moved.`,
   },
@@ -260,8 +291,6 @@ export const COPY = {
     where: 'to your inbox',
     text: (line) => `${line} They keep any folders they were in.`,
     confirm: 'Restore to inbox',
-    status: (n) => `Restoring ${emails(n)} to your inbox…`,
-    progress: 'Restoring to your inbox',
     done: (n) => `${emails(n)} restored to your inbox.`,
   },
 
@@ -271,11 +300,8 @@ export const COPY = {
     countFallback: 'these emails',
     text: (line) => `${line} They leave every folder they are in now, including your inbox.`,
     confirm: 'Move here',
-    status: (n, name) => `Moving ${emails(n)} to “${name}”…`,
-    progress: (name) => `Moving to “${name}”`,
     done: (n, name) => `${emails(n)} moved to “${name}”.`,
     failed: 'Could not finish moving those emails.',
-    stopped: (summary) => `Stopped. ${summary}`,
   },
 
   // ── Rules ──────────────────────────────────────────────────────
