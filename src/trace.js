@@ -15,8 +15,8 @@ const TRACE = true;
 
 /**
  * @param {string} area which flow — `open`, `sync`, `listing`, `action`,
- *   `bookmark`, `measure`, `snapshot`, `job`. Kept to a small set on purpose, so
- *   the console can be filtered down to one of them.
+ *   `bookmark`, `measure`, `snapshot`, `job`, `rules`, `quota`. Kept to a small
+ *   set on purpose, so the console can be filtered down to one of them.
  * @param {string} message what happened, and where a branch was taken, why
  * @param {object} [detail] figures worth having, logged as an object so the
  *   console keeps it foldable rather than stringifying it into the line

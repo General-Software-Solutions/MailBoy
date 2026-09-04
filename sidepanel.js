@@ -3691,7 +3691,11 @@ async function applyRules(specs, where, whenFailed = COPY.rules.addFailedDuringM
       parts.push(COPY.rules.noRoom(fresh.length - wanted.length));
     }
     if (failed.length) parts.push(COPY.rules.someFailed(failed.length));
-    flash(parts.join(' '));
+
+    // A refused rule takes the failure tone even where others landed: this is
+    // the only signal the panel gives that one did not, and the neutral voice
+    // here reads exactly like the line saying the rest were added.
+    flash(parts.join(' '), failed.length ? 'error' : undefined);
   } catch (err) {
     console.error('[MailBoy] could not add the rule:', err);
     flash(whenFailed, 'error');

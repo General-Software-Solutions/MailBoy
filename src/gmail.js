@@ -19,12 +19,55 @@ const MAX_PAGES = 1000;
  * messages.get costs 5 units for one message. Enumeration is effectively free;
  * reading messages is not.
  *
- * The ceiling is 250 units per second per user, so sizes top out near 50
- * messages a second however they are batched. Pacing just under the ceiling
- * beats provoking 429s and backing off from them.
+ * **The ceiling is a minute, not a second, and it is far lower than it was.**
+ * Google's usage limits now read `6,000 quota units per minute per user per
+ * project` — cut from 15,000 on 2026-05-01, with projects that had used the API
+ * before then keeping the old figure for a while. This one enabled Gmail on
+ * 2026-08-29, so it is on 6,000: a hundred units a second, where the widely
+ * quoted "250 units per user per second" was two and a half times that.
+ *
+ * That is the real cost of a size pass, and no amount of batching changes it:
+ * 6,000 units a minute at 5 units a message is **20 messages a second at the
+ * absolute ceiling**. Nothing here can be raised by asking — the per-user limit
+ * is not the adjustable one, and a quota increase applies to the project's own
+ * per-minute figure, which MailBoy is nowhere near.
+ *
+ * `SAFETY` is what keeps a burst inside the window rather than spending the last
+ * of it and finding out. If a project turns out to still be on the old 15,000 —
+ * Cloud console, *Quotas & System Limits*, filtered to `per minute per user` —
+ * raising `UNITS_PER_MINUTE` to match is the one change that makes a first pass
+ * faster.
  */
 const UNIT_COST = { cheap: 1, list: 5, get: 5, write: 5, batchModify: 50, history: 2 };
-const UNITS_PER_SECOND = 220;
+const UNITS_PER_MINUTE = 6_000;
+const SAFETY = 0.9;
+const UNITS_PER_SECOND = (UNITS_PER_MINUTE / 60) * SAFETY;
+
+/**
+ * Retry budgets. `RETRY_ATTEMPTS` is the ordinary one — a 429 or a 5xx, gone
+ * within a few seconds or not at all. `BUSY_ATTEMPTS` is for the two refusals
+ * that clear on their own but not in seconds (see `attemptsFor`): eight attempts
+ * capped at 20s each is a little over a minute, which is what it takes to outlast
+ * a spent per-minute window. Capping the delay is what stops the doubling
+ * turning into minutes of dead time between attempts.
+ */
+const RETRY_ATTEMPTS = 4;
+const BUSY_ATTEMPTS = 8;
+const MAX_BACKOFF_MS = 20_000;
+const BRIEF_COOLOFF_MS = 2_000;
+
+/**
+ * The refusals worth waiting out. Matched on the message because the status and
+ * reason they arrive with are the same ones an ordinary rate limit uses — both
+ * come back 429 or 403 `rateLimitExceeded`, and only the text says which.
+ *
+ * - *Too many concurrent requests for user* — something else is talking to this
+ *   mailbox, and what clears it is that other thing finishing.
+ * - *Quota exceeded … Units per minute per user* — the window has to roll over.
+ *   A four-attempt backoff is about six seconds, so the old budget could not
+ *   outlast this one however many times it tried.
+ */
+const PATIENT = /too many concurrent requests|quota exceeded/i;
 
 /** A request Gmail answered and refused, carrying enough to describe why. */
 export class GmailError extends Error {
@@ -63,19 +106,103 @@ async function readJson(res) {
 }
 
 // ── Quota pacing ─────────────────────────────────────────────────
+//
+// **One budget for the whole extension, because Gmail meters the user and not
+// the page.** This module is loaded twice — once in the side panel, once in the
+// service worker — and a `nextSlot` private to each let them spend the same
+// allowance twice over: a measuring pass and a panel opening asked for ~440
+// units a second between them against a ceiling of 250. Neither pacer could see
+// it, because neither could see the other.
+//
+// So the budget lives in `chrome.storage.session` (memory only, shared by every
+// trusted context, exactly as the token already is) and `navigator.locks` makes
+// the read-modify-write atomic. Both are per-origin, and an extension's pages
+// and its worker share one origin.
+//
+// The stored value is a timestamp — the end of the last reserved slice — so a
+// context that dies mid-reservation costs at most that slice, and a value left
+// over from a previous session is simply in the past.
 
-/** End of the last reserved slice of the per-second budget. */
+const BUDGET_KEY = 'quota:until';
+const BUDGET_LOCK = 'mailboy-quota';
+
+/** The same figure, for when the shared one cannot be reached. */
 let nextSlot = 0;
+
+/**
+ * Whether the shared budget is reachable at all. Latched rather than re-tested:
+ * whatever makes session storage or the lock fail once will fail every time, and
+ * a warning on every request would bury the one that matters.
+ */
+let sharedBudget = Boolean(
+  globalThis.navigator?.locks?.request && globalThis.chrome?.storage?.session
+);
 
 /**
  * Hold the caller until its share of the quota budget comes free. Callers
  * reserve in order, so concurrent batches queue rather than collide.
  */
 async function reserve(units) {
+  const wait = await claim((units / UNITS_PER_SECOND) * 1000);
+  if (wait > 0) await sleep(wait);
+}
+
+/**
+ * Push the budget forward so a refusal is felt by everything in flight, not
+ * only by the request that got one.
+ *
+ * A rate limit is a statement about the mailbox rather than about one call, and
+ * whatever provoked it — nearly always a measuring pass — is still running.
+ * Backing off alone would leave that pass spending at full rate while the
+ * request it starved retried into the same wall.
+ */
+function coolOff(ms) {
+  return claim(ms);
+}
+
+/**
+ * How long everything holds off after a refusal about rate. A `PATIENT` one has
+ * to be waited out rather than merely eased off from, so it takes the ceiling;
+ * an ordinary 429 takes a pause and lets the caller's own backoff do the rest.
+ */
+function coolOffFor(message) {
+  return PATIENT.test(message) ? MAX_BACKOFF_MS : BRIEF_COOLOFF_MS;
+}
+
+/**
+ * Reserve `ms` of the budget and answer how long that leaves the caller
+ * waiting. **The wait happens outside the lock**: the slice is booked the
+ * moment it is claimed, so holding the lock through the sleep would only stop
+ * anyone else booking theirs.
+ */
+async function claim(ms) {
+  if (!sharedBudget) return claimLocally(ms);
+
+  try {
+    return await navigator.locks.request(BUDGET_LOCK, async () => {
+      const stored = (await chrome.storage.session.get(BUDGET_KEY))[BUDGET_KEY];
+      const now = Date.now();
+      const start = Math.max(now, typeof stored === 'number' ? stored : 0);
+      await chrome.storage.session.set({ [BUDGET_KEY]: start + ms });
+      return start - now;
+    });
+  } catch (err) {
+    // A budget that cannot be read is worse than one that is only this
+    // context's: a storage failure must not stop a pass, and pacing locally is
+    // what this did before the budget was shared at all. **The other context is
+    // then pacing separately again**, so this warning is the only sign that the
+    // combined rate can go over — it is worth keeping loud.
+    sharedBudget = false;
+    console.warn('[MailBoy] shared quota budget unavailable, pacing locally:', err);
+    return claimLocally(ms);
+  }
+}
+
+function claimLocally(ms) {
   const now = Date.now();
   const start = Math.max(now, nextSlot);
-  nextSlot = start + (units / UNITS_PER_SECOND) * 1000;
-  if (start > now) await sleep(start - now);
+  nextSlot = start + ms;
+  return start - now;
 }
 
 // ── Requests ─────────────────────────────────────────────────────
@@ -123,21 +250,36 @@ async function request(
     return request(endpoint, params, { units, attempt: attempt + 1, method, body });
   }
 
-  if (res.status === 401 || res.status === 403) {
-    const refusal = await res.json().catch(() => ({}));
-    const reason =
-      refusal?.error?.errors?.[0]?.reason ??
-      refusal?.error?.details?.find((detail) => detail.reason)?.reason ??
-      '';
-    const message = refusal?.error?.message || `Gmail denied the request (${res.status}).`;
+  // The refusal's own body, read before anything is decided: the status alone
+  // does not say whether a retry has any chance, and "too many concurrent
+  // requests" arrives as an ordinary 429 whose message is the only thing that
+  // distinguishes it. `detail`, not `body` — that name is the payload we sent.
+  const detail = await res.json().catch(() => ({}));
+  const reason =
+    detail?.error?.errors?.[0]?.reason ??
+    detail?.error?.details?.find((entry) => entry.reason)?.reason ??
+    '';
+  const denied = res.status === 401 || res.status === 403;
+  const message =
+    detail?.error?.message ||
+    (denied ? `Gmail denied the request (${res.status}).` : `Gmail request failed (${res.status}).`);
+  const limit = attemptsFor(message);
 
-    // The UI only ever shows a summary, so keep the real reason reachable.
-    console.error('[MailBoy] request rejected', endpoint, res.status, reason, message);
-
+  if (denied) {
     // 403 is overloaded: rate limiting is retryable, the rest are not.
-    if (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded') {
+    if (
+      (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded') &&
+      attempt < limit
+    ) {
+      trace('quota', 'refused, waiting', { status: res.status, reason, attempt, limit });
       return backoffRetry(endpoint, params, { units, attempt, method, body });
     }
+
+    // The UI only ever shows a summary, so keep the real reason reachable —
+    // but only once it is final. A refusal about to be waited out is not a
+    // fault, and eight identical error lines in front of a request that then
+    // succeeded say something that is not true.
+    console.error('[MailBoy] request rejected', endpoint, res.status, reason, message);
 
     // A permission that was never granted, as opposed to a token that has gone
     // stale: reconnecting fixes the second and does nothing for the first.
@@ -148,27 +290,42 @@ async function request(
     // Only a token problem is worth sending the user back to sign in. A
     // disabled API or a project misconfiguration returns 403 too, and telling
     // someone to reconnect for those loops forever.
-    throw res.status === 401
-      ? new AuthError(message)
-      : new GmailError(message, { status: res.status, reason });
-  }
-
-  if ((res.status === 429 || res.status >= 500) && attempt < 4) {
+    if (res.status === 401) throw new AuthError(message);
+  } else if ((res.status === 429 || res.status >= 500) && attempt < limit) {
+    trace('quota', 'refused, waiting', { status: res.status, reason, attempt, limit });
     return backoffRetry(endpoint, params, { units, attempt, method, body });
   }
 
-  // `detail`, not `body`: that name is the request's own payload now.
-  const detail = await res.json().catch(() => ({}));
-  throw new GmailError(detail?.error?.message || `Gmail request failed (${res.status}).`, {
-    status: res.status,
-    reason: detail?.error?.errors?.[0]?.reason,
-  });
+  throw new GmailError(message, { status: res.status, reason });
+}
+
+/**
+ * How many attempts a refusal is worth, read from what Gmail said rather than
+ * from its status.
+ *
+ * **Neither `PATIENT` refusal is an ordinary rate limit**, and both outlast the
+ * ordinary budget: a concurrent-request refusal clears when the other work
+ * finishes, and a spent per-minute quota clears when the minute does. Four
+ * attempts inside six seconds gives up while the cause is still running — which
+ * is how a ticked rule box reported a failure for a filter that would have been
+ * accepted moments later, and how a panel opening during a measuring pass
+ * reported that it could not read the mailbox at all.
+ *
+ * Only the patience differs. The backoff still ends, so a genuinely stuck
+ * mailbox still reports rather than retrying forever.
+ */
+function attemptsFor(message) {
+  return PATIENT.test(message) ? BUSY_ATTEMPTS : RETRY_ATTEMPTS;
 }
 
 async function backoffRetry(endpoint, params, { units, attempt, method, body }) {
-  if (attempt >= 4) throw new Error('Gmail is rate limiting these requests.');
-  const delay = 2 ** attempt * 400 + Math.random() * 300;
+  const delay = Math.min(2 ** attempt * 400, MAX_BACKOFF_MS) + Math.random() * 300;
+
+  // The whole extension waits, not just this request — see `coolOff`. Claimed
+  // rather than awaited: the sleep below is this caller's share of it.
+  void coolOff(delay);
   await sleep(delay);
+
   return request(endpoint, params, { units, attempt: attempt + 1, method, body });
 }
 
@@ -710,13 +867,29 @@ async function postBatch(ids, line, units, retry) {
   }
 
   if (!res.ok) {
-    if (res.status === 429 || res.status >= 500) {
-      retry.push(...ids);
-      return null;
-    }
     const detail = await res.json().catch(() => ({}));
     const reason = detail?.error?.errors?.[0]?.reason ?? '';
     const message = detail?.error?.message || `Gmail refused the batch (${res.status}).`;
+
+    // **A rate limit arrives here as a 403 as often as a 429**, and treating one
+    // of those as fatal ended a pass that would have gone through a minute
+    // later. Either way the batch goes back on `retry` rather than being thrown:
+    // the caller's round-level backoff is what waits, and a refusal about rate
+    // is never about these particular hundred messages.
+    const rate =
+      res.status === 429 || reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded';
+
+    if (rate || res.status >= 500) {
+      // A pass is the biggest thing spending this mailbox's quota, so it is the
+      // thing that has to give way — and the panel shares the budget with it.
+      if (rate) {
+        trace('quota', 'batch refused, cooling off', { status: res.status, reason, of: ids.length });
+        void coolOff(coolOffFor(message));
+      }
+      retry.push(...ids);
+      return null;
+    }
+
     console.error('[MailBoy] batch rejected', res.status, reason, message);
     throw new GmailError(message, { status: res.status, reason });
   }
@@ -745,6 +918,7 @@ function eachPart(text, contentType, ids, retry, handle) {
   const parts = text.split(`--${declared[1] ?? declared[2]}`);
   const answered = new Set();
   let position = -1;
+  let throttled = false;
 
   for (const part of parts) {
     const status = /^HTTP\/[\d.]+\s+(\d{3})/m.exec(part);
@@ -760,17 +934,48 @@ function eachPart(text, contentType, ids, retry, handle) {
     answered.add(id);
 
     const code = Number(status[1]);
-    if (code === 429 || code >= 500) {
+
+    // part = outer headers, blank line, inner status + headers, blank line, body.
+    const [, , ...rest] = part.split(/\r?\n\r?\n/);
+    const body = rest.join('\n\n').trim();
+
+    // **A rate limit is not a refusal about this message**, and it arrives here
+    // as a 403 as often as a 429 — the same overloading `postBatch` handles one
+    // level up. Reading only the status counted every throttled sub-request as
+    // permanently unmovable, which is how a trash job reported hundreds of
+    // messages it had never actually tried: `handle` marks them failed, and the
+    // round loop never sees them again.
+    if (code === 429 || code >= 500 || (code === 403 && rateLimited(body))) {
+      // Once per batch rather than once per part: a hundred of these describe
+      // one refusal, and the whole extension should feel it once.
+      if (code !== 429 && code < 500 && !throttled) {
+        throttled = true;
+        trace('quota', 'batch parts throttled, cooling off', { of: ids.length });
+        void coolOff(coolOffFor(body));
+      }
       retry.push(id);
       continue;
     }
 
-    // part = outer headers, blank line, inner status + headers, blank line, body.
-    const [, , ...rest] = part.split(/\r?\n\r?\n/);
-    handle(id, code, rest.join('\n\n').trim());
+    handle(id, code, body);
   }
 
   for (const id of ids) if (!answered.has(id)) retry.push(id);
+}
+
+/**
+ * Whether a refusal is about rate rather than about the message it names. A
+ * batch part's body is a string this far down, so the reason is read out of the
+ * JSON where there is any and matched in the text where there is not.
+ */
+function rateLimited(body) {
+  if (!body) return false;
+  try {
+    const reason = JSON.parse(body)?.error?.errors?.[0]?.reason ?? '';
+    return reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded';
+  } catch {
+    return /rate ?limit|quota exceeded/i.test(body);
+  }
 }
 
 // ── Trashing ─────────────────────────────────────────────────────
@@ -783,11 +988,11 @@ function eachPart(text, contentType, ids, retry, handle) {
  * and offers the user no way back from a mistake. Neither trade is worth it.
  *
  * There is no batched form of this: `batchModify` refuses the TRASH label, so
- * it is one `messages.trash` per message at 5 quota units each. Against the
- * 250-unit ceiling that is roughly 50 a second, the same rate as the size pass,
- * which is why emptying a large folder is a background job rather than
- * something to wait on. The multipart endpoint cuts the round trips but not
- * the quota.
+ * it is one `messages.trash` per message at 5 quota units each. Against a
+ * ceiling of 6,000 units a minute that is 18 a second, the same rate as the size
+ * pass, which is why emptying a large folder is a background job rather than
+ * something to wait on — a thousand messages is a minute of quota on its own.
+ * The multipart endpoint cuts the round trips but not the quota.
  *
  * `onBatch(count)` fires as each batch lands so a long run can report progress.
  *
