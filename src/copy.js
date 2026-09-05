@@ -397,10 +397,12 @@ export const COPY = {
     deleteText:
       'Mail already filed stays where it is. New mail that would have matched ' +
       'lands in your inbox instead. A deleted rule cannot be brought back.',
+    // Only ever shown for a filter MailBoy cannot rewrite — one of the account's
+    // own, or one sending mail to several folders. Its own it takes apart around
+    // the rule being removed, so nothing else goes.
     alsoGoing: (n) =>
-      ` One of these sends mail to more than one folder, and Gmail cannot remove ` +
-      `part of a filter — so ${ruleCount(n)} sending mail elsewhere ` +
-      `${n === 1 ? 'goes' : 'go'} as well.`,
+      ` Gmail cannot remove part of a filter, so ${ruleCount(n)} sharing one ` +
+      `with these ${n === 1 ? 'goes' : 'go'} as well.`,
     deleteOne: 'Delete rule',
     deleteMany: 'Delete rules',
     deleting: (count) => `Deleting ${count}…`,
@@ -411,7 +413,6 @@ export const COPY = {
     addedMany: (n, where) => `${n.toLocaleString()} rules added, all sending mail to ${where}.`,
     alreadyHad: (n) => `Already had ${n === 1 ? 'that rule' : 'those rules'}.`,
     full: (max) => `Gmail is full at ${max.toLocaleString()} filters. No rule added.`,
-    noRoom: (n) => `${n.toLocaleString()} did not fit Gmail's limit.`,
     someFailed: (n) => `${n.toLocaleString()} could not be added.`,
     addFailedDuringMove: 'The emails are moving, but the rule could not be added.',
   },

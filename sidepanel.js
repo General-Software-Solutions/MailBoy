@@ -56,11 +56,15 @@ import {
 import { clearMessages, dayOf, reloadMessages, resetMessages, sizeOf } from './src/messages.js';
 import {
   MAX_RULES,
-  createRules,
   deleteRules,
   domainOf,
+  filtersNeeded,
   listRules,
+  partiallyEditable,
+  planSave,
+  removeRules,
   sameRule,
+  saveRules,
 } from './src/rules.js';
 import { COPY, applyStaticCopy, emails, ruleCount } from './src/copy.js';
 import { trace } from './src/trace.js';
@@ -3691,7 +3695,7 @@ function paintRuleHint(boxes, material, copy) {
 }
 
 /**
- * The rules the ticked boxes ask for, as specs `createRules` takes.
+ * The rules the ticked boxes ask for, as specs `saveRules` takes.
  *
  * The boxes are read here rather than remembered, so what is created is what is
  * ticked at the moment the dialog's own button is pressed.
@@ -3843,6 +3847,13 @@ function confirmMove() {
  * `whenFailed` is passed because the usual line reassures about a move that is
  * already under way, and Block dispatches no move at all: telling someone their
  * emails are moving when nothing is would be the one wrong thing to say.
+ *
+ * **What lands is not one filter per rule.** `saveRules` folds every sender
+ * going to one folder into one filter's `from`, so five senders is one create —
+ * and, where that folder already had filters of MailBoy's, one create and
+ * several deletes as they are consolidated into it. The report counts the rules
+ * somebody asked for, which is what they ticked and what the tab will show;
+ * filters are the unit Gmail meters and nothing a user should have to think in.
  */
 async function applyRules(specs, where, whenFailed = COPY.rules.addFailedDuringMove) {
   try {
@@ -3856,27 +3867,26 @@ async function applyRules(specs, where, whenFailed = COPY.rules.addFailedDuringM
       return;
     }
 
-    const room = MAX_RULES - filters;
-    if (room <= 0) {
+    // Every filter a plan makes has to exist before the ones it replaces go, so
+    // it is the peak rather than the net that has to fit under Gmail's ceiling.
+    // Usually one: the common case is a folder's single filter being rewritten.
+    if (filters + filtersNeeded(planSave(fresh, existing)) > MAX_RULES) {
       flash(COPY.rules.full(MAX_RULES), 'error');
       return;
     }
 
-    const wanted = fresh.slice(0, room);
-    const { created, failed } = await createRules(wanted);
-    rules = [...rules, ...created];
-    renderRules();
+    const { failed } = await saveRules(fresh, existing);
 
+    // Re-read rather than patch. A consolidating write gives the surviving rules
+    // a new filter id — they moved into a different filter — so every row id on
+    // screen is stale, and reconciling that locally would be a second copy of
+    // arithmetic `readFilter` already does for one quota unit.
+    await loadRules();
+
+    const added = fresh.length - failed.length;
     const parts = [];
-    if (created.length) {
-      parts.push(
-        created.length === 1
-          ? COPY.rules.added(where)
-          : COPY.rules.addedMany(created.length, where)
-      );
-    }
-    if (fresh.length > wanted.length) {
-      parts.push(COPY.rules.noRoom(fresh.length - wanted.length));
+    if (added > 0) {
+      parts.push(added === 1 ? COPY.rules.added(where) : COPY.rules.addedMany(added, where));
     }
     if (failed.length) parts.push(COPY.rules.someFailed(failed.length));
 
@@ -4840,6 +4850,33 @@ function closeRuleGroup() {
 }
 
 /**
+ * The rules that go along with a delete because they share a filter with one of
+ * the ticked rows and nothing can be removed from it.
+ *
+ * **Only where the filter cannot be rewritten.** MailBoy's own now can be — one
+ * sender is dropped out of the `from` and the rest are put back — so a row of
+ * one of ours takes nothing with it. Somebody's own filter is left alone
+ * (`partiallyEditable` says why), and so is any filter that files into more than
+ * one folder, and for those the old all-or-nothing still holds.
+ *
+ * Counted rather than assumed, because the dialog names it before the button is
+ * pressed and it may include rows in the list behind, which nobody ticked.
+ */
+function collateralOf(doomed) {
+  const ticked = new Set(doomed.map((rule) => rule.id));
+  const going = [];
+
+  for (const filterId of new Set(doomed.map((rule) => rule.filterId))) {
+    const family = rules.filter((rule) => rule.filterId === filterId);
+    const untouched = family.filter((rule) => !ticked.has(rule.id));
+    if (!untouched.length || partiallyEditable(family[0])) continue;
+    going.push(...untouched);
+  }
+
+  return going;
+}
+
+/**
  * Confirm, then remove.
  *
  * The consequences are the whole point of the dialog, and they are not the ones
@@ -4847,11 +4884,10 @@ function closeRuleGroup() {
  * the only thing that changes is what happens to mail that has not arrived. The
  * irreversible part is the rule itself — Gmail has no way to restore a filter.
  *
- * **A row is not a filter, and that shows up here.** Gmail cannot remove part of
- * a filter, so deleting a row belonging to one that files into several folders
- * takes its other rows with it — including rows in the list behind, which nobody
- * ticked. `alsoGoing` is that set, and it is counted rather than assumed so the
- * dialog can name it before the button is pressed.
+ * **A row is not a filter, and that still shows up here** — see `collateralOf`.
+ * It bites far less often than it did: MailBoy's own filters are rewritten
+ * around the row being removed, so the warning is now about somebody's own
+ * filter rather than about ours.
  *
  * @param {object[]} doomed the ticked rows — `Rule`s, not filters
  */
@@ -4862,11 +4898,7 @@ async function confirmRuleDelete(doomed, where) {
   // that moves no mail and costs 5 quota units, so there is nothing for it to
   // race and nothing for it to starve — and refusing it while a folder empties
   // would be exactly the arbitrary "come back later" the queue exists to end.
-  const ticked = new Set(doomed.map((rule) => rule.id));
-  const filterIds = new Set(doomed.map((rule) => rule.filterId));
-  const alsoGoing = rules.filter(
-    (rule) => filterIds.has(rule.filterId) && !ticked.has(rule.id)
-  );
+  const alsoGoing = collateralOf(doomed);
   const total = doomed.length + alsoGoing.length;
 
   const { ok } = await askConfirm({
@@ -4882,28 +4914,21 @@ async function confirmRuleDelete(doomed, where) {
   setAction(COPY.rules.deleting(ruleCount(total)));
 
   try {
-    const { deleted, failed } = await deleteRules([...filterIds]);
-    const gone = new Set(deleted);
-    const stuck = new Set(failed);
-    // Rows, not filters: what someone counted on screen and what Gmail was
-    // addressed about are different units, and the report is about the rows.
-    const removed = rules.filter((rule) => gone.has(rule.filterId)).length;
-    const kept = rules.filter((rule) => stuck.has(rule.filterId)).length;
-    rules = rules.filter((rule) => !gone.has(rule.filterId));
+    const { removed, failed } = await removeRules(doomed, rules);
+
+    // The ticks name rows that a rewrite has just given new ids to, so they are
+    // dropped rather than reconciled — and `loadRules` re-reads for one unit,
+    // which is the only thing that knows what the account now holds.
     selectedDestinations = new Set();
     selectedRules = new Set();
 
     setAction(null);
-
-    // The drill-down was about a folder nothing points at any more.
-    const groups = new Set(rules.map(groupKeyOf));
-    if (openRuleGroup && !groups.has(openRuleGroup.key)) closeRuleGroup();
-    else renderRules();
+    await loadRules();
 
     flash(
-      kept
-        ? COPY.rules.deletedSome(ruleCount(removed), ruleCount(kept))
-        : COPY.rules.deleted(ruleCount(removed))
+      failed.length
+        ? COPY.rules.deletedSome(ruleCount(removed.length), ruleCount(failed.length))
+        : COPY.rules.deleted(ruleCount(removed.length))
     );
   } catch (err) {
     console.error('[MailBoy] could not delete those rules:', err);
