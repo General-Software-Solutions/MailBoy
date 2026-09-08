@@ -57,7 +57,8 @@ reads slightly lower here than in Gmail's own sidebar.
 
 The extension talks to the Gmail API directly from your browser. There is no
 backend of ours in the path, so there is nowhere for mailbox data to be
-collected even in principle.
+collected even in principle. The full policy is at
+[general-software-solutions.github.io/MailBoy/privacy.html](https://general-software-solutions.github.io/MailBoy/privacy.html).
 
 What is stored on your machine, in `chrome.storage.local`:
 

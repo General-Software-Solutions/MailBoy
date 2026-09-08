@@ -1,0 +1,956 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MailBoy — clear out your Gmail in bulk</title>
+    <meta
+      name="description"
+      content="A Chrome side-panel extension that shows what is filling up your Gmail mailbox — by folder, by sender, by size — and clears it out in bulk. Runs entirely in your browser."
+    />
+    <link rel="canonical" href="https://general-software-solutions.github.io/MailBoy/" />
+
+    <link rel="icon" type="image/png" sizes="32x32" href="resources/icons/icon32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="resources/icons/icon16.png" />
+    <link rel="apple-touch-icon" href="resources/icons/icon128.png" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="MailBoy — clear out your Gmail in bulk" />
+    <meta
+      property="og:description"
+      content="See what is filling up your mailbox — by folder, by sender, by size — and clear it out in bulk. No server, no tracking, nothing deleted permanently."
+    />
+    <meta property="og:url" content="https://general-software-solutions.github.io/MailBoy/" />
+    <meta
+      property="og:image"
+      content="https://general-software-solutions.github.io/MailBoy/resources/icons/icon128.png"
+    />
+    <meta name="twitter:card" content="summary" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#16181c" media="(prefers-color-scheme: dark)" />
+
+    <!--
+      One file, no dependencies. MailBoy itself bundles no third-party code,
+      fonts or assets (see the README's Icons section); its homepage does not
+      get to either. Every glyph below is inline SVG in a 16-unit viewBox
+      stroked with currentColor, the same convention the extension uses.
+    -->
+    <style>
+      :root {
+        color-scheme: light dark;
+
+        --bg: #ffffff;
+        --surface: #f6f7f9;
+        --raised: #ffffff;
+        --text: #1c1e21;
+        --muted: #5a616b;
+        --heading: #1a3f8f;
+        --border: #e2e5ea;
+        --edge: #c9cfd8;
+        --accent: #2656c9;
+        --danger: #c0392f;
+        --success: #1f7a46;
+        --warn: #9a6212;
+        --on-fill: #ffffff;
+
+        --pad: 20px;
+        --max: 880px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #16181c;
+          --surface: #1e2126;
+          --raised: #1b1e23;
+          --text: #e6e8ec;
+          --muted: #a8b0bb;
+          --heading: #aec6f6;
+          --border: #2c3038;
+          --edge: #3c424c;
+          --accent: #7ba3ff;
+          --danger: #f08d84;
+          --success: #6ed99b;
+          --warn: #e2b35e;
+          /* White on any of these light tints is ~2.5:1. Filled controls take
+             the page ground instead — the extension's own rule. */
+          --on-fill: #16181c;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        overflow-x: hidden;
+      }
+
+      .wrap {
+        max-width: var(--max);
+        margin: 0 auto;
+        padding: 0 var(--pad);
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+        border-radius: 4px;
+      }
+
+      /* ---------------------------------------------------------------- nav */
+
+      .topbar {
+        border-bottom: 1px solid var(--border);
+        background: var(--bg);
+      }
+
+      .topbar .wrap {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-height: 56px;
+        flex-wrap: wrap;
+      }
+
+      .wordmark {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        color: var(--text);
+        text-decoration: none;
+        margin-right: auto;
+      }
+
+      .wordmark svg {
+        width: 22px;
+        height: 22px;
+        display: block;
+      }
+
+      .topbar nav {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        font-size: 14.5px;
+      }
+
+      .topbar nav a {
+        color: var(--muted);
+        text-decoration: none;
+      }
+
+      .topbar nav a:hover {
+        color: var(--text);
+      }
+
+      /* -------------------------------------------------------------- hero */
+
+      .hero {
+        padding: 56px 0 44px;
+        border-bottom: 1px solid var(--border);
+        background: linear-gradient(var(--surface), var(--bg));
+      }
+
+      .mark {
+        width: 84px;
+        height: 84px;
+        display: block;
+        margin: 0 0 22px;
+      }
+
+      h1 {
+        font-size: 40px;
+        line-height: 1.12;
+        letter-spacing: -0.02em;
+        margin: 0 0 14px;
+        color: var(--heading);
+      }
+
+      .lede {
+        font-size: 19px;
+        line-height: 1.5;
+        margin: 0 0 10px;
+        max-width: 34em;
+      }
+
+      .sub {
+        color: var(--muted);
+        margin: 0 0 26px;
+        max-width: 34em;
+      }
+
+      .cta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 16px;
+        border-radius: 8px;
+        border: 1px solid var(--edge);
+        background: var(--raised);
+        color: var(--text);
+        font: inherit;
+        font-size: 15px;
+        font-weight: 500;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+
+      .btn:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .btn svg {
+        width: 16px;
+        height: 16px;
+        flex: none;
+      }
+
+      /* Filled marks a sole primary action, never a preferred one among peers. */
+      .btn--primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: var(--on-fill);
+      }
+
+      .btn--primary:hover {
+        color: var(--on-fill);
+        filter: brightness(1.08);
+      }
+
+      /* ---------------------------------------------------------- sections */
+
+      section {
+        padding: 52px 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      /* Alternating ground, so six stacked sections read as a rhythm rather
+         than as one long column. */
+      .band {
+        background: var(--surface);
+      }
+
+      h2 {
+        font-size: 24px;
+        line-height: 1.25;
+        letter-spacing: -0.01em;
+        margin: 0 0 6px;
+        color: var(--heading);
+      }
+
+      .section-sub {
+        color: var(--muted);
+        margin: 0 0 28px;
+        max-width: 40em;
+      }
+
+      h3 {
+        font-size: 16.5px;
+        margin: 0 0 6px;
+        color: var(--text);
+      }
+
+      p {
+        margin: 0 0 12px;
+      }
+
+      /* ---------------------------------------------------------- features */
+
+      .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      }
+
+      .card {
+        border: 1px solid var(--border);
+        background: var(--raised);
+        border-radius: 10px;
+        padding: 18px;
+      }
+
+      .card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      /* Seven cards over three columns would strand the last one alone on a
+         row. The lead card takes the whole first row instead — which is also
+         the right ranking, since working out what to clear is the thing
+         nothing else does. `1 / -1` spans whatever auto-fit settled on, so it
+         is simply full width at one column. */
+      .card--lead {
+        grid-column: 1 / -1;
+      }
+
+      .card--lead p {
+        max-width: 52em;
+      }
+
+      .card-icon {
+        width: 30px;
+        height: 30px;
+        border-radius: 7px;
+        display: grid;
+        place-items: center;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--accent);
+        margin-bottom: 12px;
+      }
+
+      .card-icon svg {
+        width: 16px;
+        height: 16px;
+      }
+
+      .card--danger .card-icon {
+        color: var(--danger);
+      }
+
+      .card--warn .card-icon {
+        color: var(--warn);
+      }
+
+      .card--success .card-icon {
+        color: var(--success);
+      }
+
+      /* ---------------------------------------------------------- callouts */
+
+      .callout {
+        border: 1px solid var(--border);
+        background: var(--surface);
+        border-radius: 10px;
+        padding: 18px 20px;
+      }
+
+      .callout + .callout {
+        margin-top: 14px;
+      }
+
+      .callout p:last-child {
+        margin-bottom: 0;
+      }
+
+      .callout p {
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      .callout strong {
+        color: var(--text);
+      }
+
+      .two-up {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+
+      .two-up .callout + .callout {
+        margin-top: 0;
+      }
+
+      /* ------------------------------------------------------------- lists */
+
+      .plain {
+        margin: 0 0 16px;
+        padding: 0;
+        list-style: none;
+      }
+
+      .plain li {
+        position: relative;
+        padding-left: 24px;
+        margin-bottom: 9px;
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      .plain li strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .plain li::before {
+        content: "";
+        position: absolute;
+        left: 8px;
+        top: 0.62em;
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: var(--edge);
+      }
+
+      .plain--no li::before {
+        content: none;
+      }
+
+      .plain--no li {
+        padding-left: 26px;
+      }
+
+      .cross {
+        position: absolute;
+        left: 2px;
+        top: 0.28em;
+        width: 15px;
+        height: 15px;
+        color: var(--danger);
+      }
+
+      /* ------------------------------------------------------------- table */
+
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+      }
+
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        min-width: 460px;
+        font-size: 15px;
+      }
+
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 11px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 12.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        background: var(--surface);
+      }
+
+      td code {
+        white-space: nowrap;
+      }
+
+      /* --------------------------------------------------------------- get */
+
+      .get .section-sub {
+        margin-bottom: 22px;
+      }
+
+      .fineprint {
+        margin: 20px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+        max-width: 40em;
+      }
+
+      /* ------------------------------------------------------------ footer */
+
+      footer {
+        padding: 36px 0 56px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .footer-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 18px;
+        margin-bottom: 18px;
+      }
+
+      footer p {
+        max-width: 46em;
+        margin: 0 0 10px;
+      }
+
+      /* -------------------------------------------------------- responsive */
+
+      @media (max-width: 560px) {
+        h1 {
+          font-size: 32px;
+        }
+
+        .lede {
+          font-size: 17px;
+        }
+
+        .hero {
+          padding: 40px 0 34px;
+        }
+
+        section {
+          padding: 40px 0;
+        }
+
+        .cta .btn {
+          flex: 1 1 auto;
+          justify-content: center;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <header class="topbar">
+      <div class="wrap">
+        <a class="wordmark" href="./">
+          <svg viewBox="0 0 200 200" aria-hidden="true">
+            <path d="m45,161 v-110 l60,70 l58,-70 v110" fill="#fbbc05" stroke="#fbbc05" />
+            <path
+              d="m45,60 l55,50 55,-50"
+              fill="none"
+              stroke="#E85146"
+              stroke-width="25"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path d="m35,160 h20 v-100 h-20z" fill="#E85146" stroke="#E85146" stroke-width="5" />
+            <path d="m145,160 h20 v-100 h-20z" fill="#E85146" stroke="#E85146" stroke-width="5" />
+            <path d="m60,160 h80 v-65 l-40,35 l-40,-35" fill="#4285f4" stroke="#34a853" />
+          </svg>
+          MailBoy
+        </a>
+        <nav>
+          <a href="#features">What it does</a>
+          <a href="#privacy">Privacy</a>
+          <a href="#get">Get it</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <div class="hero">
+        <div class="wrap">
+          <svg class="mark" viewBox="0 0 200 200" role="img" aria-label="MailBoy">
+            <path d="m45,161 v-110 l60,70 l58,-70 v110" fill="#fbbc05" stroke="#fbbc05" />
+            <path
+              d="m45,60 l55,50 55,-50"
+              fill="none"
+              stroke="#E85146"
+              stroke-width="25"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              d="m35,160 h20 v-100 h-20z"
+              fill="#E85146"
+              stroke="#E85146"
+              stroke-width="5"
+              stroke-linejoin="round"
+            />
+            <path
+              d="m145,160 h20 v-100 h-20z"
+              fill="#E85146"
+              stroke="#E85146"
+              stroke-width="5"
+              stroke-linejoin="round"
+            />
+            <path d="m60,160 h80 v-65 l-40,35 l-40,-35" fill="#4285f4" stroke="#34a853" />
+          </svg>
+
+          <h1>Clear out your Gmail in bulk.</h1>
+
+          <p class="lede">
+            MailBoy is a Chrome side panel that shows what is actually filling up your
+            mailbox — which folders, which senders, how much space — then bins it, files
+            it, or blocks it. Thousands of emails at a time, not one thread at a time.
+          </p>
+
+          <p class="sub">
+            Everything runs in your browser. There is no MailBoy server, and no mailbox
+            data ever leaves your machine.
+          </p>
+
+          <div class="cta">
+            <!--
+              Installing means following the README, so the button goes there
+              rather than reproducing the steps on a page meant for the person
+              who will use MailBoy, not the one setting it up. When the Chrome
+              Web Store listing goes live, point this at it instead and change
+              the label to "Add to Chrome".
+            -->
+            <a
+              class="btn btn--primary"
+              href="https://github.com/General-Software-Solutions/MailBoy#setup"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 2v8M4.5 7l3.5 3 3.5-3M2.5 13h11" />
+              </svg>
+              Install it
+            </a>
+            <a class="btn" href="https://github.com/General-Software-Solutions/MailBoy">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M6 12.5 2.5 9 6 5.5M10 3.5 13.5 7 10 10.5" />
+              </svg>
+              Read the source
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <!-- ------------------------------------------------------- features -->
+
+      <section id="features">
+        <div class="wrap">
+          <h2>What it does</h2>
+          <p class="section-sub">
+            Gmail will not tell you how big a folder is, or who is filling it. MailBoy
+            works both out, then gives you one click to act on the answer.
+          </p>
+
+          <div class="grid">
+            <div class="card card--lead">
+              <div class="card-icon">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3 13V7.5M8 13V3M13 13V9.5" />
+                </svg>
+              </div>
+              <h3>Know what to clear</h3>
+              <p>
+                Every folder shows an exact email count and a total size. Open one and it
+                breaks down by sender: how many each has sent, how much space they take,
+                how often they write. Sort by any of those, or narrow to a period.
+              </p>
+            </div>
+
+            <div class="card card--danger">
+              <div class="card-icon">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M2.5 4.5h11M6 4.5V2.8h4v1.7M4 4.5l.7 8.7h6.6l.7-8.7" />
+                </svg>
+              </div>
+              <h3>Clear out in bulk</h3>
+              <p>
+                Tick the senders filling a folder — or individual emails — and send the lot
+                to Trash in one go. Thousands at a time, from a list already sorted by what
+                is costing you the most.
+              </p>
+            </div>
+
+            <div class="card">
+              <div class="card-icon">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M1.8 12.8V4.2h3.6l1.2 1.6h7.6v7z" />
+                  <path d="M6.5 9h4M9 7.2 10.8 9 9 10.8" />
+                </svg>
+              </div>
+              <h3>File what you keep</h3>
+              <p>
+                Move a selection into a folder, creating the folder right there if it does
+                not exist yet. A move is definitive: the mail ends up in the folder you
+                chose and nowhere else, so “where is this?” has one answer.
+              </p>
+            </div>
+
+            <div class="card card--warn">
+              <div class="card-icon">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="8" cy="8" r="5.8" />
+                  <path d="M3.9 3.9 12.1 12.1" />
+                </svg>
+              </div>
+              <h3>Block a sender for good</h3>
+              <p>
+                One click writes a Gmail filter sending everything from that address — or
+                from their entire domain — straight to Trash from now on. Nothing you
+                already have moves.
+              </p>
+            </div>
+
+            <div class="card">
+              <div class="card-icon">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M2 3h12l-4.6 5.5v4.2L6.6 14V8.5z" />
+                </svg>
+              </div>
+              <h3>Make it stick</h3>
+              <p>
+                When you move or delete, you can ask for future mail like it to go the same
+                way automatically. The <strong>Rules</strong> tab keeps every rule MailBoy
+                made in one place — alongside the Gmail filters you already had, grouped by
+                where they send mail.
+              </p>
+            </div>
+
+            <div class="card">
+              <div class="card-icon">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M1.8 12.8V4.2h3.6l1.2 1.6h7.6v7z" />
+                  <path d="M8.5 6.6v4.4M6.3 8.8h4.4" />
+                </svg>
+              </div>
+              <h3>Shape your folders</h3>
+              <p>
+                Create and remove your own folders, nesting included. Deleting one asks
+                what should happen to the mail inside: back to your inbox, or to Trash.
+              </p>
+            </div>
+
+            <div class="card card--success">
+              <div class="card-icon">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M1 8s2.6-4.2 7-4.2S15 8 15 8s-2.6 4.2-7 4.2S1 8 1 8z" />
+                  <circle cx="8" cy="8" r="1.9" />
+                </svg>
+              </div>
+              <h3>Check before you bin</h3>
+              <p>
+                A sender's emails, ten to a page, and any one of them opened. Messages are
+                shown as plain text — MailBoy never loads a sender's images or styling, so
+                looking at one does not tell them you did.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------------------------------------------- worth knowing -->
+
+      <section id="worth-knowing" class="band">
+        <div class="wrap">
+          <h2>Two things worth knowing up front</h2>
+          <p class="section-sub">Both shape what MailBoy can and cannot do to your mail.</p>
+
+          <div class="two-up">
+            <div class="callout">
+              <h3>Nothing is ever deleted permanently</h3>
+              <p>
+                Mail MailBoy removes goes to Trash, where Gmail keeps it for 30 days and
+                you can put it back. MailBoy deliberately never asks Google for the
+                permission that would allow permanent deletion, so it cannot do it — not
+                by mistake, and not if you told it to.
+              </p>
+            </div>
+
+            <div class="callout">
+              <h3>Mail you wrote is left out throughout</h3>
+              <p>
+                No Sent or Drafts row, and neither counts towards a folder. Gmail labels
+                whole threads, so this is also what makes deleting a folder incapable of
+                touching anything you sent. The cost: a folder covering conversations you
+                took part in reads slightly lower here than in Gmail's own sidebar.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- -------------------------------------------------------- privacy -->
+
+      <section id="privacy">
+        <div class="wrap">
+          <h2>Your mail stays yours</h2>
+          <p class="section-sub">
+            MailBoy talks to Gmail straight from your browser. There is no MailBoy server
+            anywhere in the middle, so there is nowhere for your mail to be collected —
+            not by us, and not by anyone.
+          </p>
+
+          <div class="two-up" style="margin-bottom: 26px">
+            <div>
+              <h3>Kept on your computer</h3>
+              <ul class="plain">
+                <li>
+                  <strong>How big each email is, who sent it and when</strong> — what every
+                  count, size and sender list is built from. None of it can change, which
+                  is why your mailbox only has to be read once.
+                </li>
+                <li>
+                  <strong>Which folders your emails are in</strong>, and your Google
+                  account's name and email address.
+                </li>
+                <li>
+                  <strong>Your sign-in</strong> is held in memory and never written to
+                  disk. Closing Chrome discards it.
+                </li>
+              </ul>
+            </div>
+
+            <div>
+              <h3>Never written to disk</h3>
+              <ul class="plain plain--no">
+                <li>
+                  <svg class="cross" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                       stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                    <path d="M4 4l8 8M12 4l-8 8" />
+                  </svg>
+                  Subjects, previews and message bodies
+                </li>
+                <li>
+                  <svg class="cross" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                       stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                    <path d="M4 4l8 8M12 4l-8 8" />
+                  </svg>
+                  Recipients, attachments and your rules
+                </li>
+                <li>
+                  <svg class="cross" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                       stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                    <path d="M4 4l8 8M12 4l-8 8" />
+                  </svg>
+                  Analytics, telemetry or crash reporting — there is none
+                </li>
+                <li>
+                  <svg class="cross" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                       stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                    <path d="M4 4l8 8M12 4l-8 8" />
+                  </svg>
+                  Anything sent to a third party — nothing is
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <p>
+            What MailBoy keeps is erased 7 days after you log out, so signing back in does
+            not mean waiting for your mailbox to be read again. If you would rather it went
+            straight away, <strong>Log out and erase data now</strong> does exactly that.
+          </p>
+
+          <h3 style="margin-top: 28px">What you are asked to allow</h3>
+          <p class="section-sub" style="margin-bottom: 16px">
+            Google shows you three permissions when you connect, each with its own tick
+            box. You can leave any of them unticked — MailBoy works with what it is given,
+            and asks again only when you press something that needs more.
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Permission</th>
+                  <th>What MailBoy does with it</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>See your email</td>
+                  <td>Folder counts and sizes, sender breakdowns, and opening a message</td>
+                </tr>
+                <tr>
+                  <td>Change your email</td>
+                  <td>Creating and deleting folders; moving, deleting and restoring mail</td>
+                </tr>
+                <tr>
+                  <td>Change your mail settings</td>
+                  <td>Making and removing rules, and blocking a sender</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p style="margin-top: 18px">
+            The full detail — everything that is stored, for how long, and how to remove
+            it — is in the <a href="privacy.html">privacy policy</a>.
+          </p>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------------ get -->
+
+      <section id="get" class="band">
+        <div class="wrap get">
+          <h2>Get MailBoy</h2>
+          <p class="section-sub">
+            It sits in Chrome's side panel, beside whatever you are doing. Chrome 114 or
+            newer. The first run reads your mailbox once so it knows what you are working
+            with — a few minutes on a large one, and you can close the panel while it
+            works. Every open after that is seconds.
+          </p>
+
+          <div class="cta">
+            <a
+              class="btn btn--primary"
+              href="https://github.com/General-Software-Solutions/MailBoy#setup"
+            >
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M8 2v8M4.5 7l3.5 3 3.5-3M2.5 13h11" />
+              </svg>
+              Install it
+            </a>
+            <a class="btn" href="https://github.com/General-Software-Solutions/MailBoy">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M6 12.5 2.5 9 6 5.5M10 3.5 13.5 7 10 10.5" />
+              </svg>
+              Read the source
+            </a>
+          </div>
+
+          <p class="fineprint">
+            MailBoy's code is published in full, so anyone can check for themselves that it
+            does what this page says with their mailbox.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <div class="footer-links">
+          <a href="https://github.com/General-Software-Solutions/MailBoy">GitHub</a>
+          <a href="privacy.html">Privacy policy</a>
+          <a href="https://github.com/General-Software-Solutions/MailBoy/blob/main/SECURITY.md">Security</a>
+          <a href="https://github.com/General-Software-Solutions/MailBoy/blob/main/LICENSE">Licence</a>
+          <a href="mailto:generalsoftwaresolutionspvt@gmail.com">Contact</a>
+        </div>
+
+        <p>Copyright © 2026 Jerry Raju, trading as General Software Solutions. All rights reserved.</p>
+        <p>
+          MailBoy is an independent project. It is not affiliated with, endorsed by, or
+          sponsored by Google LLC. Gmail is a trademark of Google LLC.
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
