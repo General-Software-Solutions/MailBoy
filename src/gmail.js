@@ -122,12 +122,37 @@ async function readJson(res) {
 // The stored value is a timestamp — the end of the last reserved slice — so a
 // context that dies mid-reservation costs at most that slice, and a value left
 // over from a previous session is simply in the past.
+//
+// ── Two lanes ────────────────────────────────────────────────────
+//
+// **A reservation queue is fairness, not a ceiling, and the two must not be
+// confused.** A trash job books the budget roughly fifteen seconds ahead —
+// three concurrent batches at 500 units each — and a cool-off pushes it twenty
+// further. Anything joining the tail of that waits it out, which is right for a
+// pass and wrong for the two writes a person is standing in front of: creating
+// a folder and making a rule. Both are one 5-unit call, both were asked for
+// just now, and both used to sit behind minutes of somebody else's mail.
+//
+// So `priority` claims book against a lane of their own. They pace themselves
+// against each other at the same rate — a consolidating rule save is forty
+// deletes and should not arrive as one burst — and the bulk lane absorbs what
+// they spent, so jumping the queue costs the pass a slice rather than costing
+// the mailbox its ceiling. Over a minute it is noise: 5 units against the 600
+// `SAFETY` already holds back.
+//
+// **What a priority claim does not jump is a cool-off.** That is Gmail refusing
+// this mailbox rather than MailBoy being polite, and a request that ignored it
+// would be refused in turn — so both lanes wait it out.
 
 const BUDGET_KEY = 'quota:until';
+const PRIORITY_KEY = 'quota:priority';
+const COOLOFF_KEY = 'quota:cooloff';
 const BUDGET_LOCK = 'mailboy-quota';
 
-/** The same figure, for when the shared one cannot be reached. */
+/** The same figures, for when the shared ones cannot be reached. */
 let nextSlot = 0;
+let nextPrioritySlot = 0;
+let coolUntil = 0;
 
 /**
  * Whether the shared budget is reachable at all. Latched rather than re-tested:
@@ -141,24 +166,57 @@ let sharedBudget = Boolean(
 /**
  * Hold the caller until its share of the quota budget comes free. Callers
  * reserve in order, so concurrent batches queue rather than collide.
+ *
+ * `priority` books against the interactive lane instead of the tail of the
+ * queue — see the note above. It is for a write somebody is waiting on, never
+ * for anything a long job does repeatedly.
  */
-async function reserve(units) {
-  const wait = await claim((units / UNITS_PER_SECOND) * 1000);
+async function reserve(units, priority = false) {
+  const wait = await claim((units / UNITS_PER_SECOND) * 1000, priority);
   if (wait > 0) await sleep(wait);
 }
 
 /**
- * Push the budget forward so a refusal is felt by everything in flight, not
- * only by the request that got one.
+ * Hold everything off after a refusal about rate, so it is felt by everything
+ * in flight rather than only by the request that got one.
  *
  * A rate limit is a statement about the mailbox rather than about one call, and
  * whatever provoked it — nearly always a measuring pass — is still running.
  * Backing off alone would leave that pass spending at full rate while the
  * request it starved retried into the same wall.
+ *
+ * **Recorded as a deadline as well as a reservation.** The bulk lane feels it as
+ * a slice pushed onto its queue, which is what it always was; the priority lane
+ * has no such queue to push, so it reads the deadline directly. A cool-off is
+ * the one thing an interactive write may not step over.
  */
-function coolOff(ms) {
-  return claim(ms);
+async function coolOff(ms) {
+  if (!sharedBudget) {
+    coolUntil = Math.max(coolUntil, Date.now() + ms);
+    return claimLocally(ms, false);
+  }
+
+  try {
+    return await navigator.locks.request(BUDGET_LOCK, async () => {
+      const stored = await chrome.storage.session.get([BUDGET_KEY, COOLOFF_KEY]);
+      const now = Date.now();
+      const start = Math.max(now, at(stored[BUDGET_KEY]));
+      await chrome.storage.session.set({
+        [BUDGET_KEY]: start + ms,
+        // A deadline, not a reservation: two refusals a second apart describe
+        // one busy mailbox, and adding their waits together would hold the
+        // panel off for twice as long as either asked for.
+        [COOLOFF_KEY]: Math.max(at(stored[COOLOFF_KEY]), now + ms),
+      });
+      return start - now;
+    });
+  } catch (err) {
+    return fallBack(err, ms, false);
+  }
 }
+
+/** A stored timestamp, or nothing at all — session storage starts empty. */
+const at = (value) => (typeof value === 'number' ? value : 0);
 
 /**
  * How long everything holds off after a refusal about rate. A `PATIENT` one has
@@ -175,58 +233,98 @@ function coolOffFor(message) {
  * moment it is claimed, so holding the lock through the sleep would only stop
  * anyone else booking theirs.
  */
-async function claim(ms) {
-  if (!sharedBudget) return claimLocally(ms);
+async function claim(ms, priority = false) {
+  if (!sharedBudget) return claimLocally(ms, priority);
 
   try {
     return await navigator.locks.request(BUDGET_LOCK, async () => {
-      const stored = (await chrome.storage.session.get(BUDGET_KEY))[BUDGET_KEY];
+      const stored = await chrome.storage.session.get([BUDGET_KEY, PRIORITY_KEY, COOLOFF_KEY]);
       const now = Date.now();
-      const start = Math.max(now, typeof stored === 'number' ? stored : 0);
-      await chrome.storage.session.set({ [BUDGET_KEY]: start + ms });
+      const bulk = Math.max(now, at(stored[BUDGET_KEY]));
+
+      if (!priority) {
+        await chrome.storage.session.set({ [BUDGET_KEY]: bulk + ms });
+        return bulk - now;
+      }
+
+      // Its own lane, held back only by a cool-off and by other interactive
+      // writes. The bulk lane still pays for the slice, so the combined rate is
+      // what it always was — only the order changed.
+      const start = Math.max(now, at(stored[COOLOFF_KEY]), at(stored[PRIORITY_KEY]));
+      await chrome.storage.session.set({
+        [PRIORITY_KEY]: start + ms,
+        [BUDGET_KEY]: bulk + ms,
+      });
+
+      // Only where it actually saved something. The two lanes are level on a
+      // quiet mailbox, and a line claiming a jump that did not happen is the
+      // kind of trace that makes the flag worth turning off.
+      if (bulk - start > 1000) {
+        trace('quota', 'interactive write jumped the queue', {
+          waited: Math.round(start - now),
+          insteadOf: Math.round(bulk - now),
+        });
+      }
       return start - now;
     });
   } catch (err) {
-    // A budget that cannot be read is worse than one that is only this
-    // context's: a storage failure must not stop a pass, and pacing locally is
-    // what this did before the budget was shared at all. **The other context is
-    // then pacing separately again**, so this warning is the only sign that the
-    // combined rate can go over — it is worth keeping loud.
-    sharedBudget = false;
-    console.warn('[MailBoy] shared quota budget unavailable, pacing locally:', err);
-    return claimLocally(ms);
+    return fallBack(err, ms, priority);
   }
 }
 
-function claimLocally(ms) {
+/**
+ * A budget that cannot be read is worse than one that is only this context's: a
+ * storage failure must not stop a pass, and pacing locally is what this did
+ * before the budget was shared at all. **The other context is then pacing
+ * separately again**, so this warning is the only sign that the combined rate
+ * can go over — it is worth keeping loud.
+ */
+function fallBack(err, ms, priority) {
+  sharedBudget = false;
+  console.warn('[MailBoy] shared quota budget unavailable, pacing locally:', err);
+  return claimLocally(ms, priority);
+}
+
+function claimLocally(ms, priority) {
   const now = Date.now();
-  const start = Math.max(now, nextSlot);
-  nextSlot = start + ms;
+
+  if (!priority) {
+    const start = Math.max(now, nextSlot);
+    nextSlot = start + ms;
+    return start - now;
+  }
+
+  const start = Math.max(now, coolUntil, nextPrioritySlot);
+  nextPrioritySlot = start + ms;
+  nextSlot = Math.max(now, nextSlot) + ms;
   return start - now;
 }
 
 // ── Requests ─────────────────────────────────────────────────────
 
-function call(path, params = {}, units = UNIT_COST.cheap) {
-  return request(BASE + path, params, { units });
+function call(path, params = {}, units = UNIT_COST.cheap, priority = false) {
+  return request(BASE + path, params, { units, priority });
 }
 
 /**
- * @param {{units?: number, attempt?: number, method?: string, body?: object}} options
+ * @param {{units?: number, attempt?: number, method?: string, body?: object,
+ *   priority?: boolean}} options
  *   `body` is sent as JSON and implies a write; the caller still picks `units`,
- *   because Gmail prices writes very differently from each other.
+ *   because Gmail prices writes very differently from each other. `priority`
+ *   books the interactive quota lane — see the note above `BUDGET_KEY`, and use
+ *   it only for a call somebody is waiting on.
  */
 async function request(
   endpoint,
   params = {},
-  { units = UNIT_COST.cheap, attempt = 0, method = 'GET', body } = {}
+  { units = UNIT_COST.cheap, attempt = 0, method = 'GET', body, priority = false } = {}
 ) {
   const url = new URL(endpoint);
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null) url.searchParams.set(key, value);
   }
 
-  await reserve(units);
+  await reserve(units, priority);
 
   const token = await getToken();
   const init = { method, headers: { Authorization: `Bearer ${token}` } };
@@ -247,7 +345,7 @@ async function request(
   // never got past authorisation.
   if (res.status === 401 && attempt === 0) {
     await invalidateToken();
-    return request(endpoint, params, { units, attempt: attempt + 1, method, body });
+    return request(endpoint, params, { units, attempt: attempt + 1, method, body, priority });
   }
 
   // The refusal's own body, read before anything is decided: the status alone
@@ -272,7 +370,7 @@ async function request(
       attempt < limit
     ) {
       trace('quota', 'refused, waiting', { status: res.status, reason, attempt, limit });
-      return backoffRetry(endpoint, params, { units, attempt, method, body });
+      return backoffRetry(endpoint, params, { units, attempt, method, body, priority });
     }
 
     // The UI only ever shows a summary, so keep the real reason reachable —
@@ -293,7 +391,7 @@ async function request(
     if (res.status === 401) throw new AuthError(message);
   } else if ((res.status === 429 || res.status >= 500) && attempt < limit) {
     trace('quota', 'refused, waiting', { status: res.status, reason, attempt, limit });
-    return backoffRetry(endpoint, params, { units, attempt, method, body });
+    return backoffRetry(endpoint, params, { units, attempt, method, body, priority });
   }
 
   throw new GmailError(message, { status: res.status, reason });
@@ -318,7 +416,7 @@ function attemptsFor(message) {
   return PATIENT.test(message) ? BUSY_ATTEMPTS : RETRY_ATTEMPTS;
 }
 
-async function backoffRetry(endpoint, params, { units, attempt, method, body }) {
+async function backoffRetry(endpoint, params, { units, attempt, method, body, priority }) {
   const delay = Math.min(2 ** attempt * 400, MAX_BACKOFF_MS) + Math.random() * 300;
 
   // The whole extension waits, not just this request — see `coolOff`. Claimed
@@ -326,7 +424,7 @@ async function backoffRetry(endpoint, params, { units, attempt, method, body }) 
   void coolOff(delay);
   await sleep(delay);
 
-  return request(endpoint, params, { units, attempt: attempt + 1, method, body });
+  return request(endpoint, params, { units, attempt: attempt + 1, method, body, priority });
 }
 
 // ── Identity ─────────────────────────────────────────────────────
@@ -376,6 +474,11 @@ export function getLabel(id) {
  * differently for the user, so it reaches the caller as a GmailError carrying
  * that status rather than as a generic refusal.
  *
+ * **It takes the interactive lane.** Somebody typed a name and pressed a button,
+ * and often did it from inside the move dialog with the mail already picked out
+ * — so waiting out a trash job's fifteen seconds of booked budget for one 5-unit
+ * call reads as the button not working. See the note above `BUDGET_KEY`.
+ *
  * @param {string} name the full path, not the leaf
  * @returns {Promise<{id: string, name: string}>}
  */
@@ -386,6 +489,7 @@ export function createLabel(name) {
     {
       units: UNIT_COST.write,
       method: 'POST',
+      priority: true,
       // Both defaults already, stated so a Gmail-side change of default cannot
       // quietly produce folders that do not show up in either list.
       body: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' },
@@ -605,13 +709,25 @@ export async function modifyMessages(ids, { add = [], remove = [] } = {}, stoppe
 // only ever act on mail as it arrives — the API has no equivalent of the "also
 // apply to matching conversations" box in Gmail's own settings.
 
+// **Every call here takes the interactive quota lane**, and that is one decision
+// rather than three. A rule is never background work: it is made from a ticked
+// box in a dialog somebody is looking at, or from the Block button, or from the
+// Rules tab, and the whole of it is a read and a handful of 5-unit writes. The
+// read has to be prioritised alongside the writes because `applyRules` cannot
+// plan without it — leaving it in the bulk lane would put the fifteen-second
+// wait back in front of the same button. See the note above `BUDGET_KEY`.
+//
+// A rule is also the one thing that *should* land while a long job runs: a move
+// and a rule are two halves of one idea — this mail, and the mail like it that
+// has not arrived — and the mail keeps arriving for as long as the move takes.
+
 /**
  * Every filter on the account.
  *
  * @returns {Promise<object[]>} raw Filter resources, MailBoy's and Gmail's alike
  */
 export async function listFilters() {
-  const { filter = [] } = await call('/settings/filters');
+  const { filter = [] } = await call('/settings/filters', {}, UNIT_COST.cheap, true);
   return filter;
 }
 
@@ -626,6 +742,7 @@ export function createFilter(filter) {
     units: UNIT_COST.write,
     method: 'POST',
     body: filter,
+    priority: true,
   });
 }
 
@@ -633,12 +750,17 @@ export function createFilter(filter) {
  * Remove one filter. Deletes no mail and moves none: a filter is a standing
  * instruction about future deliveries, so removing it only stops the next one
  * being acted on.
+ *
+ * Prioritised for a reason beyond symmetry with `createFilter`: a rewrite is a
+ * create followed by a delete, and a folder delete removes the rules pointing at
+ * it *before* dispatching the job. Both are moments where a standing instruction
+ * is briefly wrong, and neither should wait on a pass.
  */
 export async function deleteFilter(id) {
   await request(
     `${BASE}/settings/filters/${encodeURIComponent(id)}`,
     {},
-    { units: UNIT_COST.write, method: 'DELETE' }
+    { units: UNIT_COST.write, method: 'DELETE', priority: true }
   );
 }
 
