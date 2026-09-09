@@ -1,10 +1,15 @@
 // The per-message cache: size and sender, keyed by message id.
 //
-// Reading these is the only expensive thing MailBoy does — 5 quota units a
-// message against Gmail's 250-per-second ceiling, so about 50 messages a
-// second. What makes it bearable is that neither figure ever changes: once
-// known a message is known forever, and the cost becomes one-time per message
-// rather than per panel open.
+// Reading these is the only expensive thing MailBoy does, and since Google's
+// 2026-05-01 quota change it is more expensive than it was — 20 quota units a
+// message against a ceiling of 6,000 a minute, so about 5 messages a second and
+// no batching that can help. What makes it bearable is that neither figure ever
+// changes: once known a message is known forever, and the cost becomes one-time
+// per message rather than per panel open.
+//
+// It is also why this is the one pass in the product still measured in tens of
+// minutes. Everything that *moves* mail goes through `batchModify` at 50 units a
+// thousand; reading is the part with no batched form.
 //
 // Label membership is deliberately *not* cached. That does change, and
 // re-reading it costs 5 units per 500 ids, so it is cheaper to ask than to
@@ -372,7 +377,7 @@ const FLUSH_AFTER_MS = 60_000;
 export async function ensureMeta(ids, onBatch, stopped) {
   await loadMessages();
 
-  // Includes entries that predate dates: same 5 quota units, and re-reading is
+  // Includes entries that predate dates: same 20 quota units, and re-reading is
   // the only way to fill them in.
   const missing = ids.filter((id) => !complete(messages.get(id)));
   if (!missing.length) return;

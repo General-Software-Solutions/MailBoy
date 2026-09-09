@@ -16,21 +16,34 @@ const MAX_PAGES = 1000;
 /**
  * Gmail meters by quota unit rather than request count, and the two calls that
  * matter are priced very differently: messages.list costs 5 units for 500 ids,
- * messages.get costs 5 units for one message. Enumeration is effectively free;
- * reading messages is not.
+ * messages.get costs **20** for one message. Enumeration is effectively free;
+ * reading messages is the entire cost of the product.
  *
- * **The ceiling is a minute, not a second, and it is far lower than it was.**
- * Google's usage limits now read `6,000 quota units per minute per user per
- * project` — cut from 15,000 on 2026-05-01, with projects that had used the API
- * before then keeping the old figure for a while. This one enabled Gmail on
- * 2026-08-29, so it is on 6,000: a hundred units a second, where the widely
- * quoted "250 units per user per second" was two and a half times that.
+ * **Every figure here is Google's published one, and the published ones changed
+ * on 2026-05-01.** That release raised `messages.get`, `messages.trash`,
+ * `drafts.get`, `messages.attachments.get`, `threads.get` and `threads.trash`
+ * from 5 units to 20, and cut the per-user ceiling to 6,000 a minute. Projects
+ * that used the API between November 2025 and April 2026 kept their old quotas;
+ * this one enabled Gmail on 2026-08-29, so it is on the new figures for both.
  *
- * That is the real cost of a size pass, and no amount of batching changes it:
- * 6,000 units a minute at 5 units a message is **20 messages a second at the
- * absolute ceiling**. Nothing here can be raised by asking — the per-user limit
- * is not the adjustable one, and a quota increase applies to the project's own
- * per-minute figure, which MailBoy is nowhere near.
+ * **This table said 5 for `get` until 2026-09-09, and that was not a cosmetic
+ * error.** The pacer reserves against these numbers, so a size pass believing a
+ * read cost 5 spent four times what it booked — roughly 360 units a second
+ * against a ceiling of 100 — and Gmail refused it continuously. Every "quota
+ * exceeded" this project has seen traces back here rather than to how the
+ * requests were scheduled. **A wrong entry in this object does not slow one
+ * call down; it throttles the whole extension.** Check it against
+ * `developers.google.com/workspace/gmail/api/reference/quota` rather than
+ * against any write-up, including this one.
+ *
+ * What the corrected figures actually buy, per minute at the ceiling:
+ *
+ *   messages.list        5 units / 500 ids       ~600,000 ids
+ *   messages.get        20 units / message           300 messages
+ *   messages.batchModify 50 units / 1,000 ids     120,000 messages
+ *
+ * That last row is why nothing in this module trashes mail one message at a
+ * time any more — see `trashMessages`.
  *
  * `SAFETY` is what keeps a burst inside the window rather than spending the last
  * of it and finding out. If a project turns out to still be on the old 15,000 —
@@ -38,7 +51,7 @@ const MAX_PAGES = 1000;
  * raising `UNITS_PER_MINUTE` to match is the one change that makes a first pass
  * faster.
  */
-const UNIT_COST = { cheap: 1, list: 5, get: 5, write: 5, batchModify: 50, history: 2 };
+const UNIT_COST = { cheap: 1, list: 5, get: 20, write: 5, batchModify: 50, history: 2 };
 const UNITS_PER_MINUTE = 6_000;
 const SAFETY = 0.9;
 const UNITS_PER_SECOND = (UNITS_PER_MINUTE / 60) * SAFETY;
@@ -649,40 +662,89 @@ export async function listHistory(startHistoryId, stopped) {
 const MODIFY_CHUNK = 1000;
 
 /**
+ * Gmail's ceiling on label ids in one modify, per direction.
+ *
+ * **Documented on `messages.modify` and not on `batchModify`**, which is the
+ * batch form of the same operation: *"You can add up to 100 labels with each
+ * update"*, and the same for removals. Taking the batch page's silence as
+ * permission is exactly the reading that made trashing four hundred times more
+ * expensive than it needed to be (decision 47), so it is respected here.
+ *
+ * It only ever binds on a **move**, and it binds on a real mailbox: `shedding()`
+ * is every row the panel shows minus the destination — three Google folders, five
+ * categories, and one per user folder — so somebody with more than about ninety
+ * folders would otherwise send a list Gmail refuses, and refuse it for all
+ * thousand messages in the chunk at once. Nothing else comes close: a restore
+ * sheds one label and the folder delete's rescue sheds none.
+ */
+const MAX_LABELS = 100;
+
+/**
  * Add and remove labels across many messages at once.
  *
- * The cheap half of the write API by a wide margin: 50 quota units moves up to
- * a thousand messages, where trashing the same thousand costs 5,000. That is
- * why putting a folder's mail back in the inbox is seconds and emptying it
- * into Trash is minutes.
+ * The cheap half of the write API by a wide margin, and the only call in here
+ * whose cost does not scale with the mail: 50 quota units moves up to a
+ * thousand messages, so the whole per-user minute is 120,000 messages moved.
+ * Everything MailBoy does to mail in bulk goes through it, Trash included —
+ * see `trashMessages`.
  *
- * **It cannot trash anything.** Gmail rejects TRASH, SPAM and DRAFT here, so
- * moving mail to Trash goes through `trashMessages` and its per-message cost.
+ * **`SENT` and `DRAFT` are the only labels it will not touch.** Google's label
+ * guide marks both as applied automatically and everything else — `INBOX`,
+ * `SPAM`, `TRASH`, `UNREAD`, `STARRED`, `IMPORTANT`, the five `CATEGORY_*` — as
+ * manually applicable. This module long claimed TRASH was refused here as well;
+ * it is not, and believing it was is what made emptying a folder a job measured
+ * in hours. Neither is asked for anyway: `defaultsOf` drops both rows.
+ *
+ * **It throws rather than reporting.** A chunk either succeeds whole or raises,
+ * which is what the folder delete's rescue path wants — a failure there should
+ * fail the task and be retried by the queue. A caller that needs the refusal
+ * split from the throttle handles it itself, as `trashMessages` does.
+ *
+ * **A long removal list is spent over several passes**, `MAX_LABELS` at a time,
+ * and the destination is added in the first of them. That ordering is the same
+ * reasoning the folder delete's delete-labels-last has: an interruption partway
+ * through leaves mail carrying its new folder *and* some of its old ones, which
+ * is untidy and self-correcting — a re-run sheds the rest — where adding last
+ * would leave it carrying nothing MailBoy shows, which looks like lost mail.
  *
  * @param {string[]} ids
  * @param {{add?: string[], remove?: string[]}} change
  * @param {() => boolean} [stopped]
  * @param {(chunk: string[]) => void} [onChunk] the ids a chunk moved, as it
- *   lands. A chunk either succeeds whole or throws, so this is also exactly what
- *   a long job needs in order to checkpoint what is left of it.
+ *   lands. Fires once per id chunk when every pass over it has landed, never per
+ *   pass — a partially shed chunk has not moved anywhere yet, and reporting it as
+ *   landed would let a checkpoint drop mail still in two places.
  * @returns {Promise<number>} how many were moved before a stop, if any
  */
 export async function modifyMessages(ids, { add = [], remove = [] } = {}, stopped, onChunk) {
   let moved = 0;
 
+  // At least one pass even with nothing to remove — that is the folder delete's
+  // rescue, which only ever adds INBOX.
+  const passes = [];
+  for (let at = 0; at < remove.length; at += MAX_LABELS) {
+    passes.push(remove.slice(at, at + MAX_LABELS));
+  }
+  if (!passes.length) passes.push([]);
+
   for (let at = 0; at < ids.length; at += MODIFY_CHUNK) {
     if (stopped?.()) break;
     const chunk = ids.slice(at, at + MODIFY_CHUNK);
 
-    await request(
-      `${BASE}/messages/batchModify`,
-      {},
-      {
-        units: UNIT_COST.batchModify,
-        method: 'POST',
-        body: { ids: chunk, addLabelIds: add, removeLabelIds: remove },
-      }
-    );
+    for (const [pass, labels] of passes.entries()) {
+      await request(
+        `${BASE}/messages/batchModify`,
+        {},
+        {
+          units: UNIT_COST.batchModify,
+          method: 'POST',
+          // Added once rather than on every pass. Re-adding a label is a no-op,
+          // so this is about the request being what it says rather than about
+          // cost — and `add` is one label in every caller here.
+          body: { ids: chunk, addLabelIds: pass === 0 ? add : [], removeLabelIds: labels },
+        }
+      );
+    }
 
     moved += chunk.length;
     onChunk?.(chunk);
@@ -789,20 +851,12 @@ const BATCH_CONCURRENCY = 3;
  */
 const MAX_ATTEMPTS = 4;
 
-/**
- * Total rounds in one run, throttled or not — roughly two minutes of patience.
- *
- * **Not a give-up point.** Looping in here until the throttle lifts would hold
- * the worker in a tight-ish retry against Gmail for as long as something else
- * holds the budget — nearly always a measuring pass, which runs for eighteen
- * minutes — and would add to the contention it is waiting on. Handing back
- * instead lets the queue wait on its own clock, which backs off when a run
- * achieves nothing, survives the worker being killed, and never ends the task.
- */
-const MAX_ROUNDS = 12;
-
-/** Where the round-level backoff stops doubling. */
-const MAX_BACKOFF_ROUNDS = 6;
+// The round-level backoff that used to sit here — MAX_ROUNDS and
+// MAX_BACKOFF_ROUNDS, roughly two minutes of patience — belonged to the trash
+// job's per-message batches and went with them on 2026-09-09. A trash is now a
+// handful of `batchModify` calls, and `request` does its own waiting; anything
+// still throttled after that is handed straight back as outstanding for the
+// queue to pick up on its own clock. See `trashMessages`.
 
 /**
  * Size, sender and date for each id, as a Map of id → `{bytes, from, date}`.
@@ -811,7 +865,7 @@ const MAX_BACKOFF_ROUNDS = 6;
  * route: neither figure exists anywhere but on the individual message, and
  * labels.get carries neither.
  *
- * `messages.get` costs 5 quota units whatever the format, so asking for the
+ * `messages.get` costs 20 quota units whatever the format, so asking for the
  * From header and the date alongside the size is free — `format=metadata` with
  * one `metadataHeaders` costs exactly what `format=minimal` did. Only the response
  * grows, from roughly 40 bytes to 150, which is nothing against a pass that is
@@ -911,8 +965,9 @@ async function runBatch(ids, retry) {
 // cached: subjects, snippets and bodies are the mail itself, and "what is on
 // disk" is a promise the panel keeps by never writing them down.
 //
-// Cost is the same 5 units a message the size pass pays, but only ever for the
-// handful on screen — one page of a list, or one open message.
+// Cost is the same 20 units a message the size pass pays, but only ever for the
+// handful on screen — one page of a list, or one open message. Ten rows is 200
+// units, which is why a page is ten rather than a scrolling list.
 
 /**
  * Subject, snippet, size and date for one page of messages, in a single batch.
@@ -1153,12 +1208,22 @@ function rateLimited(body) {
  * needs the `https://mail.google.com/` scope — the widest Google publishes —
  * and offers the user no way back from a mistake. Neither trade is worth it.
  *
- * There is no batched form of this: `batchModify` refuses the TRASH label, so
- * it is one `messages.trash` per message at 5 quota units each. Against a
- * ceiling of 6,000 units a minute that is 18 a second, the same rate as the size
- * pass, which is why emptying a large folder is a background job rather than
- * something to wait on — a thousand messages is a minute of quota on its own.
- * The multipart endpoint cuts the round trips but not the quota.
+ * **It is one `batchModify` per thousand messages**, which is the same call and
+ * the same 50 units a move costs. TRASH is a manually applicable label like any
+ * other; `messages.trash` is a convenience for one message, not the only route
+ * to it, and its 20 units buy exactly one where these 50 buy a thousand.
+ *
+ * Until 2026-09-09 this ran one `messages.trash` per message on the claim that
+ * `batchModify` refused the label — an assumption never checked against Gmail,
+ * and wrong. It cost a factor of about four hundred: a folder of 10,000 emails
+ * was 200,000 quota units, well over half an hour at the ceiling and reliably
+ * throttled the whole way, where it is now 500 units and a few seconds.
+ * `tools/verify-trash.js` is what proves the label is accepted.
+ *
+ * **`INBOX` is removed alongside**, because that is what `messages.trash` did
+ * and the projection assumes it: `vacating()` takes trashed mail out of every
+ * row but Trash. Gmail hides trashed mail from a label's own listing regardless,
+ * so this is belt and braces on the one row where it is visible.
  *
  * `onBatch(ids)` fires as each batch lands, with the ids that batch actually
  * moved. Deliberately the ids and not a count: a long job checkpoints what is
@@ -1177,106 +1242,86 @@ function rateLimited(body) {
  *   `pending` outstanding and comes back to it.
  */
 export async function trashMessages(ids, onBatch, stopped) {
-  const trashed = new Set();
-  const failed = new Set();
-  let pending = [...ids];
+  const trashed = [];
+  const failed = [];
+  const pending = [];
 
-  /** Rounds that were about something other than rate. Only these run out. */
-  let spent = 0;
-  /** Every round, for the backoff — a throttled one still has to wait. */
-  let round = 0;
+  for (let at = 0; at < ids.length; at += MODIFY_CHUNK) {
+    const chunk = ids.slice(at, at + MODIFY_CHUNK);
 
-  while (pending.length && spent < MAX_ATTEMPTS && round < MAX_ROUNDS && !stopped?.()) {
-    // Capped, and capped twice: the exponent stops doubling at
-    // MAX_BACKOFF_ROUNDS because a throttled job can go round indefinitely, and
-    // the result is held under MAX_BACKOFF_MS because the shared cool-off is
-    // already pacing the whole extension.
-    if (round) {
-      const step = 2 ** Math.min(round, MAX_BACKOFF_ROUNDS) * 500;
-      await sleep(Math.min(step, MAX_BACKOFF_MS) + Math.random() * 400);
-    }
-    round++;
-
-    const chunks = [];
-    for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-      chunks.push(pending.slice(i, i + BATCH_SIZE));
+    // Checked before the chunk rather than inside it: batchModify is all or
+    // nothing, so there is no partial result worth waiting on the way the old
+    // per-message batches had. Everything not yet asked about is outstanding,
+    // which is what the task record needs in order to come back to it.
+    if (stopped?.()) {
+      pending.push(...ids.slice(at));
+      break;
     }
 
-    const retry = [];
-    const signal = { throttled: false };
-    let cursor = 0;
-
-    await Promise.all(
-      Array.from({ length: Math.min(BATCH_CONCURRENCY, chunks.length) }, async () => {
-        while (cursor < chunks.length) {
-          // Per batch, not per message: one already in flight has moved mail
-          // whether or not we wait for the answer, so its results matter.
-          if (stopped?.()) return;
-          const chunk = chunks[cursor++];
-          const moved = await runTrashBatch(chunk, retry, failed, signal);
-          for (const id of moved) trashed.add(id);
-          if (moved.length) onBatch?.(moved);
+    try {
+      await request(
+        `${BASE}/messages/batchModify`,
+        {},
+        {
+          units: UNIT_COST.batchModify,
+          method: 'POST',
+          body: { ids: chunk, addLabelIds: ['TRASH'], removeLabelIds: ['INBOX'] },
         }
-      })
-    );
+      );
+      trashed.push(...chunk);
+      onBatch?.(chunk);
+    } catch (err) {
+      // Nothing in the worker can re-grant a token, so there is no point
+      // reporting this per chunk — the task waits for the next sign-in.
+      if (err instanceof AuthError) throw err;
 
-    pending = retry;
-
-    // A round refused about rate has not spent an attempt on these messages — it
-    // never got to them. Not counting it is what makes the difference between
-    // waiting out a busy minute and reporting a folder's worth of mail as
-    // unmovable, and it is what makes a queued task's completion a guarantee
-    // rather than a hope.
-    if (signal.throttled) {
-      if (round % 5 === 0) {
-        trace('quota', 'still throttled — waiting it out rather than giving up', {
-          outstanding: pending.length,
-          moved: trashed.size,
-          round,
+      // **The distinction the 2026-09-05 fix exists to protect.** `request` has
+      // already waited a throttle out for over a minute by the time it throws,
+      // so one arriving here means the mailbox is still busy — it says nothing
+      // about this mail, and the task must come back to it rather than report a
+      // thousand emails as refused.
+      // **And it ends the run rather than trying the next chunk.** A throttle is
+      // a statement about the mailbox, not about these thousand ids, so the one
+      // behind them would meet the same wall and spend another minute of backoff
+      // finding out — adding to the contention it is waiting on. Handing back
+      // lets the queue wait on its own clock, which backs off when a run achieves
+      // nothing, survives the worker being killed, and never ends the task.
+      if (throttle(err)) {
+        pending.push(...ids.slice(at));
+        trace('quota', 'trash throttled — handing the rest back to the queue', {
+          outstanding: ids.length - at,
+          moved: trashed.length,
         });
+        break;
       }
-    } else {
-      spent++;
+
+      // Gmail refused the request itself, and batchModify is whole-request: a
+      // bad label id or a withdrawn permission fails all thousand alike. It
+      // silently skips ids it cannot act on rather than refusing them, so this
+      // is never a verdict on one particular message.
+      failed.push(...chunk);
+      console.error('[MailBoy] trash chunk refused', chunk.length, err.message);
     }
   }
 
-  return { trashed: trashed.size, failed: [...failed], pending };
+  return { trashed: trashed.length, failed, pending };
 }
 
-/** @returns {Promise<string[]>} the ids this batch actually moved */
-async function runTrashBatch(ids, retry, failed, signal) {
-  const reply = await postBatch(
-    ids,
-    (id) =>
-      `POST /gmail/v1/users/me/messages/${encodeURIComponent(id)}/trash` +
-      '?fields=id&prettyPrint=false\r\n' +
-      // Explicit rather than absent: trash takes no body, and Google's batch
-      // parser should not have to infer that from a bare blank line.
-      'Content-Length: 0\r\n\r\n',
-    ids.length * UNIT_COST.write,
-    retry,
-    signal
+/**
+ * Is this refusal about the mailbox being busy rather than about the request?
+ *
+ * The two arrive wearing the same status — 429 or 403 `rateLimitExceeded` — and
+ * only the message separates a spent per-minute window from a concurrent-request
+ * collision. Either way it clears on its own, which is the only thing the caller
+ * needs to know.
+ */
+function throttle(err) {
+  return (
+    err?.status === 429 ||
+    err?.reason === 'rateLimitExceeded' ||
+    err?.reason === 'userRateLimitExceeded' ||
+    PATIENT.test(err?.message ?? '')
   );
-
-  const moved = [];
-  if (!reply) return moved;
-
-  eachPart(
-    reply.text,
-    reply.contentType,
-    ids,
-    retry,
-    (id, code) => {
-      // 404 is a message that has already gone — deleted from another client
-      // mid-pass, or trashed by an earlier attempt of this same job. Either way
-      // it is out of the folder, which is what was asked for.
-      if (code === 200 || code === 204 || code === 404) moved.push(id);
-      else failed.add(id);
-    },
-    signal
-  );
-
-  return moved;
 }
 
 export { AuthError };

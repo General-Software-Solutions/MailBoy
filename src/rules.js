@@ -215,10 +215,11 @@ function matchers(criteria) {
  * strips it anyway and a filter carrying an instruction Gmail already implies is
  * one more thing for it to reject.
  *
- * Note this is *not* the constraint `batchModify` has. That call refuses TRASH
- * outright, which is why trashing mail already in the mailbox costs one
- * `messages.trash` per message — a filter is a different surface, and the
- * ceiling there does not apply.
+ * This module used to carry a note here saying `batchModify` refuses TRASH and
+ * that a filter is the exception. **Both halves were wrong**: `batchModify` takes
+ * the label like any other, and `trashMessages` has used it since 2026-09-09.
+ * The asymmetry that remains is only in *when* the work happens — a filter acts
+ * on mail as it arrives, for one 5-unit create and nothing after.
  */
 const actionFor = (labelId) =>
   labelId === 'TRASH'

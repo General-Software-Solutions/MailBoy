@@ -1217,8 +1217,10 @@ function setFooter(timestamp = lastLoaded) {
 }
 
 /**
- * Sizes cost one Gmail read per message, so a first run over a large mailbox
- * takes minutes. Saying how many and how long beats an unexplained wait.
+ * Sizes cost one 20-unit Gmail read per message and there is no batched form, so
+ * a first run over a large mailbox takes tens of minutes — the one part of the
+ * product that is still genuinely slow. Saying how many and how long beats an
+ * unexplained wait.
  */
 function tick() {
   paintProgress();
@@ -2255,11 +2257,12 @@ function closeMessage() {
 // and nothing to delete about Sent — and offering the controls there would
 // promise something the API refuses.
 //
-// Creating is one call and lands instantly. Deleting is the asymmetric half:
+// Creating is one call and lands instantly. Deleting is the larger half:
 // `labels.delete` removes no mail at all, so what happens to the mail is
-// separate work that has to run *before* the label goes, and moving it to Trash
-// costs 5 quota units a message. That is why the delete is handed to the
-// service worker and only its outcome comes back here.
+// separate work that has to run *before* the label goes — a listing plus one
+// `batchModify` per thousand messages, whichever destination was chosen. That is
+// why the delete is handed to the service worker and only its outcome comes back
+// here.
 
 const leafOf = (path) => path.split('/').pop();
 

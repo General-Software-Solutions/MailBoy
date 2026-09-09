@@ -1,16 +1,21 @@
 // Acting on a selection of senders from a folder's breakdown.
 //
-// Three actions over two calls — move and restore are both `batchModify`, and
-// differ only in what the panel asks to be added and taken away. They cost
-// wildly different amounts from trashing, the same asymmetry the folder delete
-// runs into and for the same reason:
+// Three actions over one call. Move, restore and trash are all `batchModify`
+// and differ only in what the panel asks to be added and taken away — Trash is
+// a label like any other, and `addLabelIds: ['TRASH']` moves a thousand
+// messages for the same 50 units a move costs.
 //
-//   move / restore   50 units per 1,000 messages  (batchModify)
-//   move to Trash     5 units per message         (messages.trash)
+// **That was not always true here.** Until 2026-09-09 a trash ran one
+// `messages.trash` per message at 20 units each, on the claim that `batchModify`
+// refused the label. It does not, and the difference is about four hundredfold:
+// a folder of 10,000 emails was over half an hour of solid quota — throttled
+// most of the way, because 20 units a message is 5 a second at the ceiling — and
+// is now a few seconds. The asymmetry this file used to be organised around is
+// simply gone.
 //
-// So a move over a big selection is seconds and a trash is minutes, and both
-// live in the service worker rather than the panel. Nobody should have to keep
-// a side panel open to watch mail being filed.
+// It still runs in the service worker rather than the panel. Not for the length
+// of the work any more, but because a selection of tens of thousands is still
+// several calls, and nobody should have to keep a side panel open through them.
 //
 // **Unlike the size pass and the folder delete, this job cannot be rebuilt from
 // the mailbox.** Those two re-derive their work from Gmail — an unmeasured
@@ -20,10 +25,12 @@
 //
 // So it carries its own outstanding work: `remaining` on the task record, cut
 // down every few seconds by `onLanded` below. Re-running whatever is left is
-// harmless anyway — trashing a trashed message, adding a label it already
-// carries and removing one it does not are all no-ops — but a resume that
-// repeats twenty minutes of a trash pass costs twenty minutes of quota, which is
-// the difference this makes.
+// harmless in itself — trashing a trashed message, adding a label it already
+// carries and removing one it does not are all no-ops — and now that both
+// actions are `batchModify` the wasted quota is small too. What the checkpoint
+// is still worth is the projection: `remaining` is what the panel puts back if
+// somebody presses Stop, and a task that forgot how far it had got would hand
+// back mail that has already moved.
 
 import { modifyMessages, trashMessages } from './gmail.js';
 
@@ -51,8 +58,10 @@ export async function runBulkJob(task, { onLanded, stopped } = {}) {
   const ids = task.remaining ?? task.ids ?? [];
 
   if (task.action === 'trash') {
-    // No batched form of this — batchModify refuses the TRASH label — so it is
-    // one messages.trash per message at 5 units each, roughly 18 a second.
+    // One `batchModify` per thousand, like the move below. It reports rather
+    // than throwing, because a throttle and a refusal have to stay apart here:
+    // one leaves the task queued, the other is the only thing worth telling
+    // anyone about.
     const result = await trashMessages(
       ids,
       (landed) => {

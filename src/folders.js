@@ -5,17 +5,22 @@
 // labels beyond that. So creating a subfolder is creating a label whose name
 // carries its parent's path, and everything here is string work plus one call.
 //
-// Deleting is the asymmetric half. `labels.delete` removes one label and no
-// mail — it unlabels every message and leaves them where they are — so what
-// happens to that mail is separate work, done *before* the label goes while
-// there is still something to list. The two choices cost wildly different
-// amounts:
+// Deleting is the larger half. `labels.delete` removes one label and no mail —
+// it unlabels every message and leaves them where they are — so what happens to
+// that mail is separate work, done *before* the label goes while there is still
+// something to list.
 //
-//   move the mail to the inbox   50 units per 1,000 messages
-//   move the mail to Trash        5 units per message
+// **Both choices now cost the same**, because both are `batchModify`: 50 units
+// per 1,000 messages, whether the mail is being handed back to the inbox or sent
+// to Trash. A 30,000-message folder is one listing and thirty writes either way.
 //
-// A 30,000-message folder is therefore under a second one way and roughly ten
-// minutes the other, which is why this runs in the service worker.
+// It was not always so. Until 2026-09-09 the Trash half ran one
+// `messages.trash` per message — 20 units each, 5 a second at the ceiling — so a
+// folder that size was hours rather than seconds, and this file was organised
+// around an asymmetry that turned out to be an unchecked assumption about what
+// `batchModify` accepts. It runs in the service worker still, because a folder
+// of any size is a listing plus a run of writes and neither should need an open
+// panel.
 //
 // **The job is restartable without a cursor**, on the same principle as the
 // size pass. Trashed mail drops out of `messages.list`, so a resumed trash job

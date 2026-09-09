@@ -118,10 +118,15 @@ export const COPY = {
   /**
    * The task card: what is happening to mail right now.
    *
-   * Its own card rather than a line in the footer, because it stands for minutes
-   * and can be joined by a refresh saying something else entirely. The body is
-   * the one place the product explains a limit that is not its own — people
-   * reasonably read a twenty-minute delete as broken, and it is not.
+   * Its own card rather than a line in the footer, because it can be joined by a
+   * refresh saying something else entirely, and because a queue that is being
+   * throttled needs somewhere to say so. The body is the one place the product
+   * explains a limit that is not its own.
+   *
+   * **The wording is deliberately about "a while" rather than about minutes.**
+   * Since trashing became one `batchModify` per thousand (2026-09-09) most jobs
+   * are seconds and the card is a flash; what is left slow is a busy mailbox
+   * being rate-limited, which is the case this text has to cover.
    */
   tasks: {
     title: {

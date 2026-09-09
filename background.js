@@ -62,10 +62,11 @@ const THROTTLED_MAX_MINUTES = 15;
 /**
  * How often a running task writes down what is left of it.
  *
- * Effectively every batch, and deliberately so — a trash lands one batch of 100
- * every few seconds and a move one chunk of 1,000 twice a second, so this is a
- * coalescing window rather than a real throttle. It is only there because
- * `trashMessages` runs three batches at once and their landings arrive together.
+ * Effectively every chunk, and deliberately so — a trash and a move both land
+ * 1,000 messages at a time, roughly twice a second, so this is a coalescing
+ * window rather than a real throttle. It matters more than it did: a chunk is a
+ * thousand ids now that trashing goes through `batchModify` too, where it used
+ * to be a hundred.
  *
  * The interval is what a stop can be wrong by: whatever moved since the last
  * write is reported as still outstanding, so the panel puts it back onto a row
