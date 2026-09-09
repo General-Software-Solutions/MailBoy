@@ -211,6 +211,8 @@ export const COPY = {
     back: 'Back to folders',
     period: 'Period:',
     sortBy: 'Sort by:',
+    search: 'Search senders',
+    searchLabel: 'Search senders by name or email address',
     selectAll: 'Select every sender listed',
     selectOne: (who) => `Select ${who}`,
     unknownSender: 'Unknown sender',
@@ -219,6 +221,7 @@ export const COPY = {
     nothingYet: 'Nothing here yet. This fills in as MailBoy reads your mailbox.',
     noneRead: 'These emails have not been read yet. Check back shortly.',
     nothingInPeriod: 'Nothing in this period.',
+    noMatches: 'No senders match your search.',
     moreComing: (n) => `${n.toLocaleString()} more still being read, so these totals will grow.`,
     undated: (n) => `${n.toLocaleString()} have no date yet, so they are left out of this period.`,
   },
@@ -543,6 +546,7 @@ export function copyAt(path) {
  * - `data-copy` sets the text
  * - `data-copy-label` sets `aria-label`
  * - `data-copy-title` sets `title`
+ * - `data-copy-placeholder` sets `placeholder`
  *
  * An element may carry more than one, which is what a button whose glyph needs
  * naming twice actually needs.
@@ -556,5 +560,8 @@ export function applyStaticCopy(root = document) {
   }
   for (const node of root.querySelectorAll('[data-copy-title]')) {
     node.title = copyAt(node.dataset.copyTitle);
+  }
+  for (const node of root.querySelectorAll('[data-copy-placeholder]')) {
+    node.placeholder = copyAt(node.dataset.copyPlaceholder);
   }
 }

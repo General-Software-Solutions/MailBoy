@@ -145,6 +145,7 @@ const el = {
   periodTrigger: document.getElementById('btn-period'),
   periodLabel: document.getElementById('period-label'),
   periodMenu: document.getElementById('period-menu'),
+  senderSearch: document.getElementById('sender-search'),
   senders: document.getElementById('senders'),
   senderHead: document.getElementById('sender-head'),
   senderCount: document.getElementById('sender-count'),
@@ -1300,6 +1301,46 @@ let sortKey = 'count';
 let sortDir = SORTS.count.dir;
 let periodKey = 'all';
 
+/**
+ * What is typed in the search box, unprocessed.
+ *
+ * A view filter and nothing more: it decides which senders are drawn and says
+ * nothing about which messages a row stands for, which is what separates it
+ * from the period. Held here rather than read off the input at render time
+ * because a measuring pass re-renders this list every second or so and the two
+ * must not be able to disagree.
+ */
+let searchText = '';
+
+/**
+ * The terms every listed sender has to carry, lowercased.
+ *
+ * Split on spaces so `john acme` finds John at acme.com without the name and
+ * the domain having to be adjacent or in that order; a single word is then just
+ * a substring, which is what somebody typing one expects.
+ */
+function searchTerms() {
+  return searchText.toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+/** The address and the display name both count — one of them is what is known. */
+function matchesSearch(sender, terms) {
+  const hay = `${sender.address ?? ''} ${sender.name ?? ''}`.toLowerCase();
+  return terms.every((term) => hay.includes(term));
+}
+
+/**
+ * Empty the box and the state behind it together.
+ *
+ * A search belongs to the folder it was typed in: carrying one into the next
+ * folder opened would greet somebody with an empty list and a filter they had
+ * forgotten was there.
+ */
+function resetSearch() {
+  searchText = '';
+  el.senderSearch.value = '';
+}
+
 /** @returns {number} the first day in scope, or 0 for everything */
 function sinceDay() {
   const { days } = PERIODS[periodKey];
@@ -1516,29 +1557,49 @@ function renderBreakdown() {
 
   // Unfiltered, the label's own count is the truth and matches the row behind
   // this screen. Filtered, only the messages actually in scope can be counted.
+  // The period is the only thing that moves it: the search hides rows, it does
+  // not take messages out of scope, so the heading is not its to change.
   const shown = filtered ? matched : total;
   el.detailTotal.textContent = total ? `(${shown.toLocaleString()} · ${formatBytes(bytes)})` : '';
 
-  if (!senders.length) {
+  // A ticked sender stays listed however the search narrows, and that is what
+  // keeps `listedSenders` honest: the tools row counts exactly what is on
+  // screen, so mail nobody can see stays mail nobody can act on. It is also
+  // what lets somebody search, tick, search again and tick more — which is most
+  // of the point of having the box, and why the box is not in the row that
+  // disappears the moment the first tick is made.
+  const terms = searchTerms();
+  const listed = terms.length
+    ? senders.filter(
+        (sender) => selected.has(senderKey(sender)) || matchesSearch(sender, terms)
+      )
+    : senders;
+
+  if (!listed.length) {
     el.senderHead.hidden = true;
     el.senderCount.textContent = '';
     listedSenders = [];
     paintSelection();
+    // Senders in scope but none of them listed can only be the search, and
+    // saying "nothing in this period" there would send somebody to the wrong
+    // control for something the box in the header did.
     const note = emptyNote(
       !total
         ? COPY.breakdown.nothingYet
         : !cached
           ? COPY.breakdown.noneRead
-          : COPY.breakdown.nothingInPeriod
+          : senders.length
+            ? COPY.breakdown.noMatches
+            : COPY.breakdown.nothingInPeriod
     );
     el.senderRows.replaceChildren(...(busy ? [stillReading(), note] : [note]));
     return;
   }
 
   el.senderHead.hidden = false;
-  el.senderCount.textContent = `(${senders.length.toLocaleString()})`;
+  el.senderCount.textContent = `(${listed.length.toLocaleString()})`;
 
-  const sorted = [...senders].sort(comparator(sortKey, sortDir));
+  const sorted = [...listed].sort(comparator(sortKey, sortDir));
   // Before the rows are built: `renderSender` reads the tick state, and
   // `paintSelection` needs to know what is on screen to add it up.
   listedSenders = sorted;
@@ -1587,9 +1648,10 @@ async function openBreakdown(labelId, labelName) {
   el.detailTotal.textContent = '';
   el.senderHead.hidden = true;
   // Ticks belong to the folder they were made in — they name senders, but what
-  // they stand for is that folder's messages.
+  // they stand for is that folder's messages. Same for the search.
   listedSenders = [];
   clearSelection();
+  resetSearch();
   el.senderRows.replaceChildren(emptyNote(COPY.breakdown.loading));
 
   showScreen('detail');
@@ -5623,6 +5685,7 @@ function forgetMailbox() {
   openLabel = null;
   listedSenders = [];
   selected = new Set();
+  resetSearch();
   // Mail content, and it belongs to the mailbox being left. Nothing here was
   // ever written to disk, so letting go of it is the whole of forgetting it.
   openSender = null;
@@ -5994,10 +6057,53 @@ el.senderRows.addEventListener('keydown', (event) => {
 });
 
 el.selectAll.addEventListener('change', () => {
-  // Exactly what is listed, which is the period's doing — a sender out of scope
-  // cannot be acted on, so "all" cannot mean it.
-  selected = el.selectAll.checked ? new Set(listedSenders.map(senderKey)) : new Set();
+  // Exactly what is listed, which is the period's doing and the search's — a
+  // sender out of scope cannot be acted on, so "all" cannot mean it. Added to
+  // and taken from rather than replaced: this box speaks for the rows under it,
+  // and ticks made under a different search are none of its business. With no
+  // search the two are the same thing, since everything in scope is listed.
+  for (const sender of listedSenders) {
+    if (el.selectAll.checked) selected.add(senderKey(sender));
+    else selected.delete(senderKey(sender));
+  }
   syncSelection();
+});
+
+/**
+ * Draw the list the search now describes.
+ *
+ * Local to the last enumeration and the message cache, like everything else on
+ * this screen, so it re-filters as fast as it can be typed and costs no Gmail
+ * calls at all.
+ */
+function applySearch() {
+  renderBreakdown();
+  // A different list, so a different place in it. `renderBreakdown` holds the
+  // scroll for the sake of a measuring pass rebuilding these rows underneath
+  // somebody reading them; a search is the one thing that genuinely replaces
+  // the list, and being left partway down a shorter one is the same fault as
+  // staying on page 4 of a mail list that has just been re-sorted.
+  el.senders.scrollTop = 0;
+}
+
+// Chrome's own clear button reports as an input too, so this covers both ways
+// of emptying the box.
+el.senderSearch.addEventListener('input', () => {
+  searchText = el.senderSearch.value;
+  applySearch();
+});
+
+el.senderSearch.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  // Nearest thing first: with something typed the press is about the search,
+  // and the document handler behind it would otherwise close the whole screen
+  // in the same breath. An empty box has nothing to answer for, so the press
+  // falls through and steps back as it always does.
+  if (!el.senderSearch.value) return;
+  event.preventDefault();
+  event.stopPropagation();
+  resetSearch();
+  applySearch();
 });
 
 // Every one of these is gated on a permission the grant may not carry, and the

@@ -442,6 +442,27 @@
             <span id="detail-total" class="detail-total"></span>
             <span id="detail-spinner" class="row-spinner" hidden></span>
           </h1>
+
+          <!-- Up here rather than beside the pickers, because the pickers swap
+               out the moment a sender is ticked — and searching out the next
+               sender to tick is exactly what somebody is doing then. It is a
+               view filter and not a scope: it changes which rows are drawn and
+               nothing about what a tick stands for. -->
+          <div class="sender-search">
+            <svg class="search-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="7" cy="7" r="4.25" />
+              <path d="M10.1 10.1l3.2 3.2" />
+            </svg>
+            <input
+              id="sender-search"
+              class="search-input"
+              type="search"
+              autocomplete="off"
+              spellcheck="false"
+              data-copy-placeholder="breakdown.search"
+              data-copy-label="breakdown.searchLabel"
+            />
+          </div>
         </header>
 
         <div class="detail-tools">
