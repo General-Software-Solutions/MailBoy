@@ -122,11 +122,14 @@ export async function createFolder(name) {
  *
  * @param {import('./tasks.js').Task} job carrying `labels` and `trash`
  * @param {{onProgress?: (done: number, total: number) => void,
- *   stopped?: () => boolean}} hooks
+ *   onPhase?: (phase: 'labels') => void, stopped?: () => boolean}} hooks
+ *   `onPhase` fires once the mail is all dealt with and only the folders are
+ *   left to remove — the card has nothing else to say for that stretch, and on a
+ *   resumed job where the mail already moved it is the *whole* of the run.
  * @returns {Promise<{done: number, trashed: number, restored: number,
  *   failed: string[], unfinished: number, complete: boolean}>}
  */
-export async function runDeleteJob(job, { onProgress, stopped } = {}) {
+export async function runDeleteJob(job, { onProgress, onPhase, stopped } = {}) {
   const outcome = { done: 0, trashed: 0, restored: 0, failed: [], unfinished: 0, complete: false };
   const halted = () => stopped?.() ?? false;
 
@@ -179,13 +182,24 @@ export async function runDeleteJob(job, { onProgress, stopped } = {}) {
 
   if (halted()) return outcome;
 
-  // **Mail Gmail would not get to keeps the labels alive.** Rate limiting is not
-  // a refusal about these messages, so there is more to move — and the label is
-  // the only handle on it. Deleting now would leave that mail unlabelled,
-  // un-trashed and untraceable, which is the exact failure the delete-last
-  // ordering above exists to prevent. The task stays queued, re-lists, and
-  // finds only what is left.
-  if (outcome.unfinished) return outcome;
+  // **Mail that did not move keeps the labels alive**, whichever way it did not.
+  // The label is the only handle on it, so deleting now would leave that mail
+  // unlabelled, un-trashed and untraceable — the exact failure the delete-last
+  // ordering above exists to prevent.
+  //
+  // `unfinished` is Gmail not getting to it: the task stays queued, re-lists,
+  // and finds only what is left. `failed` is Gmail refusing the request, and
+  // until 2026-09-09 it did *not* stop the delete — the guard read `unfinished`
+  // alone. That was the hole: `batchModify` is whole-request, so one refusal
+  // speaks for a thousand messages, and the folder went anyway. It is checked
+  // here rather than merged into `unfinished` because the two ask for different
+  // clocks — see `runTask`.
+  if (outcome.unfinished || outcome.failed.length) return outcome;
+
+  // Everything is moved; only the folders are left. Nothing below reports
+  // progress — the bar has been at its end since the last batch — so this is
+  // what stops the card claiming to still be moving mail.
+  onPhase?.('labels');
 
   // Deepest first, so an interruption partway through can never orphan a child
   // under a parent that has already gone.

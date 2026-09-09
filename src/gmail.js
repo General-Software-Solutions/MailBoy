@@ -1286,9 +1286,17 @@ export async function trashMessages(ids, onBatch, stopped) {
       // finding out — adding to the contention it is waiting on. Handing back
       // lets the queue wait on its own clock, which backs off when a run achieves
       // nothing, survives the worker being killed, and never ends the task.
-      if (throttle(err)) {
+      //
+      // **A 5xx is the same answer wearing a different status**, and reading it
+      // as a refusal was a real hole: `request` retries one four times over about
+      // six seconds, and a backend having a worse minute than that would put a
+      // thousand ids into `failed` — which for a folder delete then let the label
+      // go with the mail still under it. Gmail being *unable* is never a verdict
+      // about these messages.
+      if (transient(err)) {
         pending.push(...ids.slice(at));
-        trace('quota', 'trash throttled — handing the rest back to the queue', {
+        trace('quota', 'trash handed the rest back to the queue', {
+          why: throttle(err) ? 'throttled' : `status ${err?.status ?? '?'}`,
           outstanding: ids.length - at,
           moved: trashed.length,
         });
@@ -1322,6 +1330,24 @@ function throttle(err) {
     err?.reason === 'userRateLimitExceeded' ||
     PATIENT.test(err?.message ?? '')
   );
+}
+
+/**
+ * Is this Gmail being *unable* rather than *unwilling*?
+ *
+ * A throttle, or a 5xx that outlasted the four attempts `request` gives it.
+ * Neither says anything about the messages in the chunk, so neither may be
+ * reported as a refusal — the caller leaves them outstanding and the queue comes
+ * back on its own clock.
+ *
+ * The 5xx half matters more than its rarity suggests. `batchModify` is
+ * whole-request, so one exhausted retry loop speaks for a thousand ids at once,
+ * and a folder delete reads a refusal as final: it would have deleted the label
+ * over mail that had never moved, leaving it unlabelled, un-trashed and
+ * untraceable — the exact failure the delete-last ordering exists to prevent.
+ */
+function transient(err) {
+  return throttle(err) || (err?.status ?? 0) >= 500;
 }
 
 export { AuthError };

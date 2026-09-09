@@ -95,6 +95,10 @@ const QUEUE_LOCK = 'mailboy-tasks';
  * @property {{id: string, name: string, fullName?: string}[]} [labels] folder
  *   delete only, deepest first
  * @property {boolean} [trash] folder delete only: Trash, or back to the inbox
+ * @property {'labels' | null} [phase] folder delete only: `labels` once the mail
+ *   is dealt with and only the folders are left to remove. Nothing in that
+ *   stretch reports progress, so without it the card sits at its full count
+ *   claiming to still be moving mail — which on a resumed job is the whole run.
  */
 
 /** Distinct without a counter to keep, and short enough to trace. */
@@ -305,5 +309,6 @@ export function summarise(task) {
     done: task.done ?? 0,
     labels: task.labels?.map((label) => label.id) ?? [],
     name: task.labels?.at(-1)?.name ?? '',
+    phase: task.phase ?? null,
   };
 }

@@ -135,11 +135,20 @@ export const COPY = {
       restore: 'Restoring emails to your inbox',
       emptying: (name) => `Emptying “${name}”`,
       deleting: 'Deleting a folder',
+      // The last stretch of a folder delete: every email is where it was asked
+      // to go and only the folder itself is left. Named rather than left to look
+      // like the moving it is not, because nothing here reports progress and the
+      // bar has been sitting at its end since the last email moved.
+      removing: (name) => `Removing “${name}”`,
+      removingFolder: 'Removing the folder',
       working: 'Moving your emails',
     },
     body:
       'Google limits how fast email can be moved, so this can take a while. It ' +
       'keeps going until it finishes or you stop it, and you can close the panel.',
+    // Said in place of the body above once the emails are done with: the wait
+    // that is left is not about how fast mail can be moved.
+    removingBody: 'All the emails have been moved. Tidying up the folder now.',
     queued: (n) => `${n.toLocaleString()} more waiting`,
     done: (done, total) => `${done.toLocaleString()} of ${total.toLocaleString()} emails`,
     progressLabel: 'Moving emails',

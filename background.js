@@ -426,6 +426,17 @@ async function runTask(task) {
   let dirty = false;
   let wroteAt = Date.now();
 
+  /**
+   * What a folder delete is up to, for the card. Starts null on **every** run,
+   * which is what clears a stale `labels` left by a run that got as far as
+   * removing the folders and then failed: the next one begins by listing and
+   * moving mail again, and a card still saying "removing the folders" would be
+   * describing the run before it.
+   *
+   * @type {'labels' | null}
+   */
+  let phase = null;
+
   /** Writes go one at a time. Two in flight could land out of order, and the
    *  older one would put back pruning the newer had already done. */
   let writes = Promise.resolve();
@@ -450,6 +461,7 @@ async function runTask(task) {
     wroteAt = Date.now();
 
     const patch = { done };
+    if (task.kind === 'folder-delete') patch.phase = phase;
     if (task.kind === 'bulk' && landed.size) {
       task.remaining = (task.remaining ?? task.ids ?? []).filter((id) => !landed.has(id));
       patch.remaining = task.remaining;
@@ -468,6 +480,11 @@ async function runTask(task) {
   try {
     trace('job', `${task.action} started`, { id: task.id, kind: task.kind, done: base });
 
+    // A run that reached the folders and then failed left `labels` on the
+    // record. This one starts over at the listing, so the card must stop saying
+    // otherwise before that listing — which on a large folder is seconds.
+    if (task.phase) await checkpoint(true);
+
     const outcome =
       task.kind === 'folder-delete'
         ? await runDeleteJob(task, {
@@ -477,6 +494,11 @@ async function runTask(task) {
               done = base + moved;
               dirty = true;
               void checkpoint();
+            },
+            onPhase: (next) => {
+              phase = next;
+              dirty = true;
+              void checkpoint(true);
             },
             stopped: () => stoppingTasks,
           })
@@ -506,6 +528,21 @@ async function runTask(task) {
       });
     }
 
+    // A folder delete that could not move all of its mail keeps its labels —
+    // see `runDeleteJob` — so it is unfinished rather than done, and it is not a
+    // stop either: falling through to the branch below would take it out of the
+    // queue with mail still sitting under a folder somebody asked to have
+    // removed, and nothing left holding that mail out of the rows.
+    //
+    // It takes the long clock rather than `retryLater`'s, because `failed` here
+    // is Gmail refusing the request outright — a malformed id, a withdrawn
+    // permission — which coming back in two minutes would meet again. Nothing
+    // drops it: it stays queued with the card up and its Stop button, which is
+    // the whole shape of the completion guarantee.
+    if (!outcome.complete && outcome.failed.length && !stoppingTasks) {
+      return refusedLater(task, outcome.failed.length);
+    }
+
     if (!outcome.complete) {
       // Stopped, one of two ways. The card's stop button has already emptied the
       // queue and told the panel what to put back, so there is nothing left to
@@ -519,11 +556,14 @@ async function runTask(task) {
     const queue = await dropTask(task.id);
     publishQueue(queue);
 
+    // Only what this kind of task actually reports. A folder delete has no
+    // `moved` and a bulk move has no `trashed`, and the undefineds made a trace
+    // read as a job that had done nothing.
     trace('job', `${task.action} finished`, {
       id: task.id,
-      moved: outcome.moved,
-      trashed: outcome.trashed,
-      restored: outcome.restored,
+      ...(outcome.moved === undefined ? {} : { moved: outcome.moved }),
+      ...(outcome.trashed === undefined ? {} : { trashed: outcome.trashed }),
+      ...(outcome.restored === undefined ? {} : { restored: outcome.restored }),
       refused: outcome.failed.length,
     });
 
@@ -597,6 +637,42 @@ function rateLimit(err) {
   const reason = err?.reason ?? '';
   if (reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded') return true;
   return /rate ?limit|quota exceeded|too many concurrent/i.test(err?.message ?? '');
+}
+
+/**
+ * Gmail refused some of the work outright, so the task is owed another go on the
+ * slow clock — the same ending a thrown failure takes, reported without an
+ * exception to carry it.
+ *
+ * The panel treats `failed` as "still queued, still holding its mail", which is
+ * exactly right here: the folders are still standing and the mail under them
+ * still has to come out of the rows.
+ */
+async function refusedLater(task, refused) {
+  console.error('[MailBoy] task refused, keeping it queued:', task.id, refused);
+  trace('job', `${task.action} refused — leaving it queued`, {
+    id: task.id,
+    refused,
+    retryIn: `${RETRY_MINUTES}m`,
+  });
+
+  broadcast(
+    {
+      type: 'task-ended',
+      ending: 'failed',
+      id: task.id,
+      kind: task.kind,
+      action: task.action,
+      target: task.target ?? '',
+      name: task.labels?.at(-1)?.name ?? '',
+      message: `Gmail refused ${refused} of them.`,
+    },
+    taskPorts
+  );
+
+  await chrome.alarms.clear(TASK_ALARM);
+  chrome.alarms.create(TASK_ALARM, { delayInMinutes: RETRY_MINUTES });
+  return 'failed';
 }
 
 /**

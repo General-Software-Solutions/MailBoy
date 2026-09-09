@@ -128,6 +128,7 @@ const el = {
   // The task card, which stands under every signed-in screen beside the footer.
   taskCard: document.getElementById('task-card'),
   taskTitle: document.getElementById('task-title'),
+  taskBody: document.getElementById('task-body'),
   taskDone: document.getElementById('task-done'),
   taskQueued: document.getElementById('task-queued'),
   taskProgress: document.getElementById('task-progress'),
@@ -3141,6 +3142,7 @@ function taskSummary(task) {
     done: task.done ?? 0,
     labels: task.labels?.map((label) => label.id) ?? [],
     name: task.labels?.at(-1)?.name ?? '',
+    phase: task.phase ?? null,
   };
 }
 
@@ -4090,6 +4092,13 @@ async function startBlock(material) {
 function taskTitle(task) {
   if (!task) return COPY.tasks.title.working;
   if (task.kind === 'folder-delete') {
+    // The mail is all where it was asked to go and only the folder is left to
+    // remove. Nothing in that stretch reports progress, so on a job resumed
+    // after the emails moved the card would otherwise sit at its full count
+    // saying "Emptying" for the whole run.
+    if (task.phase === 'labels') {
+      return task.name ? COPY.tasks.title.removing(task.name) : COPY.tasks.title.removingFolder;
+    }
     return task.name ? COPY.tasks.title.emptying(task.name) : COPY.tasks.title.deleting;
   }
   if (task.action === 'trash') return COPY.tasks.title.trash;
@@ -4105,6 +4114,11 @@ function paintTasks() {
 
   el.taskTitle.textContent = taskTitle(head);
   el.taskQueued.textContent = waiting.length ? COPY.tasks.queued(waiting.length) : '';
+
+  // Only for the head of the queue: anything behind it still has its mail to
+  // move, and the body describes the wait somebody is actually sitting through.
+  el.taskBody.textContent =
+    head.phase === 'labels' && !waiting.length ? COPY.tasks.removingBody : COPY.tasks.body;
 
   // `done` can overshoot: a message under both a parent's folder and a child's
   // is counted once per row, and Gmail moves it once.
