@@ -145,7 +145,7 @@ export const COPY = {
     },
     body:
       'Google limits how fast email can be moved, so this can take a while. It ' +
-      'keeps going until it finishes or you stop it, and you can close the panel.',
+      'keeps going until it finishes or you stop it, and you can close the panel or keep doing other actions.',
     // Said in place of the body above once the emails are done with: the wait
     // that is left is not about how fast mail can be moved.
     removingBody: 'All the emails have been moved. Tidying up the folder now.',

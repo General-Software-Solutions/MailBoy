@@ -1060,7 +1060,7 @@ body {
   min-width: 84px;
   padding: 0 6px;
   border: 1px solid var(--edge);
-  border-radius: 3px;
+  border-radius: 15px;
   background: var(--surface);
   /* Decoration, so --faint is right (decision 23) — and it takes the accent
      with the border when the field is focused, which is the field lighting up
@@ -1078,7 +1078,7 @@ body {
   width: 13px;
   height: 13px;
   fill: none;
-  stroke: currentColor;
+  stroke: var(--accent);
   stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -2245,14 +2245,20 @@ svg.stop-icon {
    minutes ago" that sits here the rest of the time: same size, same colour, no
    glyph. An action could fail and go unnoticed.
 
-   Idle stays quiet and centred. An outcome takes full text colour. A failure
-   takes the danger tint and a glyph, and goes left-aligned because it is a
-   sentence to read rather than a status to glance at. */
+   Since 2026-09-10 the tone is carried by hue as well as by weight, so what the
+   line is saying is readable before it is read: **blue for a neutral update,
+   green for something that worked, red for something that did not.** Every
+   state the footer can be in takes one of the three — there is no untoned
+   state, because a line with no colour would be a fourth thing to interpret.
+
+   Neutral stays quiet and centred; an outcome adds weight; a failure takes the
+   danger tint, a glyph and left alignment, because it is a sentence to read
+   rather than a status to glance at. */
 /* The resting state is a status bar rather than a stray line of text: a
    --surface fill and a slightly stronger rule give it edges, so it reads as a
-   place the panel reports from even when what it says is unremarkable. Kept to
-   a fill and nothing else — no weight, no colour — because it sits under every
-   screen and has to be legible without ever competing with one. */
+   place the panel reports from even when what it says is unremarkable. It takes
+   the neutral hue and no weight — the hue says which of the three kinds of line
+   this is, and the weight is what would make it compete with the screen. */
 .footer {
   flex: 0 0 auto;
   display: flex;
@@ -2268,12 +2274,29 @@ svg.stop-icon {
   min-height: 24px;
 }
 
-/* A job under way, and the outcome of one just finished. Both are answers to
-   something the user asked for a moment ago, so both outrank the load's own
-   line — see setFooter. */
-.footer--busy,
+/* Neutral: the load's own line, and anything else that is merely telling you
+   where things are. --heading rather than --accent, on decision 30's reasoning
+   at a different layer: --accent marks what you can press, and the footer is
+   not a control. 6.4:1 light, 10.3:1 dark. */
+.footer--info {
+  color: var(--heading);
+}
+
+/* A job under way. Neutral in hue — it is an update, not an outcome — and
+   weighted, because it is an answer to something asked for a moment ago and
+   outranks the load's own line. See setFooter. */
+.footer--busy {
+  color: var(--heading);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+/* Something worked. Green, and the only place in the panel that says so without
+   a control being involved — Restore's fill is the other. 5.4:1 and 7.4:1.
+   No fill: the error state is the one line here nobody may scroll past, and
+   giving success a tint too would spend the contrast that makes it stand out. */
 .footer--flash {
-  color: var(--text);
+  color: var(--success);
   font-size: 11.5px;
   font-weight: 550;
 }

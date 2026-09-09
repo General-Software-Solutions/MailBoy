@@ -200,11 +200,11 @@
            back under it.
 
            The checkbox is the only choice that touches mail, and it starts
-           unchecked because Gmail's own delete never removes a message. Left
-           alone, every email the folder held is moved to the inbox, so the
-           promise is one line and holds for all of them rather than for the
-           archived part only. Checked, it goes to Trash instead, where Gmail
-           keeps it for 30 days. -->
+           checked: the mail goes to Trash, where Gmail keeps it for 30 days.
+           Unticked, every email the folder held is moved to the inbox instead —
+           the promise is one line and holds for all of them rather than for the
+           archived part only, and it is the outcome that cannot be undone in one
+           gesture. Either way the dialog says which of the two it will be. -->
       <dialog id="delete-dialog" class="dialog">
         <form method="dialog">
           <h2 class="dialog-title">
@@ -214,7 +214,9 @@
           <p class="dialog-text" id="delete-text"></p>
 
           <label class="checkbox">
-            <input type="checkbox" id="delete-trash" />
+            <!-- askDelete sets this on every open; checked here so the markup
+                 does not state the opposite default. -->
+            <input type="checkbox" id="delete-trash" checked />
             <span id="delete-trash-label"></span>
           </label>
           <p class="checkbox-hint" id="delete-hint"></p>

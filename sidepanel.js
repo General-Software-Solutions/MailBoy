@@ -1105,7 +1105,12 @@ const FLASH_MS = 7000;
  *  thing here that asks the user to do something about it. */
 const FLASH_ERROR_MS = 12000;
 
-const FOOTER_TONES = ['footer--busy', 'footer--flash', 'footer--error'];
+const FOOTER_TONES = [
+  'footer--info',
+  'footer--busy',
+  'footer--flash',
+  'footer--error',
+];
 
 function setAction(text) {
   actionStatus = text;
@@ -1150,8 +1155,13 @@ function flash(text, tone = 'flash') {
  * The footer's one slot, painted with the tone that belongs to whatever is
  * claiming it. A tone is a class rather than an inline colour so the two themes
  * stay in the stylesheet with everything else.
+ *
+ * **Three hues, and every line takes one**: blue for a neutral update, green
+ * for something that worked, red for something that did not. `info` is the
+ * default rather than an absence, so a caller that says nothing gets the
+ * neutral line instead of an untoned one nobody has decided the meaning of.
  */
-function paintFooter(text, tone = null) {
+function paintFooter(text, tone = 'info') {
   el.footer.classList.remove(...FOOTER_TONES);
   if (tone) el.footer.classList.add(`footer--${tone}`);
 
@@ -2631,10 +2641,13 @@ function askDelete(target, children, messages, doomedRules = 0) {
   el.deleteHint.hidden = !movable;
   el.deleteTrashLabel.textContent = COPY.deleteFolder.trashBox(messages);
 
-  // Unticked every single time. Gmail's own folder delete never removes a
-  // message, and a box that remembers a previous yes is how mail gets deleted
-  // by accident.
-  el.deleteTrash.checked = false;
+  // Ticked, and set explicitly on every open rather than left as the markup's
+  // default: what must never happen is the box carrying an answer over from a
+  // previous delete, in either direction. Deleting a folder and having its mail
+  // reappear across the inbox is the surprise people actually get caught by, and
+  // Trash is recoverable for 30 days (decision 15) where an inbox someone has to
+  // re-file by hand is not.
+  el.deleteTrash.checked = true;
   paintDeleteHint();
 
   // Escape leaves the previous choice in place, so a second open would read as
