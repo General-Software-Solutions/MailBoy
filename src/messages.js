@@ -117,13 +117,26 @@ let loading = null;
  */
 let loadedFor = null;
 
-/** Load the cache into memory. A cold cache is a normal path, not a failure. */
+/**
+ * Load the cache into memory. A cold cache is a normal path, not a failure.
+ *
+ * **A read in flight is waited for, and that check has to come first.** `readAll`
+ * publishes the map synchronously and then fills it over an await, so `messages`
+ * is truthy long before it holds anything — and a second caller that tested only
+ * that was handed an empty cache and told it was loaded. `collect` is exactly
+ * such a caller: `load` starts a read through `restoreMembership` and `collect`
+ * asks for one a moment later, so `tally` could run over a map with nothing in it
+ * and conclude that every row was unmeasured. That is a row spinning over a size
+ * that is sitting on disk — and with the running totals only ever *decrementing*
+ * from what the worker reports next, it stayed that way until the pass ended.
+ */
 export async function loadMessages() {
   const account = await activeAccount();
   if (messages && loadedFor !== account) resetMessages();
+  if (loading) return loading;
   if (messages) return;
 
-  loading ??= readAll(account).finally(() => {
+  loading = readAll(account).finally(() => {
     loading = null;
   });
   return loading;
@@ -363,9 +376,24 @@ export function idsForSenders(ids, keys, sinceDay = 0) {
  * How much measured work to risk. A first run over a large mailbox takes
  * minutes, and the panel can be closed at any point in it, so the cache is
  * written out along the way rather than only at the end.
+ *
+ * **The window is about the service worker's lifetime, not about disk.** Chrome
+ * ends a worker after roughly 30 seconds of inactivity, and since `messages.get`
+ * was corrected to 20 quota units the pacer leaves about 22 seconds between
+ * batches of 100 — so the gap between one batch and the next is now the same
+ * order as the kill, and a pass is routinely ended mid-flight. At the old 60
+ * seconds that meant a killed pass had often never flushed at all: everything it
+ * read was lost, the resumed pass re-read it, and a mailbox could make no net
+ * progress whatever. 15 seconds is therefore about one flush per batch.
+ *
+ * The cost is a full rewrite of every dirty shard each time, and a batch of 100
+ * ids touches nearly all 16 of them — so this is roughly the whole cache written
+ * per batch. That is the right trade at 4.5 messages a second: the write is
+ * milliseconds against 22 seconds of waiting, and what it buys is that no read
+ * ever has to be paid for twice.
  */
 const FLUSH_EVERY = 5000;
-const FLUSH_AFTER_MS = 60_000;
+const FLUSH_AFTER_MS = 15_000;
 
 /**
  * Fill in every message not already cached.

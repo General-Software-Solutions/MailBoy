@@ -185,13 +185,52 @@ chrome.runtime.onConnect.addListener((port) => {
 
   // Whatever is already in flight, said immediately — otherwise a panel opened
   // ten minutes in shows nothing until the next batch lands.
+  //
   if (progress) port.postMessage({ type: 'progress', ...progress, sizes: {} });
 
   port.onMessage.addListener((message) => {
     // The panel just enumerated; reuse its queue rather than repeating it.
     if (message?.type === 'start') void measure(message.order);
+    // A panel with no pass of its own, asking whether there is one to watch.
+    if (message?.type === 'attach') void answerAttach(port);
   });
 });
+
+/**
+ * Whether a pass is outstanding, and picking it back up if it is.
+ *
+ * **`running` is this worker instance, and a worker is not a pass.** One is
+ * killed after ~30 seconds of inactivity and resumed by the alarm — and with a
+ * read costing 20 quota units, the pacer leaves ~22 seconds between batches of
+ * 100, so that happens routinely mid-pass rather than only between passes. A
+ * connecting panel is very often *what woke the worker*: `running` is false,
+ * `progress` is null, and answering "nothing is happening" is how the panel came
+ * to report a three-hour pass as finished and mark every row it could not
+ * account for as short for good.
+ *
+ * The alarm is the state that outlives the worker. It is created before the first
+ * await of a pass and cleared only when one finishes or hits an `AuthError`, so
+ * its existence is exactly the question being asked.
+ *
+ * **And opening the panel is a recovery path in its own right**, the same as it
+ * is for the task queue on the other port: rather than leave the pass to the next
+ * tick of a one-minute alarm, start it now. `measure` returns early if one is
+ * already going, so a panel reconnecting mid-pass costs nothing.
+ */
+async function answerAttach(port) {
+  const outstanding = running || Boolean(await chrome.alarms.get(ALARM));
+
+  try {
+    port.postMessage({ type: outstanding ? 'measuring' : 'idle' });
+  } catch {
+    // The panel closed while we were asking. Nothing to tell it.
+  }
+
+  if (outstanding && !running) {
+    trace('measure', 'a panel connected and a pass was outstanding — resuming');
+    void measure();
+  }
+}
 
 // ── Stopping ─────────────────────────────────────────────────────
 
@@ -268,6 +307,14 @@ async function measure(order) {
     // Set before the pass starts: if it dies halfway, the alarm is what brings
     // it back.
     chrome.alarms.create(ALARM, { periodInMinutes: RESUME_MINUTES });
+
+    // Told, rather than waiting to be asked. A panel only asks when it opens, so
+    // a pass the alarm resumes under an already-open panel would otherwise run
+    // for an hour with nothing on screen saying so — and the panel would have
+    // marked its rows short for good a minute earlier, on being told the worker
+    // was idle. A port is no good for this: the panel holds one only while it is
+    // itself watching. Nobody listening is the ordinary case, hence the catch.
+    chrome.runtime.sendMessage({ type: 'measuring' }).catch(() => {});
 
     const queue = order ?? (await buildQueue());
     trace('measure', order ? 'started on the panel’s queue' : 'started, building its own queue', {

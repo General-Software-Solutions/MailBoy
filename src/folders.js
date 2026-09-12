@@ -143,7 +143,9 @@ export async function runDeleteJob(job, { onProgress, onPhase, stopped } = {}) {
       //
       // Trashed mail drops out of messages.list for a user label, so on a
       // resumed job this returns exactly what is left to move.
-      const ids = await listMessageIds(label.id, INCOMING, stopped);
+      // Priority: this is a job somebody dispatched and is watching the card
+      // for, not a background sweep. See decision 46.
+      const ids = await listMessageIds(label.id, INCOMING, stopped, { priority: true });
       if (halted()) return outcome;
 
       const result = await trashMessages(
@@ -170,7 +172,9 @@ export async function runDeleteJob(job, { onProgress, onPhase, stopped } = {}) {
       // carries the label on your own replies, and dragging those into the
       // inbox would be a bug rather than a rescue. It is also exactly the set
       // the row counted.
-      const ids = await listMessageIds(label.id, INCOMING, stopped);
+      // Priority: this is a job somebody dispatched and is watching the card
+      // for, not a background sweep. See decision 46.
+      const ids = await listMessageIds(label.id, INCOMING, stopped, { priority: true });
       if (halted()) return outcome;
 
       const moved = await modifyMessages(ids, { add: ['INBOX'] }, stopped);

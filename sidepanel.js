@@ -5304,6 +5304,207 @@ async function measureInWorker(order, onBatch) {
   }
 }
 
+/** While attached to the worker, how often its flushed cache is picked up. */
+const ATTACH_RELOAD_MS = 30_000;
+
+/**
+ * How far behind the running pass the snapshot is allowed to fall.
+ *
+ * The snapshot is what every open paints before it has read anything, so its
+ * staleness is measured in spinners: for as long as it says a row is unmeasured,
+ * that is what a reopen shows.
+ */
+const SNAPSHOT_EVERY_MS = 60_000;
+let snapshotSavedAt = 0;
+
+/** Reconnects allowed after the worker's port drops, a second apart. */
+const ATTACH_TRIES = 30;
+
+/**
+ * Put the message cache's own figures on every row.
+ *
+ * @param {boolean} settled whether what is still unread is unread for good. A
+ *   short row spins while something is going to fill it in and shows its partial
+ *   figure, dimmed, once nothing is — so this is false only while the worker is
+ *   still reading.
+ */
+async function resettleRows(settled) {
+  await membershipReady;
+
+  const records = {};
+
+  for (const [id, record] of Object.entries(recountRows(allRows().map((row) => row.id)))) {
+    const previous = painted[id];
+
+    // **This only ever fills a row in.** The cache can legitimately be behind
+    // what is on screen: a snapshot is written from the sizes the worker
+    // delivered over the port, and the worker flushes those to disk on its own
+    // schedule — so a row that already knows more keeps what it knows. Without
+    // this, every attach that ran ahead of a flush replaced real figures with
+    // spinners, which is exactly what it was added to stop.
+    if (previous && previous.count === record.count && (previous.pending ?? 0) < record.pending) {
+      continue;
+    }
+
+    records[id] = { ...record, settled };
+  }
+
+  if (!Object.keys(records).length) return;
+  paintRecords(records);
+  refreshOpenLists();
+
+  // **Write the correction back.** What this just fixed on screen is a snapshot
+  // that describes the rows as less measured than the cache knows them to be, and
+  // leaving that on disk means the next open repaints the same wrong thing and
+  // depends on this running again to undo it. Saving here is what makes the heal
+  // permanent after one open. `saveSnapshot` keeps the existing `generatedAt`, so
+  // nothing about freshness changes — only the figures.
+  void saveSnapshot();
+}
+
+/**
+ * Report a measuring pass the worker is already running, and put the cache's own
+ * answer on the rows.
+ *
+ * An open that reads nothing — patched from the change log, or skipped because
+ * the queue is still moving mail — used to leave the panel unaware the worker was
+ * mid-pass. Both halves of that reached the user as the panel being broken:
+ *
+ * - **No card.** It is bound to `busy`, which only a load in this page sets. So
+ *   an hour of background reading had nothing on screen saying so, and Refresh
+ *   offered to start what was already running.
+ * - **Spinners that never stop.** The snapshot is stamped the moment enumeration
+ *   ends, which is before a single size has landed — so every row in it carries
+ *   `pending` equal to its whole count and no `settled`, which is exactly the
+ *   spinner condition. Honest for the load that wrote it, wrong for every open
+ *   after: by then the sizes are on disk, flushed by the worker as it went, and
+ *   the snapshot merely predates them.
+ *
+ * Nothing here asks Gmail anything. `recountRows` reads membership and the
+ * message cache; the worker is the one spending quota, and this only listens.
+ */
+async function catchUpWithWorker() {
+  // A load, or the sync's own `measureNewMail`, already owns the card and is
+  // already listening on a port of its own. Two listeners would fight over it.
+  if (busy || loading) return;
+
+  // Nothing to report against: no folder list means no rows to resettle and no
+  // screen for a card to stand under. Covers boot and Welcome, where a worker
+  // left measuring by a previous account is none of this panel's business.
+  if (!currentGroups) return;
+
+  /** Anything heard on this connection, so hours of healthy attachment cannot
+   *  run the reconnect budget down. */
+  let heard = false;
+  let attached = false;
+  let reloadedAt = 0;
+  let settled = true;
+
+  for (let attempt = 0; attempt < ATTACH_TRIES && !stopRequested; attempt++) {
+    const outcome = await new Promise((resolve) => {
+      const port = chrome.runtime.connect({ name: 'measure' });
+      let over = false;
+
+      /** @param {boolean} waiting whether the rows are still owed sizes. */
+      const end = (how, waiting) => {
+        if (over) return;
+        over = true;
+        settled = !waiting;
+        stopSignal = null;
+        port.disconnect();
+        resolve(how);
+      };
+
+      // Refresh is the only way to call a pass off, and while this is attached
+      // that is what the button is pointing at. `stopLoad` tells the worker
+      // itself; this is only the panel letting go of it.
+      stopSignal = () => end('over', false);
+
+      port.onMessage.addListener((message) => {
+        heard = true;
+
+        if (message?.type === 'idle') {
+          // Nothing is measuring, so whatever a row is still missing it is
+          // missing for good rather than waiting — the same word `collect` ends
+          // every pass on, and what stops a spinner that can never resolve.
+          end('over', false);
+        } else if (message?.type === 'measuring' || message?.type === 'progress') {
+          if (!attached) {
+            attached = true;
+            trace('measure', 'attached to a pass the worker was already running', {
+              done: message.done ?? 0,
+              total: message.total ?? 0,
+            });
+            setBusy(true);
+          }
+          // A pass that has not landed a batch yet has no figures to give, and
+          // the card says what is coming rather than how far along it is — the
+          // same thing it shows while a load of its own is still enumerating.
+          if (message.type === 'progress') setProgress('measuring', message.done, message.total);
+
+          // The port carries sizes, and only those read since this panel
+          // connected: senders and dates are not in it, and anything measured
+          // before the connection is never sent at all. So the rows are
+          // re-derived from the cache the worker keeps flushing rather than
+          // accumulated here, which closes both gaps at once. Rate-limited
+          // because a flush is every 5,000 sizes or 60s — re-reading every shard
+          // per batch would cost far more than it could show.
+          if (Date.now() - reloadedAt > ATTACH_RELOAD_MS) {
+            reloadedAt = Date.now();
+            void reloadMessages().then(() => resettleRows(false));
+          }
+        } else if (message?.type === 'done' || message?.type === 'stopped') {
+          end('over', false);
+        } else if (message?.type === 'failed') {
+          // Not an error on screen. The figures here are the cache's, which are
+          // as true as they were a moment ago, and the worker's own 15-minute
+          // retry is what fixes the rest — so the rows are still waiting.
+          console.warn('[MailBoy] the worker stopped measuring:', message.message);
+          end('over', true);
+        }
+      });
+
+      // Only fires when the other end goes away, never for our own disconnect.
+      // A worker killed for being idle comes back on its alarm, so a drop
+      // mid-pass is ordinary rather than an ending: reconnect and carry on.
+      port.onDisconnect.addListener(() => end('dropped', true));
+
+      // Asked, rather than read off what arrives. Connecting is often what wakes
+      // the worker, and a woken worker has no pass running and nothing to report
+      // even when one is outstanding — so the question has to be about the alarm,
+      // which only the worker can see. `answerAttach` is the other half, and it
+      // also starts the pass rather than leaving it to the next alarm tick.
+      port.postMessage({ type: 'attach' });
+    });
+
+    if (outcome !== 'dropped') break;
+    if (heard) {
+      heard = false;
+      attempt = -1;
+    }
+    await new Promise((done) => setTimeout(done, 1000));
+  }
+
+  if (attached) {
+    setProgress(null);
+    setBusy(false);
+  }
+
+  // The last word on the rows, over whatever the worker flushed on its way out.
+  await reloadMessages();
+  await resettleRows(settled);
+}
+
+/**
+ * The worker announcing a pass it has just started — nearly always one its own
+ * alarm resumed, under a panel that has been open and idle meanwhile. Opening is
+ * the only other moment the panel asks, so without this the card would appear
+ * only for passes that happened to begin before it was opened.
+ */
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'measuring') void catchUpWithWorker();
+});
+
 /**
  * Size and sender for mail the change log has just turned up.
  *
@@ -5491,6 +5692,10 @@ async function load({ force = false } = {}) {
   if (queueBusy && !force) {
     trace('open', 'the queue is still moving mail — reading nothing');
     membershipReady = restoreMembership();
+    // Reading nothing is not the same as having nothing to report: the worker
+    // may be measuring for the next hour, and the rows came from a snapshot that
+    // predates its sizes. Not awaited — it listens for as long as the pass runs.
+    void catchUpWithWorker();
     return;
   }
 
@@ -5500,7 +5705,10 @@ async function load({ force = false } = {}) {
     membershipReady = restoreMembership();
 
     try {
-      if (await syncFromHistory()) return;
+      if (await syncFromHistory()) {
+        void catchUpWithWorker();
+        return;
+      }
     } catch (err) {
       // Never fatal: the listing below is what this was trying to avoid, not
       // something it has replaced. An auth problem simply surfaces there, where
@@ -5595,7 +5803,19 @@ async function load({ force = false } = {}) {
         // keeping.
         if (!countsSettled) {
           countsSettled = true;
+          snapshotSavedAt = Date.now();
           void writeSnapshot(generatedAt, groups, painted, 'counts final, sizes still coming');
+        } else if (Date.now() - snapshotSavedAt > SNAPSHOT_EVERY_MS) {
+          // **And again as the sizes land.** It used to be written once, at the
+          // firing above — the moment enumeration ended, before a single size
+          // existed — and then not until the pass finished. On a mailbox where
+          // that is three hours, every reopen in between painted its rows from a
+          // record that described no sizes at all, so folders that were long
+          // since measured opened as spinners over figures already on disk. The
+          // timestamp is deliberately unchanged: this is the same pass's answer
+          // filling in, not a fresher one, and `isFresh` must not be fooled.
+          snapshotSavedAt = Date.now();
+          void writeSnapshot(generatedAt, groups, painted, 'sizes filling in');
         }
       },
       measure: measureInWorker,
@@ -5774,6 +5994,23 @@ async function paintCache() {
   // anything Gmail confirmed, and the debt goes with them: `isFresh` will have
   // said no, and if that load never lands the flag keeps the next one honest.
   projected = Boolean(cached.projected);
+
+  // **A snapshot is only ever a stale copy of what the cache knows.** It is
+  // stamped the moment enumeration ends — before a single size has landed — so
+  // on any open during a size pass every row in it reads as unmeasured, and the
+  // panel opens onto a wall of spinners over sizes that are already on disk.
+  //
+  // So the cache has the last word here, before `load` has decided anything.
+  // That is the point of doing it in this function rather than on one of the
+  // load paths: which path runs depends on the snapshot's age, whether the
+  // change log answered, and whether the queue is busy, and the rows have to be
+  // right down all of them. `resettleRows` only fills rows in, so this can never
+  // make the first frame worse than the snapshot it was painted from.
+  //
+  // `false` because nothing here knows whether a pass is running — a row still
+  // short keeps spinning, and whatever runs next says otherwise if it is.
+  membershipReady = restoreMembership();
+  await resettleRows(false);
 }
 
 // ── Events ───────────────────────────────────────────────────────

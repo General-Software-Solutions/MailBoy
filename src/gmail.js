@@ -139,19 +139,31 @@ async function readJson(res) {
 // ── Two lanes ────────────────────────────────────────────────────
 //
 // **A reservation queue is fairness, not a ceiling, and the two must not be
-// confused.** A trash job books the budget roughly fifteen seconds ahead —
-// three concurrent batches at 500 units each — and a cool-off pushes it twenty
-// further. Anything joining the tail of that waits it out, which is right for a
-// pass and wrong for the two writes a person is standing in front of: creating
-// a folder and making a rule. Both are one 5-unit call, both were asked for
-// just now, and both used to sit behind minutes of somebody else's mail.
+// confused.** The size pass books the budget roughly a minute ahead — three
+// concurrent batches of 100 reads, 2,000 units each at 20 units a message — and
+// a cool-off pushes it twenty seconds further. Anything joining the tail of that
+// waits it out, which is right for the pass, because nobody is waiting on any
+// particular row of it, and wrong for everything else in the product.
 //
 // So `priority` claims book against a lane of their own. They pace themselves
 // against each other at the same rate — a consolidating rule save is forty
 // deletes and should not arrive as one burst — and the bulk lane absorbs what
 // they spent, so jumping the queue costs the pass a slice rather than costing
-// the mailbox its ceiling. Over a minute it is noise: 5 units against the 600
-// `SAFETY` already holds back.
+// the mailbox its ceiling.
+//
+// **The lane is every call somebody is waiting on**, which since 2026-09-12 is
+// the whole task queue as well as the folder and rule writes it started with: a
+// move, a trash, and the listings a folder delete makes before it moves anything.
+// The arithmetic is what settles it — a move of 500 emails is one 50-unit
+// `batchModify`, half a second of budget, and emptying a 47,000-message folder is
+// 47 of them, about 26 seconds. Against a size pass that is 940,000 units and
+// hours, handing the whole task queue the lane costs the pass under half a minute
+// and is the difference between an action starting when it is pressed and sitting
+// there for a minute looking broken.
+//
+// What that leaves in the bulk lane is `fetchMessageMeta` and enumeration —
+// the size pass, and nothing else. That is the honest division: **the bulk lane
+// is the background, and everything a person can see happening is interactive.**
 //
 // **What a priority claim does not jump is a cool-off.** That is Gmail refusing
 // this mailbox rather than MailBoy being polite, and a request that ignored it
@@ -273,7 +285,10 @@ async function claim(ms, priority = false) {
       // quiet mailbox, and a line claiming a jump that did not happen is the
       // kind of trace that makes the flag worth turning off.
       if (bulk - start > 1000) {
-        trace('quota', 'interactive write jumped the queue', {
+        // "Call", not "write": the lane carries `listFilters` and the folder
+        // delete's own listings too, and a trace that names the wrong kind of
+        // request sends the next person reading it looking for a write.
+        trace('quota', 'interactive call jumped the queue', {
           waited: Math.round(start - now),
           insteadOf: Math.round(bulk - now),
         });
@@ -543,8 +558,37 @@ export async function deleteLabel(id) {
  *
  * @returns {Promise<string[]>}
  */
-export async function listMessageIds(labelId, query, stopped) {
-  const ids = [];
+export async function listMessageIds(labelId, query, stopped, options) {
+  return pageThrough(labelId, query, stopped, options, false);
+}
+
+/**
+ * The same listing, with each message's thread.
+ *
+ * `threadId` comes back for free on quota — a listing is 5 units per 500 ids
+ * whatever the mask asks for — so the only cost is response size, about 25 bytes
+ * a message. That is why it is opt-in rather than always on: nothing in the
+ * ordinary path needs it, and a 47,000-message enumeration would carry an extra
+ * megabyte for nobody.
+ *
+ * What wants it is the question of whether `threads.get` is worth using. Gmail's
+ * own interface counts *conversations* where every number in MailBoy counts
+ * *messages*, so the ratio between the two is both the explanation for a folder
+ * reading ten times larger here than in Gmail and the thing that decides whether
+ * reading a thread at 40 units beats reading its messages at 20 each.
+ *
+ * @returns {Promise<{id: string, threadId: string}[]>}
+ */
+export function listMessageRefs(labelId, query, stopped, options) {
+  return pageThrough(labelId, query, stopped, options, true);
+}
+
+/**
+ * @param {boolean} withThreads whether to carry each message's `threadId`
+ * @returns {Promise<string[] | {id: string, threadId: string}[]>}
+ */
+async function pageThrough(labelId, query, stopped, { priority = false } = {}, withThreads) {
+  const out = [];
   let pageToken;
 
   for (let page = 0; page < MAX_PAGES; page++) {
@@ -556,22 +600,30 @@ export async function listMessageIds(labelId, query, stopped) {
         labelIds: labelId,
         q: query,
         maxResults: PAGE_SIZE,
-        fields: 'nextPageToken,messages/id',
+        fields: withThreads
+          ? 'nextPageToken,messages/id,messages/threadId'
+          : 'nextPageToken,messages/id',
         // messages.list hides spam and trash by default, even when those are
         // exactly the labels being asked about.
         includeSpamTrash: labelId === 'SPAM' || labelId === 'TRASH' ? 'true' : undefined,
         pageToken,
       },
-      UNIT_COST.list
+      UNIT_COST.list,
+      // A folder delete lists the mail it is about to move, and somebody is
+      // watching the card. Enumeration's own listings are the bulk kind: nobody
+      // is waiting on an individual row. See decision 46.
+      priority
     );
 
-    for (const message of data.messages ?? []) ids.push(message.id);
+    for (const message of data.messages ?? []) {
+      out.push(withThreads ? { id: message.id, threadId: message.threadId } : message.id);
+    }
 
     pageToken = data.nextPageToken;
     if (!pageToken) break;
   }
 
-  return ids;
+  return out;
 }
 
 // ── The change log ───────────────────────────────────────────────
@@ -742,6 +794,8 @@ export async function modifyMessages(ids, { add = [], remove = [] } = {}, stoppe
           // so this is about the request being what it says rather than about
           // cost — and `add` is one label in every caller here.
           body: { ids: chunk, addLabelIds: pass === 0 ? add : [], removeLabelIds: labels },
+          // Somebody pressed Move and is watching the row. See decision 46.
+          priority: true,
         }
       );
     }
@@ -828,8 +882,25 @@ export async function deleteFilter(id) {
 
 // ── Message sizes ────────────────────────────────────────────────
 
-/** Gmail's own ceiling on sub-requests in one batch. */
-const BATCH_SIZE = 100;
+/**
+ * Sub-requests per batch — **Google's recommendation, not their ceiling.**
+ *
+ * The batch guide puts the hard limit at 100 and then says: *"Larger batch sizes
+ * are likely to trigger rate limiting. We recommend sending batches of no more
+ * than 50 requests."* This was 100 until 2026-09-12, which is to say it sat on
+ * the maximum and at double the advice, on a project that has spent weeks
+ * fighting *Too many concurrent requests for user*.
+ *
+ * **It costs no throughput to obey.** A batch is billed per sub-request
+ * (`n` requests, never one — same guide), so the pass is quota-bound either way
+ * and halving the batch only halves what each reservation buys. Two things come
+ * free with it: fewer refusals, and — the reason it is worth doing today — a
+ * batch of 50 books 1,000 units, which is 11 seconds of budget instead of 22. The
+ * gap between one request and the next is what keeps the service worker alive
+ * against Chrome's ~30-second idle kill, and 22 seconds was uncomfortably close
+ * to it. See *A worker is not a pass*.
+ */
+const BATCH_SIZE = 50;
 
 /** Enough in flight to hide latency; the quota pacer sets the real rate. */
 const BATCH_CONCURRENCY = 3;
@@ -1266,6 +1337,8 @@ export async function trashMessages(ids, onBatch, stopped) {
           units: UNIT_COST.batchModify,
           method: 'POST',
           body: { ids: chunk, addLabelIds: ['TRASH'], removeLabelIds: ['INBOX'] },
+          // Somebody pressed Delete and is watching the row. See decision 46.
+          priority: true,
         }
       );
       trashed.push(...chunk);

@@ -68,6 +68,16 @@ function belongsIn(row, labels) {
 const LIST_CONCURRENCY = 8;
 
 /**
+ * How often a running pass re-reads the message cache into its row totals.
+ *
+ * The worker flushes every 15 seconds and a batch lands every ~22, so this is
+ * about one re-read per couple of batches — enough to pick up a pass already in
+ * progress within half a minute, and far short of the cost of re-reading every
+ * shard per batch. See `refill`.
+ */
+const REFILL_MS = 30_000;
+
+/**
  * The ids behind each row's number, from the most recent collect.
  *
  * Kept in memory only. A drill-down needs them to aggregate, and re-listing on
@@ -804,6 +814,8 @@ export async function collect(groups, hooks = {}) {
   hooks.onSizes?.(snapshot(records), 0, outstanding);
 
   if (outstanding && hooks.measure && !stopped()) {
+    let refilledAt = Date.now();
+
     await hooks.measure(order, (found, done, total) => {
       for (const [id, bytes] of found) {
         for (const rowId of owners.get(id) ?? []) {
@@ -811,6 +823,22 @@ export async function collect(groups, hooks = {}) {
           records[rowId].pending--;
         }
       }
+
+      // **A pass this panel did not start never reports what it read before the
+      // panel connected**, and the worker's queue is shared — so those rows would
+      // sit short until the pass ended, which on a large mailbox is hours. The
+      // cache is where that work actually is, so it is re-read as the pass runs
+      // rather than only on the way out. `refill` rather than `tally`, because a
+      // cache behind the port must not un-measure a row. Not awaited: this is the
+      // hot path, and the next batch reports whatever it lands.
+      if (Date.now() - refilledAt > REFILL_MS) {
+        refilledAt = Date.now();
+        void reloadMessages().then(() => {
+          refill(counted, records);
+          hooks.onSizes?.(snapshot(records), done, total);
+        });
+      }
+
       hooks.onSizes?.(snapshot(records), done, total);
     });
 
@@ -846,6 +874,29 @@ function figuresFor(ids) {
 /** Per-row size and how much of it is still unread, straight from the cache. */
 function tally(counted, records) {
   for (const [rowId, ids] of counted) Object.assign(records[rowId], figuresFor(ids));
+}
+
+/**
+ * Fold the cache back into the running totals, keeping whichever knows more.
+ *
+ * `tally` replaces a row outright, which is right before a pass starts and right
+ * once one has ended — and wrong in the middle of one, because the worker flushes
+ * to disk on its own schedule and the cache can therefore be *behind* sizes it
+ * has already reported over the port. Replacing a row from a cache that is behind
+ * puts a spinner back over a figure, which is the one thing a re-read must never
+ * do.
+ *
+ * Fewer pending is the test for which knows more: it only ever falls, so this is
+ * monotone whichever order the two sources arrive in.
+ */
+function refill(counted, records) {
+  for (const [rowId, ids] of counted) {
+    const record = records[rowId];
+    if (!record) continue;
+
+    const fresh = figuresFor(ids);
+    if (fresh.pending < (record.pending ?? Infinity)) Object.assign(record, fresh);
+  }
 }
 
 /** Records get rendered and cached, so hand out copies rather than live state. */
