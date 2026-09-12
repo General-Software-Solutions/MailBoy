@@ -99,6 +99,23 @@ export const COPY = {
     countUnavailable: 'Count unavailable.',
     measuring: 'Measuring size',
     loading: 'Loading…',
+
+    /** A folder's size once every email in it has been read. */
+    size: (bytes) => `(${bytes})`,
+    /**
+     * A folder's size worked out from how big its emails are *roughly*, which
+     * MailBoy can find out in seconds — the exact figure takes a while longer.
+     * The tilde is what says so at a glance; the tooltip says it in words.
+     */
+    sizeAbout: (bytes) => `(~${bytes})`,
+
+    sizeExact: (bytes) => `about ${bytes}`,
+    sizeEstimated: (bytes, left) =>
+      `roughly ${bytes} — still working out the exact size of ` +
+      `${left.toLocaleString()} ${left === 1 ? 'email' : 'emails'}`,
+    sizeShort: (bytes, left) =>
+      `at least ${bytes} · ${left.toLocaleString()} could not be measured`,
+    sizeWorking: 'Working out the size…',
   },
 
   notice: {
@@ -338,6 +355,14 @@ export const COPY = {
       'This only affects mail that arrives from now on. It goes straight to ' +
       'Trash, and Gmail deletes trashed mail for good after 30 days.',
     domainWarning: 'This includes senders you have never had mail from.',
+    // A sender goes to one folder, so making this rule takes it off any other.
+    // Deliberately generic: the dialog has not read your rules and does not know
+    // how many there are, and this is a thing to know before ticking rather than
+    // a count to check afterwards. The second sentence is the limit of it —
+    // MailBoy rewrites its own rules and never the ones you made in Gmail.
+    replaces:
+      'Any other MailBoy rule for the same sender or domain is deleted. ' +
+      'Filters you made in Gmail are left alone.',
     ceiling: (n, max) => `Adds ${n.toLocaleString()} rules. Gmail allows ${max.toLocaleString()}.`,
   },
 
@@ -431,6 +456,11 @@ export const COPY = {
     alreadyHad: (n) => `Already had ${n === 1 ? 'that rule' : 'those rules'}.`,
     full: (max) => `Gmail is full at ${max.toLocaleString()} filters. No rule added.`,
     someFailed: (n) => `${n.toLocaleString()} could not be added.`,
+    // The sweep half of the same write. A sender left on an old rule is filed in
+    // two places at once, which is the one thing this is meant to prevent — so a
+    // sweep that did not land is said out loud rather than left to the tab.
+    stillElsewhere: (n) =>
+      `${ruleCount(n)} for the same sender could not be removed. Check the Rules tab.`,
     addFailedDuringMove: 'The emails are moving, but the rule could not be added.',
   },
 

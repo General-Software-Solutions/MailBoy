@@ -44,6 +44,17 @@
 // collapses all forty into one. That costs forty deletes once, and is the only
 // migration the change needs.
 //
+// ── A sender goes to one folder ──────────────────────────────────
+//
+// **Filing a sender or a domain somewhere takes it off every other rule of
+// ours.** Gmail's filters are additive and two can both match one message, so a
+// sender left behind on an old rule would go on carrying the old folder's label
+// beside the new one — the same two-places-at-once the panel's Move exists to
+// avoid. `planSave` rewrites every destination of ours that held it, exactly as
+// a delete of that one row would, and the dialogs say so before the box is
+// ticked. Filters the user wrote in Gmail are never touched: see `planSave` for
+// why, and for why the sweep is on exact matches only.
+//
 // ── Filters MailBoy did not make ─────────────────────────────────
 //
 // The Rules tab lists those too, in a section of their own, because a filter
@@ -519,36 +530,99 @@ function ownFilters(rules, destination) {
  * forty existing senders has not lost forty rules — those are still on the
  * account, in the filters this plan did not get around to deleting.
  *
- * @returns {{field: string, destination: string, chunks: Part[][], adding: Part[], replacing: string[]}[]}
+ * `removing` is the other half of that, and it is what makes a sender live in
+ * one place — see below.
+ *
+ * ── A sender or a domain goes to one folder ──────────────────────
+ *
+ * **Filing a sender somewhere takes it off every other rule of ours.** Gmail's
+ * filters are additive and two of them can both match one message, so a sender
+ * left on an old rule would go on carrying the old folder's label alongside the
+ * new one — which is the same two-places-at-once the panel's Move exists to
+ * avoid. So every destination of ours holding a sender this call is filing gives
+ * it up, rewritten around it exactly as a delete would.
+ *
+ * Three limits on that sweep, each deliberate:
+ *
+ * - **Only MailBoy's own.** `ownFilters` is `partiallyEditable`, so a filter the
+ *   user wrote in Gmail is never touched: `readFilter` models `addLabelIds` and
+ *   nothing else, and rewriting theirs would silently drop a `forward` or a
+ *   `markAsRead` it also carried. The same line decision 45 already draws.
+ * - **Exact matches only.** A domain rule does not sweep up the senders at that
+ *   domain, and a sender rule does not touch the domain's. They are different
+ *   sentences on the screen, and somebody filing `@acme.com` one way and
+ *   `ceo@acme.com` another has said something specific.
+ * - **Subjects are left alone**, on both sides: they are not what a sender rule
+ *   is about, and a filter can carry a subject or a sender but never both.
+ *
+ * The destinations gaining something are planned before the ones losing it, so
+ * the moment of overlap is mail carrying both labels rather than a window in
+ * which no rule catches it at all. Same reasoning as create-before-delete.
+ *
+ * @returns {{field: string, destination: string, chunks: Part[][], adding: Part[], removing: Part[], replacing: string[]}[]}
  */
 export function planSave(specs, rules = []) {
   const plans = [];
 
-  // One filter each, and never merged — see the header.
+  // One filter each, and never merged — see the header. Nothing consolidates
+  // into a subject filter, so the only thing to do about one that already says
+  // this is not make it a second time.
   for (const spec of specs) {
     if (spec.kind !== 'subject') continue;
+    if (rules.some((rule) => sameRule(rule, spec))) continue;
     const part = { kind: 'subject', match: spec.match };
     plans.push({
       field: 'subject',
       destination: spec.destination,
       chunks: [[part]],
       adding: [part],
+      removing: [],
       replacing: [],
     });
   }
 
-  const byDestination = new Map();
+  /** destination → the senders and domains this call is filing there. */
+  const filing = new Map();
   for (const spec of specs) {
     if (spec.kind === 'subject') continue;
-    const list = byDestination.get(spec.destination) ?? [];
+    const list = filing.get(spec.destination) ?? [];
     list.push({ kind: spec.kind, match: spec.match });
-    byDestination.set(spec.destination, list);
+    filing.set(spec.destination, list);
   }
 
-  for (const [destination, additions] of byDestination) {
+  // Every sender and domain the call is about. Anywhere else of ours holding one
+  // of them is now out of date, whatever it used to say.
+  const claimed = new Set([...filing.values()].flat().map(partKey));
+
+  // The destinations losing something. One that is also gaining is planned
+  // below either way, so only the others have to be found here.
+  const losing = new Set();
+  for (const rule of rules) {
+    if (!partiallyEditable(rule) || filing.has(rule.destination)) continue;
+    if (claimed.has(partKey(rule))) losing.add(rule.destination);
+  }
+
+  for (const destination of [...filing.keys(), ...losing]) {
     const family = ownFilters(rules, destination);
     const held = family.flatMap((one) => one.parts);
-    const seen = new Set(held.map(partKey));
+    const additions = filing.get(destination) ?? [];
+    const mine = new Set(additions.map(partKey));
+
+    // What this destination keeps, and what it gives up: everything it holds,
+    // less anything the call is filing somewhere else.
+    const stays = (part) => mine.has(partKey(part)) || !claimed.has(partKey(part));
+    const kept = held.filter(stays);
+    const removing = held.filter((part) => !stays(part));
+
+    const seen = new Set(kept.map(partKey));
+    // A filter of the account's own already saying this is reason enough not to
+    // make a second one. It cannot be consolidated into ours — theirs is never
+    // rewritten — so the only choice is whether to duplicate it, and a duplicate
+    // spends one of Gmail's thousand to change nothing.
+    for (const rule of rules) {
+      if (rule.origin === 'mailboy' || rule.field !== 'from') continue;
+      if (rule.destination === destination) seen.add(partKey(rule));
+    }
 
     const added = [];
     for (const part of additions) {
@@ -557,19 +631,20 @@ export function planSave(specs, rules = []) {
       added.push(part);
     }
 
-    const chunks = chunk([...held, ...added]);
+    const chunks = chunk([...kept, ...added]);
 
-    // Nothing new, and the filters holding it are already as few as they can be.
-    // The second half is what makes this self-migrating: a folder left with
-    // forty single-sender filters by an older build is not "already consolidated"
-    // even when the rule being added is one it has.
-    if (!added.length && family.length === chunks.length) continue;
+    // Nothing new, nothing taken away, and the filters holding it are already as
+    // few as they can be. The last clause is what makes this self-migrating: a
+    // folder left with forty single-sender filters by an older build is not
+    // "already consolidated" even when the rule being added is one it has.
+    if (!added.length && !removing.length && family.length === chunks.length) continue;
 
     plans.push({
       field: 'from',
       destination,
       chunks,
       adding: added,
+      removing,
       replacing: family.map((one) => one.filterId),
     });
   }
@@ -595,15 +670,23 @@ export const filtersNeeded = (plans) => plans.reduce((total, plan) => total + pl
  * already happened by the time these run, so one refused filter must not read as
  * the whole action having failed.
  *
+ * **A sender this files somewhere is taken off every other rule of ours**, which
+ * is the other half of the same write — see `planSave`. A destination losing its
+ * last match has its filter deleted outright rather than rewritten empty, which
+ * falls out of the plan carrying no chunks.
+ *
  * @param {{kind: 'sender' | 'domain' | 'subject', match: string, destination: string}[]} specs
  * @param {Rule[]} rules every rule on the account, as `listRules` last read them
- * @returns {Promise<{created: Rule[], failed: {match: string, message: string}[], replaced: number}>}
+ * @returns {Promise<{created: Rule[], failed: {match: string, message: string}[], replaced: number, stuck: number}>}
+ *   `stuck` counts the rules elsewhere that could not be taken away, which is
+ *   the only way a sender is left filed in two places.
  */
 export async function saveRules(specs, rules = []) {
   const plans = planSave(specs, rules);
   const created = [];
   const failed = [];
   let replaced = 0;
+  let stuck = 0;
 
   for (const plan of plans) {
     const made = [];
@@ -633,6 +716,10 @@ export async function saveRules(specs, rules = []) {
         for (const part of plan.adding) {
           if (missing.has(partKey(part))) failed.push({ match: part.match, message: err?.message ?? '' });
         }
+        // The original stands, so whatever this plan was going to take out of it
+        // is still there — and that is a sender left filed in two places, which
+        // is worth saying rather than leaving to be discovered in the tab.
+        stuck += plan.removing.length;
         complete = false;
         break;
       }
@@ -643,8 +730,12 @@ export async function saveRules(specs, rules = []) {
     // Only once every replacement is safely in place. A half-written plan leaves
     // the originals alone, which is the whole reason the order is this way round.
     if (complete && plan.replacing.length) {
-      const { deleted } = await deleteRules(plan.replacing);
+      const { deleted, failed: undeleted } = await deleteRules(plan.replacing);
       replaced += deleted.length;
+      // An original that would not go is carrying the old instruction alongside
+      // its replacement. Harmless where the two say the same thing; not where
+      // this plan was rewriting it around a sender that has moved on.
+      if (undeleted.length) stuck += plan.removing.length;
     }
   }
 
@@ -652,9 +743,11 @@ export async function saveRules(specs, rules = []) {
     asked: specs.length,
     filtersMade: created.length ? new Set(created.map((rule) => rule.filterId)).size : 0,
     filtersRemoved: replaced,
+    sweptElsewhere: plans.reduce((total, plan) => total + plan.removing.length, 0),
+    stuck,
     units: (filtersNeeded(plans) + replaced) * 5,
   });
-  return { created, failed, replaced };
+  return { created, failed, replaced, stuck };
 }
 
 /**

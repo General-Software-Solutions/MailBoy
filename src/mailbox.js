@@ -34,6 +34,84 @@ const SCOPES = {
   incoming: '-in:sent -is:draft',
 };
 
+// ── Sizing a row without reading its mail ────────────────────────
+//
+// **A size normally costs 20 quota units a message and there is no bulk route** —
+// `messages.list` hands back nothing but an id and a thread id, there is no
+// `batchGet`, and the HTTP batch endpoint is billed as n requests rather than
+// one. That is why the real pass takes hours on a large mailbox, and none of
+// that changes here: `fetchMessageMeta` still reads every message, because the
+// **sender** and the date it also brings back exist nowhere else, and the
+// breakdown, the mail list, every action's id resolution and the frequency
+// column are all built on them.
+//
+// What this adds is a figure to show *while* that runs. Gmail's search takes
+// `larger:` and `smaller:`, so a row can be listed band by band and its mail
+// sorted into size classes for the price of listing it again — **5 units per 500
+// ids, against 20 units per message.** On a 46,000-message folder that is about
+// 500 units rather than 920,000, and it answers in seconds rather than in hours.
+//
+// What it buys is an estimate and it is never presented as more than one: the
+// panel marks it `~` until the row's own messages have actually been read. A
+// band says a message is between 45 KB and 90 KB; it does not say which.
+//
+// **The bands do not replace enumeration.** They could — every message has
+// exactly one size, so the bands are a partition of the row — but a count is the
+// number this product is most careful about, and boundary semantics are the one
+// thing here Google does not document precisely (see `bandQuery`). So the
+// enumerated id set stays the authority on what a row holds, and a band that
+// claims nothing simply leaves its messages unestimated.
+//
+// Boundaries in bytes. Band `i` is `[SIZE_BANDS[i], SIZE_BANDS[i + 1])`, and the
+// last one runs to infinity. Roughly 2× apart, which is as coarse as the
+// midpoint rule below can be without the estimate visibly missing — and each
+// extra band costs one 5-unit call per row, so this is a price, not a free dial.
+const SIZE_BANDS = [
+  0, 3_000, 8_000, 20_000, 45_000, 90_000, 180_000, 350_000, 700_000, 1_400_000, 3_000_000,
+  6_000_000, 12_000_000, 25_000_000,
+];
+
+/** Measured messages a band needs before its own average beats the midpoint. */
+const MIN_SAMPLE = 12;
+
+/**
+ * The search that selects one band.
+ *
+ * `larger:`/`smaller:` are strict, so `[lo, hi)` is `larger:lo-1 smaller:hi`: a
+ * message of exactly `lo` clears `lo - 1`, and one of exactly `hi` does not
+ * clear `smaller:hi` and is picked up by the band above. Google documents the
+ * operators but not their behaviour at the boundary, so **both ways of being
+ * wrong are harmless here**: were they inclusive the bands would overlap by a
+ * byte, and a message claimed twice keeps the first band it landed in; were
+ * there a gap, the message is left unestimated and its row is short by one
+ * message's worth rather than wrong about its count.
+ */
+function bandQuery(band) {
+  const lo = SIZE_BANDS[band];
+  const hi = SIZE_BANDS[band + 1];
+  const terms = [];
+  if (lo > 0) terms.push(`larger:${lo - 1}`);
+  if (hi !== undefined) terms.push(`smaller:${hi}`);
+  return terms.join(' ');
+}
+
+/**
+ * What one message in a band is worth, before any measured mail has calibrated
+ * it. The geometric mean is the midpoint of a band whose ends are a ratio apart
+ * rather than a difference, which is what log-spaced bands are.
+ *
+ * The two ends are special because neither has a geometric mean: the bottom band
+ * reaches 0, and sizes crowd its low end rather than spreading evenly, so it
+ * takes a fraction of its ceiling. The top band has no ceiling at all.
+ */
+function midOf(band) {
+  const lo = SIZE_BANDS[band];
+  const hi = SIZE_BANDS[band + 1];
+  if (!lo) return hi / 2.5;
+  if (hi === undefined) return lo * 1.5;
+  return Math.sqrt(lo * hi);
+}
+
 /**
  * The same question `SCOPES` asks, asked of a label set instead of a search.
  *
@@ -68,6 +146,16 @@ function belongsIn(row, labels) {
 const LIST_CONCURRENCY = 8;
 
 /**
+ * How often a running pass re-reads the message cache into its row totals.
+ *
+ * The worker flushes every 15 seconds and a batch lands every ~22, so this is
+ * about one re-read per couple of batches — enough to pick up a pass already in
+ * progress within half a minute, and far short of the cost of re-reading every
+ * shard per batch. See `refill`.
+ */
+const REFILL_MS = 30_000;
+
+/**
  * The ids behind each row's number, from the most recent collect.
  *
  * Kept in memory only. A drill-down needs them to aggregate, and re-listing on
@@ -77,6 +165,33 @@ const LIST_CONCURRENCY = 8;
  * @type {Map<string, string[]>}
  */
 let counts = new Map();
+
+/**
+ * What one unread message is worth, per row, from the band pass — see
+ * `readBands`.
+ *
+ * **A per-row average rather than a per-message band.** Both answer the row's
+ * total equally well, because what is still unmeasured within a row is not
+ * biased by size: the reading order is by row, smallest row first, and never by
+ * how big a message is. The average is four numbers to store where the bands
+ * would be one per message, and it stays right on its own as messages are read —
+ * the row's estimate is simply whatever is left times this.
+ *
+ * @type {Map<string, number>}
+ */
+let estimates = new Map();
+
+/**
+ * Which mailbox `counts` and `estimates` were read for.
+ *
+ * The service worker is woken by an alarm and can easily outlive an account
+ * switch the panel made, exactly as `messages.js` guards its own map with
+ * `loadedFor`. Without this a queue rebuilt from memory would be built out of
+ * somebody else's mailbox.
+ *
+ * @type {string | null}
+ */
+let membershipFor = null;
 
 /**
  * Rows a projected action has changed since the running load enumerated them.
@@ -153,11 +268,18 @@ async function saveMembership(counted, historyId = bookmark) {
     const account = await activeAccount();
     if (!account) return;
 
+    membershipFor = account;
     await chrome.storage.local.set({
       [membershipKey(account)]: {
         savedAt: Date.now(),
         historyId: bookmark,
         ids: Object.fromEntries(counted),
+        // Written with the ids because it is about them: an estimate is per
+        // unread message of *this* row as this enumeration found it. Four bytes
+        // a row against a megabyte of ids, and without it a panel reopened
+        // mid-pass would go back to showing spinners over rows it had a figure
+        // for a moment ago.
+        estimates: Object.fromEntries(estimates),
       },
     });
   } catch (err) {
@@ -207,16 +329,21 @@ export async function stampHistoryId(historyId) {
  */
 export async function restoreMembership() {
   await loadMessages();
-  if (counts.size) return;
   try {
     const account = await activeAccount();
     if (!account) return;
+
+    // Held in memory once it has been read — but only for the mailbox it was
+    // read for. The worker is woken by an alarm and can outlive a switch.
+    if (counts.size && membershipFor === account) return;
 
     const key = membershipKey(account);
     const { [key]: stored } = await chrome.storage.local.get(key);
     if (stored?.ids) {
       counts = new Map(Object.entries(stored.ids));
+      estimates = new Map(Object.entries(stored.estimates ?? {}));
       bookmark = stored.historyId ?? null;
+      membershipFor = account;
     }
   } catch (err) {
     console.warn('[MailBoy] membership unreadable:', err);
@@ -230,6 +357,8 @@ export async function restoreMembership() {
  */
 export function resetMembership() {
   counts = new Map();
+  estimates = new Map();
+  membershipFor = null;
   patched = new Set();
   // The bookmark describes the ids being dropped, and belongs to the mailbox
   // being left. Keeping it would point the next account's first sync at a
@@ -551,7 +680,7 @@ export function recountRows(rowIds) {
   const records = {};
   for (const rowId of rowIds) {
     const ids = counts.get(rowId);
-    if (ids) records[rowId] = figuresFor(ids);
+    if (ids) records[rowId] = figuresFor(ids, rowId);
   }
   return records;
 }
@@ -564,7 +693,11 @@ export async function forgetMembership(account) {
   const active = await activeAccount();
   const id = account ?? active;
 
-  if (id === active) counts = new Map();
+  if (id === active) {
+    counts = new Map();
+    estimates = new Map();
+    membershipFor = null;
+  }
   if (!id) return;
 
   await chrome.storage.local.remove(membershipKey(id));
@@ -629,6 +762,125 @@ async function enumerateRows(groups, onRow, stopped) {
 }
 
 /**
+ * Put a size on every row's unread mail without reading any of it — see the note
+ * on `SIZE_BANDS`.
+ *
+ * One listing per band per row, 5 units per 500 ids, against the 20 units a
+ * message the real pass costs. It fills `estimates`, which is all the rest of
+ * the module reads.
+ *
+ * Three things keep it cheap, and the first two are what make it affordable at
+ * all on a mailbox with many folders:
+ *
+ * - **Only rows with unread mail are banded.** A second open, where everything
+ *   is already cached, spends nothing here.
+ * - **A message is banded once.** The rows overlap heavily — the five categories
+ *   are subsets of Inbox, and a user folder is mostly inbox mail — so the rows
+ *   are walked biggest-first and a row whose unread mail is already banded is
+ *   skipped outright. That is what makes the categories free.
+ * - **Sequentially, deliberately.** Listings are paced against one shared quota
+ *   budget, so running eight at once would not make the pass finish any sooner;
+ *   what it would do is race the skip above and band the same mail twice.
+ *
+ * Nothing here is ever fatal. A band that will not list leaves its mail
+ * unestimated, which costs a row its early figure and nothing else.
+ *
+ * @returns {Promise<number>} how many messages were sorted into a band
+ */
+async function readBands(groups, counted, records, stopped) {
+  /** @type {Map<string, number>} id → which band it fell into */
+  const bands = new Map();
+
+  const wanted = [...counted]
+    .filter(([rowId]) => (records[rowId]?.pending ?? 0) > 0)
+    .sort((a, b) => b[1].length - a[1].length);
+
+  if (!wanted.length) return 0;
+
+  const scopes = new Map(rowsOf(groups).map((row) => [row.id, row.scope ? SCOPES[row.scope] : '']));
+  let listings = 0;
+
+  for (const [rowId, ids] of wanted) {
+    if (stopped?.()) break;
+
+    const unread = ids.filter((id) => sizeOf(id) === undefined);
+    if (unread.every((id) => bands.has(id))) continue;
+
+    const scope = scopes.get(rowId) ?? '';
+
+    for (let band = 0; band < SIZE_BANDS.length; band++) {
+      if (stopped?.()) break;
+      try {
+        const query = [scope, bandQuery(band)].filter(Boolean).join(' ');
+        listings++;
+        for (const id of await listMessageIds(rowId, query, stopped)) {
+          // First band wins. Were the operators inclusive rather than strict the
+          // bands would overlap by a byte at each boundary, and the two
+          // candidates differ by one byte — so which one is kept does not matter,
+          // only that it is decided once.
+          if (!bands.has(id)) bands.set(id, band);
+        }
+      } catch (err) {
+        if (err instanceof AuthError) throw err;
+        console.warn('[MailBoy] could not size', rowId, 'band', band, err);
+      }
+    }
+  }
+
+  const weights = calibrate(bands);
+
+  for (const [rowId, ids] of counted) {
+    let total = 0;
+    let unread = 0;
+    for (const id of ids) {
+      if (sizeOf(id) !== undefined) continue;
+      unread++;
+      const band = bands.get(id);
+      if (band !== undefined) total += weights[band];
+    }
+    // Divided by every unread message rather than by the banded ones: mail no
+    // band claimed is mail this pass could not size, and spreading the rest over
+    // it would quietly inflate the row instead of leaving it a little short.
+    if (unread) estimates.set(rowId, total / unread);
+    else estimates.delete(rowId);
+  }
+
+  // `atLeast`, because a band wide enough to page reports one listing here and
+  // spends 5 units a page. It is the floor, and the floor is the part worth
+  // watching: it is what every extra band costs on every row.
+  trace('listing', 'sized the rows from size bands — no mail read', {
+    rows: wanted.length,
+    banded: bands.size,
+    atLeast: `${listings * 5} units`,
+  });
+
+  return bands.size;
+}
+
+/**
+ * What one message in each band is worth.
+ *
+ * The midpoints are a starting guess about mail in general; the message cache is
+ * this mailbox's own answer, so a band with enough already-measured mail in it
+ * uses that instead. It sharpens as the real pass runs, which is the right way
+ * round — the estimate is most wrong at the moment it matters least, when there
+ * is nothing else on screen either.
+ */
+function calibrate(bands) {
+  const sum = new Array(SIZE_BANDS.length).fill(0);
+  const seen = new Array(SIZE_BANDS.length).fill(0);
+
+  for (const [id, band] of bands) {
+    const size = sizeOf(id);
+    if (size === undefined) continue;
+    sum[band] += size;
+    seen[band]++;
+  }
+
+  return sum.map((total, band) => (seen[band] >= MIN_SAMPLE ? total / seen[band] : midOf(band)));
+}
+
+/**
  * The order messages get read in, which decides how the panel fills in: each
  * row's messages queued together, smallest label first, so rows settle one
  * after another rather than all at once at the very end.
@@ -661,6 +913,26 @@ function queueFrom(counted) {
  * any instant is harmless.
  */
 export async function buildQueue() {
+  // **Stored membership first, and it is nearly always there.** Enumeration is
+  // cheap against a size pass but it is not free — a mailbox with 47,000
+  // messages in Trash is about 600 quota units and several seconds of listing —
+  // and this runs on *every* wake. Chrome ends an idle worker after ~30 seconds
+  // and the pacer leaves ~11 between batches, so a long pass is resumed by its
+  // alarm many times over, each resume paying for a full re-listing of a mailbox
+  // the panel enumerated minutes ago and wrote to disk.
+  //
+  // Nothing is lost by reading it back. Membership *is* the last enumeration's
+  // output, `syncHistory` keeps it patched on every open, and mail that arrived
+  // since is handed to the worker directly by `measureNewMail` rather than
+  // waiting to be discovered here.
+  await restoreMembership();
+  if (counts.size) {
+    trace('measure', 'queue rebuilt from stored membership — nothing listed', {
+      rows: counts.size,
+    });
+    return queueFrom(counts).order;
+  }
+
   const groups = buildGroups(await listLabels());
   return queueFrom(await enumerateRows(groups)).order;
 }
@@ -758,6 +1030,13 @@ export async function collect(groups, hooks = {}) {
 
   // A stopped enumeration is partial, and partial membership is worse than
   // none: it would drop ids for every row it did not reach.
+  //
+  // Held as a promise because the band pass below re-saves the same ids with the
+  // estimates it works out, and two unordered writes of one key can land in
+  // either order — the wrong one dropping the estimates a moment after they were
+  // written.
+  let membershipSaved = Promise.resolve();
+
   if (!stopped()) {
     // Available to a drill-down from here on, before sizes are in: the ids are
     // final, only what is known about each message is still filling in.
@@ -765,7 +1044,7 @@ export async function collect(groups, hooks = {}) {
     // This enumeration is Gmail's own answer, so it supersedes anything an
     // action projected before it ran.
     patched = new Set();
-    void bookmarkAt.then((historyId) => {
+    membershipSaved = bookmarkAt.then((historyId) => {
       trace('listing', 'enumerated every row', {
         rows: counted.size,
         messages: [...counted.values()].reduce((sum, ids) => sum + ids.length, 0),
@@ -801,16 +1080,75 @@ export async function collect(groups, hooks = {}) {
   tally(counted, records);
 
   const outstanding = order.filter((id) => !isMeasured(id)).length;
+
+  // **This one is load-bearing where it stands.** The first `onSizes` is the
+  // moment enumeration is finished, and the panel takes it as the signal that
+  // its counts are final — it stamps the timestamp and writes the snapshot on
+  // it. The band pass below is another twenty seconds of listing, and delaying
+  // this by that long would hold back numbers that are already right.
   hooks.onSizes?.(snapshot(records), 0, outstanding);
 
+  // ── Sizes, the cheap half ──────────────────────────────────────
+  //
+  // A figure on every row in seconds, from listings rather than from reading
+  // mail — see `readBands`. It runs *after* the tally so it can skip whatever
+  // the cache already answers for, and before the real pass so there is
+  // something on screen for the hours that one can take. It changes nothing
+  // about that pass: every message is still read, because the sender and the
+  // date come back with the size and exist nowhere else.
+  if (outstanding && !stopped()) {
+    try {
+      await readBands(groups, counted, records, stopped);
+      tally(counted, records);
+      hooks.onSizes?.(snapshot(records), 0, outstanding);
+
+      // Re-saved because the estimates ride with the ids, and the ids were
+      // written before this ran. Chained onto that write rather than racing it.
+      // Without it a panel reopened before the pass ends goes back to spinners
+      // over rows it had a figure for.
+      if (!stopped()) {
+        membershipSaved = membershipSaved.then(() => saveMembership(counted));
+        void membershipSaved;
+      }
+    } catch (err) {
+      if (err instanceof AuthError) throw err;
+      // The rows simply spin until the real pass reaches them, which is what
+      // they did before any of this existed.
+      console.warn('[MailBoy] could not size the rows from bands:', err);
+    }
+  }
+
   if (outstanding && hooks.measure && !stopped()) {
+    let refilledAt = Date.now();
+
     await hooks.measure(order, (found, done, total) => {
       for (const [id, bytes] of found) {
         for (const rowId of owners.get(id) ?? []) {
           records[rowId].bytes += bytes;
           records[rowId].pending--;
+          // A real size has replaced an estimated one, so the row is owed one
+          // message less of estimate. Recomputed from what is left rather than
+          // subtracted, which keeps it exactly what `figuresFor` would say and
+          // lands on zero at the same moment `pending` does.
+          records[rowId].estimated = estimateFor(rowId, records[rowId].pending);
         }
       }
+
+      // **A pass this panel did not start never reports what it read before the
+      // panel connected**, and the worker's queue is shared — so those rows would
+      // sit short until the pass ended, which on a large mailbox is hours. The
+      // cache is where that work actually is, so it is re-read as the pass runs
+      // rather than only on the way out. `refill` rather than `tally`, because a
+      // cache behind the port must not un-measure a row. Not awaited: this is the
+      // hot path, and the next batch reports whatever it lands.
+      if (Date.now() - refilledAt > REFILL_MS) {
+        refilledAt = Date.now();
+        void reloadMessages().then(() => {
+          refill(counted, records);
+          hooks.onSizes?.(snapshot(records), done, total);
+        });
+      }
+
       hooks.onSizes?.(snapshot(records), done, total);
     });
 
@@ -831,8 +1169,16 @@ export async function collect(groups, hooks = {}) {
   return snapshot(records, true);
 }
 
-/** One row's number and size, and how much of it is still unread. */
-function figuresFor(ids) {
+/**
+ * One row's number and size, and how much of it is still unread.
+ *
+ * `bytes` is only ever mail that has actually been read, and `estimated` is what
+ * the band pass says the rest is worth. Kept apart rather than summed because
+ * the caller has to be able to say which it is showing — and because the running
+ * pass adds real sizes into `bytes` as they land, which would double-count
+ * anything already folded into the same figure.
+ */
+function figuresFor(ids, rowId) {
   let bytes = 0;
   let pending = 0;
   for (const id of ids) {
@@ -840,12 +1186,41 @@ function figuresFor(ids) {
     if (size === undefined) pending++;
     else bytes += size;
   }
-  return { count: ids.length, bytes, pending };
+  return { count: ids.length, bytes, pending, estimated: estimateFor(rowId, pending) };
+}
+
+/** What the band pass says a row's unread mail is worth. Zero where it has none. */
+function estimateFor(rowId, pending) {
+  if (!pending) return 0;
+  return Math.round(pending * (estimates.get(rowId) ?? 0));
 }
 
 /** Per-row size and how much of it is still unread, straight from the cache. */
 function tally(counted, records) {
-  for (const [rowId, ids] of counted) Object.assign(records[rowId], figuresFor(ids));
+  for (const [rowId, ids] of counted) Object.assign(records[rowId], figuresFor(ids, rowId));
+}
+
+/**
+ * Fold the cache back into the running totals, keeping whichever knows more.
+ *
+ * `tally` replaces a row outright, which is right before a pass starts and right
+ * once one has ended — and wrong in the middle of one, because the worker flushes
+ * to disk on its own schedule and the cache can therefore be *behind* sizes it
+ * has already reported over the port. Replacing a row from a cache that is behind
+ * puts a spinner back over a figure, which is the one thing a re-read must never
+ * do.
+ *
+ * Fewer pending is the test for which knows more: it only ever falls, so this is
+ * monotone whichever order the two sources arrive in.
+ */
+function refill(counted, records) {
+  for (const [rowId, ids] of counted) {
+    const record = records[rowId];
+    if (!record) continue;
+
+    const fresh = figuresFor(ids, rowId);
+    if (fresh.pending < (record.pending ?? Infinity)) Object.assign(record, fresh);
+  }
 }
 
 /** Records get rendered and cached, so hand out copies rather than live state. */
@@ -855,7 +1230,7 @@ function snapshot(records, settled = false) {
   // takes. Re-derive those few rows rather than repaint mail where it is not.
   for (const rowId of patched) {
     const ids = counts.get(rowId);
-    if (ids && records[rowId]) Object.assign(records[rowId], figuresFor(ids));
+    if (ids && records[rowId]) Object.assign(records[rowId], figuresFor(ids, rowId));
   }
 
   const out = {};
