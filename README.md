@@ -7,6 +7,8 @@ mess coming back — a few clicks each, in bulk.
 Everything runs in your browser. There is no MailBoy server, and no mailbox data
 ever leaves your machine.
 
+**[Add MailBoy to Chrome](https://chromewebstore.google.com/detail/mailboy/mmdnbdmdmagefjpllaldgcklmikbjeem)**
+
 ## What it does
 
 **Clear out in bulk.** Tick the senders filling a folder — or individual emails
@@ -97,8 +99,8 @@ widest Google publishes — is deliberately never requested.
 
 ## Setup
 
-MailBoy is not on the Chrome Web Store yet, so it is loaded unpacked and you
-supply your own Google OAuth client. Roughly ten minutes.
+To run MailBoy from source, load it unpacked and supply your own Google OAuth
+client. Roughly ten minutes.
 
 ### 1. A Google Cloud OAuth client
 
@@ -257,6 +259,59 @@ that fail quietly — which sync path an open took, why one was refused, whether
 an action settled locally. Filter the console by `open`, `sync`, `listing`,
 `action`, `bookmark`, `measure`, `snapshot`, `job` or `rules`.
 
+Tracing stays on in published builds, so a user reporting a problem can send
+the console output. That is safe only because trace lines carry ids and counts,
+never an address, a subject or a name — keep it that way. There are two
+consoles to ask for: the side panel's (right-click inside the panel →
+**Inspect** → **Console**) and the background worker's (`chrome://extensions` →
+**Developer mode** → **service worker** under MailBoy).
+
+### Releasing
+
+The Web Store zip is built by `tools/package.ps1`. It packs an explicit list of
+files — never the whole folder — uses `manifest.template.json` (the store
+refuses a manifest with a `"key"`), and writes `dist/mailboy-<version>.zip`.
+`dist/` is gitignored; it only ever holds build output and can be deleted.
+
+```powershell
+powershell -File tools\package.ps1
+```
+
+Locally it uses your `src/config.js`. Given `-ClientId` or a
+`MAILBOY_CLIENT_ID` environment variable, it generates `src/config.js` from
+`src/config.example.js` instead, which is how CI builds it.
+
+**GitHub Action.** `.github/workflows/package.yml` runs the same script,
+after syntax-checking every `.js` file. One-time setup: in the repository's
+**Settings → Secrets and variables → Actions**, add a secret named
+`MAILBOY_CLIENT_ID` holding the client ID from your `src/config.js`.
+
+To release a new version:
+
+1. Raise `"version"` in `manifest.template.json` and in your local
+   `manifest.json`. The store rejects an upload that is not higher than the live
+   version.
+2. Commit and push.
+3. Tag that commit with the same version and push the tag:
+
+   ```powershell
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+   The workflow fails if the tag and the manifest version disagree. It can also
+   be started by hand from the **Actions** tab, without a tag.
+4. Open the finished run under **Actions** and download the zip from its
+   **Artifacts** section (kept 30 days). GitHub delivers it wrapped in a second
+   zip — extract that once, and upload the `mailboy-<version>.zip` inside.
+5. In the [Developer Dashboard](https://chrome.google.com/webstore/devconsole),
+   open MailBoy → **Package** → **Upload new package**, update the listing if
+   the release needs it, and **Submit for review**. Existing users receive the
+   update automatically once it is approved.
+
+If a release adds a permission or an OAuth scope, review takes longer and
+existing users are asked to accept it before the update enables.
+
 ### Icons
 
 **There is no icon font.** Every glyph is inline SVG drawn in a 16-unit
@@ -288,13 +343,11 @@ The other files there are unused drafts kept for reference.
 
 ## Status
 
-Pre-release, and honest about it. The half that works out what to clear —
-counting, measuring, sender breakdowns — runs against a real mailbox. The half
-that does the clearing does not yet: the bulk move and trash jobs, rules and
-Block, and partial permission grants have all been built and reviewed without
-being exercised end to end against a real account. Nothing MailBoy does is
-unrecoverable — everything it removes goes to Trash — but the destructive paths
-are not yet proven, so treat them with that in mind.
+Published on the
+[Chrome Web Store](https://chromewebstore.google.com/detail/mailboy/mmdnbdmdmagefjpllaldgcklmikbjeem)
+and in active development. Nothing MailBoy does is unrecoverable: everything it
+removes goes to Trash, where Gmail keeps it for 30 days. If something does not
+behave as described, please open an issue.
 
 Chrome 114 or newer.
 

@@ -8,6 +8,7 @@ manifest.json
 *.zip
 *.crx
 *.pem
+dist/
 
 # Working notes for AI coding assistants. Untracked today; delete this line if
 # you decide to publish them.

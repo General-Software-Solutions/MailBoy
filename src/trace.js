@@ -9,7 +9,9 @@
 // not written to disk (see CLAUDE.md, *What is on disk*) and they should not be
 // written to a console either.
 //
-// Turn this off before publishing.
+// Left on in published builds, deliberately: when a user reports a problem, the
+// console is what they can send back. That only stays acceptable while the rule
+// above holds, so a trace line must never carry an address, a subject or a name.
 
 const TRACE = true;
 
