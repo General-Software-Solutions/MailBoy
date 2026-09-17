@@ -10,6 +10,17 @@
 // registered against it.
 export const CLIENT_ID = 'YOUR_CLIENT_ID.apps.googleusercontent.com';
 
+// Where this machine keeps the private key that signs the .crx, if the store
+// item has verified CRX uploads switched on. Optional: without it
+// tools/package.ps1 still builds the zip, and an unsigned .crx beside it.
+//
+// tools/package.ps1 reads this and then cuts it out of the config it packs, so
+// the path never ships. Keep it to a single `export const` statement or that
+// removal misses it and the build stops. The key itself belongs outside the
+// repo; -KeyPath and MAILBOY_CRX_KEY_PATH override this.
+//
+// export const CRX_KEY_PATH = 'C:\\Users\\you\\keys\\mailboy-upload.pem';
+
 // gmail.modify is what creating and deleting folders costs. It covers every
 // read/write operation *except* permanent deletion — mail it removes goes to
 // Trash and can be recovered, which is the whole reason not to reach for

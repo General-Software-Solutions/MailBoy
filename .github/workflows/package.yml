@@ -1,12 +1,25 @@
-# Builds the Chrome Web Store zip. Push a tag matching the manifest version
-# (git tag v0.2.0 && git push origin v0.2.0), or run it by hand from the
-# Actions tab, then download the zip from the run's Artifacts and upload it in
-# the Developer Dashboard.
+# Builds the Chrome Web Store zip and the signed .crx. Push a tag matching the
+# manifest version (git tag v0.2.0 && git push origin v0.2.0), or run it by hand
+# from the Actions tab, then download the package from the run's Artifacts and
+# upload it in the Developer Dashboard.
 #
-# Needs one repository secret, MAILBOY_CLIENT_ID: the OAuth client ID that
-# src/config.js holds locally. The client ID is not a credential in the
-# password sense, since it ships inside the package. It stays out of the repo
-# because a copied client ID routes sign-ins through this project (see README).
+# Two repository secrets:
+#
+#   MAILBOY_CLIENT_ID  the OAuth client ID that src/config.js holds locally. Not
+#                      a credential in the password sense, since it ships inside
+#                      the package; it stays out of the repo because a copied
+#                      client ID routes sign-ins through this project (README).
+#   MAILBOY_MANIFEST_KEY  the manifest "key" from your local manifest.json, which
+#                      is a *public* key. Optional, and only for the extra
+#                      "-dev-unpacked-only" zip: a build without it gets an
+#                      extension ID nobody registered a redirect URI for, so it
+#                      cannot sign in. It never goes near the store zip.
+#   MAILBOY_CRX_KEY    the whole PEM private key that signs the .crx, for a store
+#                      item with verified CRX uploads on. Optional: without it
+#                      the run still builds the zip and an unsigned .crx beside
+#                      it. This one *is* a credential — anything that can read it
+#                      can sign a release, so signing locally instead is the
+#                      safer arrangement (README).
 
 name: Package extension
 
@@ -34,7 +47,8 @@ jobs:
       - name: Syntax-check every script
         run: |
           $failed = $false
-          Get-ChildItem -Recurse -Filter *.js -Path . |
+          Get-ChildItem -Recurse -File -Path . |
+            Where-Object { $_.Extension -in '.js', '.mjs' } |
             Where-Object { $_.FullName -notmatch '[\\/](\.git|node_modules)[\\/]' } |
             ForEach-Object {
               node --check $_.FullName
@@ -52,21 +66,105 @@ jobs:
             exit 1
           }
 
-      - name: Build the zip
+      # The key goes to a file under RUNNER_TEMP rather than into the workspace,
+      # so nothing can sweep it into the package. Read from the environment, not
+      # interpolated into the script, so its contents are never part of a
+      # command line. The runner is thrown away after the job; it is deleted
+      # anyway, since "the machine disappears" is not a thing to rely on.
+      # No `if:` on the step, because the secrets context cannot be read from
+      # one. An absent secret leaves the output empty, which package.ps1 reads
+      # as no key and says so in the build log.
+      - name: Take out the signing key
+        id: key
+        env:
+          MAILBOY_CRX_KEY: ${{ secrets.MAILBOY_CRX_KEY }}
+        run: |
+          if (-not $env:MAILBOY_CRX_KEY) {
+            Write-Host 'No MAILBOY_CRX_KEY secret; the crx will be unsigned.'
+            exit 0
+          }
+          $path = Join-Path $env:RUNNER_TEMP 'mailboy-upload.pem'
+          [System.IO.File]::WriteAllText($path, $env:MAILBOY_CRX_KEY)
+          "path=$path" >> $env:GITHUB_OUTPUT
+
+      # The secret holds the key itself; the script wants the path to it, which
+      # is what the step above wrote. Passed as an environment variable rather
+      # than as -KeyPath, because an absent secret makes it empty and an empty
+      # string is not a value a parameter can take in every calling convention.
+      - name: Build the zip and the crx
         id: build
         env:
           MAILBOY_CLIENT_ID: ${{ secrets.MAILBOY_CLIENT_ID }}
+          MAILBOY_MANIFEST_KEY: ${{ secrets.MAILBOY_MANIFEST_KEY }}
+          MAILBOY_CRX_KEY_PATH: ${{ steps.key.outputs.path }}
         run: |
-          ./tools/package.ps1 -OutDir dist
+          ./tools/package.ps1 -OutDir dist -Dev
           $version = (Get-Content -Raw manifest.template.json | ConvertFrom-Json).version
           "zip=dist/mailboy-$version.zip" >> $env:GITHUB_OUTPUT
 
-      # archive: false uploads the zip as it is. Without it GitHub wraps the
+      - name: Put the signing key back
+        if: always()
+        run: Remove-Item (Join-Path $env:RUNNER_TEMP 'mailboy-upload.pem') -ErrorAction Ignore
+
+      # The build's own messages are inside a collapsed step log, which is not
+      # where anyone looks. A notice is a banner on the run page and the summary
+      # is a panel on it, so what was built and what to upload is the first
+      # thing visible. Notices rather than warnings: a missing optional secret
+      # is a choice, and a run full of yellow stops meaning anything.
+      - name: Say what was built
+        run: |
+          $version = (Get-Content -Raw manifest.template.json | ConvertFrom-Json).version
+          $signed = Test-Path "dist/mailboy-$version.crx"
+          $unsigned = Test-Path "dist/mailboy-${version}_unsigned.crx"
+          $dev = Test-Path "dist/mailboy-$version-dev-unpacked-only.zip"
+          $tick = { param($yes) if ($yes) { 'yes' } else { 'no' } }
+
+          $summary = @(
+            "## MailBoy $version"
+            ''
+            '| artifact | built | what it is for |'
+            '| --- | --- | --- |'
+            "| ``mailboy-$version.zip`` | yes | upload, unless verified CRX uploads are on |"
+            "| ``mailboy-$version.crx`` | $(& $tick $signed) | upload when verified CRX uploads are on |"
+            "| ``mailboy-${version}_unsigned.crx`` | $(& $tick $unsigned) | **not uploadable** - signed with a throwaway key |"
+            "| ``mailboy-$version-dev-unpacked-only.zip`` | $(& $tick $dev) | **never upload** - load unpacked to test this build |"
+          )
+          if (-not $signed) {
+            $summary += '', 'No `MAILBOY_CRX_KEY` secret, so the crx is signed with a throwaway key. Upload the zip, or sign locally.'
+            Write-Host '::notice title=The crx is not signed::Set the MAILBOY_CRX_KEY secret to sign it, or sign locally. Upload the zip meanwhile.'
+          }
+          if (-not $dev) {
+            $summary += '', 'No `MAILBOY_MANIFEST_KEY` secret, so there is no build you can load unpacked: one without the manifest key gets an unregistered extension ID and cannot sign in.'
+            Write-Host '::notice title=No dev zip::Set the MAILBOY_MANIFEST_KEY secret (the "key" from your local manifest.json) to get a build you can load unpacked and sign in with.'
+          }
+          $summary -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
+      # archive: false uploads the file as it is. Without it GitHub wraps the
       # artifact in a zip of its own, and the store wants the inner one. The
-      # artifact is then named after the file, and `name` is ignored.
+      # artifact is then named after the file, and `name` is ignored — which is
+      # also why the zip and the crx are two steps rather than one glob.
       - uses: actions/upload-artifact@v7
         with:
           path: ${{ steps.build.outputs.zip }}
           archive: false
           if-no-files-found: error
+          retention-days: 30
+
+      # dist/*.crx, because the name says whether it was signed: mailboy-<v>.crx
+      # when the secret was there, mailboy-<v>_unsigned.crx when it was not.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/*.crx
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      # For loading this build unpacked, never for upload. Absent whenever the
+      # MAILBOY_MANIFEST_KEY secret is not set, which is a choice rather than a
+      # fault — hence ignore, not warn. The build log says it was skipped.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/*-dev-unpacked-only.zip
+          archive: false
+          if-no-files-found: ignore
           retention-days: 30

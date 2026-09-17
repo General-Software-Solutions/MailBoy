@@ -268,10 +268,12 @@ consoles to ask for: the side panel's (right-click inside the panel →
 
 ### Releasing
 
-The Web Store zip is built by `tools/package.ps1`. It packs an explicit list of
-files — never the whole folder — uses `manifest.template.json` (the store
-refuses a manifest with a `"key"`), and writes `dist/mailboy-<version>.zip`.
-`dist/` is gitignored; it only ever holds build output and can be deleted.
+The Web Store package is built by `tools/package.ps1`. It packs an explicit list
+of files — never the whole folder — uses `manifest.template.json` (the store
+refuses a manifest with a `"key"`), and writes two files into `dist/`:
+`mailboy-<version>.zip`, and `mailboy-<version>.crx`, which is that same zip
+signed. `dist/` is gitignored; it only ever holds build output and can be
+deleted.
 
 ```powershell
 powershell -File tools\package.ps1
@@ -282,8 +284,8 @@ Locally it uses your `src/config.js`. Given `-ClientId` or a
 `src/config.example.js` instead, which is how CI builds it.
 
 **GitHub Action.** `.github/workflows/package.yml` runs the same script,
-after syntax-checking every `.js` file. One-time setup: in the repository's
-**Settings → Secrets and variables → Actions**, add a secret named
+after syntax-checking every `.js` and `.mjs` file. One-time setup: in the
+repository's **Settings → Secrets and variables → Actions**, add a secret named
 `MAILBOY_CLIENT_ID` holding the client ID from your `src/config.js`.
 
 To release a new version:
@@ -301,9 +303,13 @@ To release a new version:
 
    The workflow fails if the tag and the manifest version disagree. It can also
    be started by hand from the **Actions** tab, without a tag.
-4. Open the finished run under **Actions** and download the zip from its
-   **Artifacts** section (kept 30 days). It is `mailboy-<version>.zip` itself,
-   ready to upload — do not extract it.
+4. Open the finished run under **Actions**. Its summary page lists what was
+   built and which file to upload, and says so again as a notice when an
+   optional secret is missing. Download from **Artifacts** (kept 30 days):
+   upload the `.crx` if verified CRX uploads are on for the item, the `.zip`
+   otherwise; neither needs extracting. The third artifact,
+   `-dev-unpacked-only`, is for testing the build and must not be uploaded —
+   see below.
 5. In the [Developer Dashboard](https://chrome.google.com/webstore/devconsole),
    open MailBoy → **Package** → **Upload new package**, update the listing if
    the release needs it, and **Submit for review**. Existing users receive the
@@ -311,6 +317,128 @@ To release a new version:
 
 If a release adds a permission or an OAuth scope, review takes longer and
 existing users are asked to accept it before the update enables.
+
+### Testing a build before uploading it
+
+**A packaged build cannot sign in, and that is not a fault.** The extension ID
+comes from the `key` in the manifest, and the redirect URI registered with
+Google is `https://<that id>.chromiumapp.org/`. `manifest.template.json` carries
+no key, because the store refuses an upload that has one — so a package loaded
+straight from CI gets an ID derived from wherever it happens to sit, Google sees
+a redirect URI it has never heard of, and the sign-in fails with **"Access
+blocked: This app's request is invalid"**. Publishing is unaffected: the store
+re-signs under your registered key and users get the right ID.
+
+For everyday work, load the repository folder itself — that is what its
+gitignored `manifest.json` with the key is for. To test a *packaged* build,
+`-Dev` writes a second zip beside the store one with the key put back:
+
+```powershell
+powershell -File tools\package.ps1 -Dev
+```
+
+That produces `dist/mailboy-<version>-dev-unpacked-only.zip`. Extract it, load
+it with **Load unpacked**, and sign-in works because the ID matches. The name is
+the whole warning: **never upload it.** The store rejects a manifest with a key,
+so a slip fails loudly rather than shipping something odd.
+
+**Where that key comes from.** It is the `"key"` line in your local
+`manifest.json`, the one taken from the Web Store draft when the item was first
+created — a *public* key, and the same one that fixes the extension ID. It is
+not the crx signing key further down, and there is no way to derive one from the
+other. `manifest.json` is gitignored, so a CI runner has never seen it.
+
+The build takes the first of these it finds:
+
+| | |
+|---|---|
+| `-ManifestKey <base64>` | a one-off |
+| `MAILBOY_MANIFEST_KEY` environment variable | what CI sets, from the secret |
+| the `"key"` in `manifest.json` | your machine, needing no setup |
+
+**For CI**, add a repository secret named `MAILBOY_MANIFEST_KEY`. Print the
+value with:
+
+```powershell
+(Get-Content -Raw manifest.json | ConvertFrom-Json).key | Set-Clipboard
+```
+
+Paste it as it is: one long base64 line, no quotes, no `"key":` prefix. Being a
+public key, a repository *variable* would serve as well; a secret just keeps it
+out of the logs.
+
+**With no key the dev zip is simply not built**, and the log says so. The two
+artifacts that get uploaded do not depend on it, so nothing is treated as a
+failure.
+
+### Verified CRX uploads
+
+This is a store setting that decides **who may publish an update**, and it is
+worth switching on. Without it, anything that can reach the developer account
+can ship a new version to every user — and MailBoy holds `gmail.modify`, so a
+hijacked update could read, move or trash their mail. With it on, the store
+accepts only a `.crx` signed with a key that lives on your machine, and an
+account on its own is not enough.
+
+It changes nothing for users. The store re-signs the package with its own key on
+the way out, so the extension ID and the manifest `key` stay exactly as they are.
+
+**Generate the key once**, outside the repository so it cannot be committed. Git
+for Windows ships OpenSSL, which is why the path below is spelled out:
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\keys" | Out-Null
+& "C:\Program Files\Git\usr\bin\openssl.exe" genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$HOME\keys\mailboy-upload.pem"
+& "C:\Program Files\Git\usr\bin\openssl.exe" pkey -in "$HOME\keys\mailboy-upload.pem" -pubout
+```
+
+`genpkey` rather than `genrsa` because it always writes PKCS#8, the form
+everything here reads. The second command prints the public half: paste all of
+it, `BEGIN` and `END` lines included, into the dashboard's **Package** page.
+
+**Back the private key up somewhere off this machine.** Losing it means no
+further updates until store support resets the registered key.
+
+Then tell the build where it is, in `src/config.js` — the file that is already
+local to one machine and already gitignored:
+
+```js
+export const CRX_KEY_PATH = 'C:\\Users\\you\\keys\\mailboy-upload.pem';
+```
+
+`src/config.js` *ships inside the package*, so `package.ps1` reads that export
+and then cuts it back out of the copy it packs — a build path names whoever
+built it, and users have no use for it. Keep it to one `export const`
+statement: the build stops rather than shipping a path it could not remove.
+
+There are three ways to name the key and the build takes the first that exists:
+`-KeyPath` on the command line, then the `MAILBOY_CRX_KEY_PATH` environment
+variable, then that export. All three hold a *path*; the repository secret
+further down is the one place that holds the key itself.
+
+**Without a key the build still produces a `.crx`**, signed with a throwaway key
+and named `mailboy-<version>_unsigned.crx`. It installs in Chrome for testing
+and the store will refuse it once verification is on — the name is the warning,
+and the build says so as well.
+
+**Signing in CI is the weaker arrangement**, and the workflow supports it
+anyway. Add a repository secret named `MAILBOY_CRX_KEY` holding the whole
+contents of the `.pem` — every line from `-----BEGIN PRIVATE KEY-----` to
+`-----END PRIVATE KEY-----`, and no quotes around it. The run writes that to a
+file outside the workspace, hands the build its path, and deletes it. The
+tradeoff is plain: a key GitHub can read is a key a compromised GitHub account
+can sign with, which gives back some of what the setting bought. Signing locally
+keeps the key on one machine. Leave the secret unset and CI builds the unsigned
+crx beside the zip, which is still the file to upload when verification is off.
+
+**How the signing works**, since it is unusual: `tools/crx.mjs` wraps the zip
+that was just built in a CRX3 container using nothing but Node's own crypto.
+Chrome's `--pack-extension` is the documented route and is not used here, for
+two reasons — it packs a *directory*, so the zip and the crx would be two
+separate acts of packing that could disagree, and it wants a display, which a
+Linux CI runner has not got. Signing the finished zip keeps the two byte for
+byte identical. The output was checked against a crx Chrome packed from the same
+key: same header, field for field, differing only in the 256 signature bytes.
 
 ### Icons
 
