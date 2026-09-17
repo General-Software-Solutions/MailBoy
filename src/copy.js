@@ -292,6 +292,7 @@ export const COPY = {
   actions: {
     move: 'Move',
     block: 'Block',
+    spam: 'Spam',
     delete: 'Delete',
     restore: 'Restore',
     thisFolder: 'this folder',
@@ -318,6 +319,16 @@ export const COPY = {
     confirm: 'Move to Trash',
     done: (n) => `${emails(n)} moved to Trash.`,
     someStuck: (n) => `${n.toLocaleString()} could not be moved.`,
+  },
+
+  // Spam is a move with one fixed destination, so it says what a move says —
+  // the mail leaves every folder it is in — plus the one thing only Spam does.
+  spam: {
+    verb: 'Move',
+    where: 'to Spam',
+    text: (line) =>
+      `${line} They leave every folder they are in now. Gmail deletes spam for good after 30 days.`,
+    confirm: 'Move to Spam',
   },
 
   restore: {
@@ -354,6 +365,9 @@ export const COPY = {
     trashHint:
       'This only affects mail that arrives from now on. It goes straight to ' +
       'Trash, and Gmail deletes trashed mail for good after 30 days.',
+    spamHint:
+      'This only affects mail that arrives from now on. It goes straight to ' +
+      'Spam, and Gmail deletes spam for good after 30 days.',
     domainWarning: 'This includes senders you have never had mail from.',
     // A sender goes to one folder, so making this rule takes it off any other.
     // Deliberately generic: the dialog has not read your rules and does not know
@@ -403,6 +417,7 @@ export const COPY = {
     blockedBeforeIcon: ' (',
     blockedAfterIcon: ' Blocked mails)',
     trash: 'Trash',
+    spam: 'Spam',
     orphan: 'a deleted folder',
     orphanWhy: 'This folder was deleted. Remove the rule to tidy up.',
     readingFolders: 'Reading your folders…',

@@ -156,6 +156,7 @@ const el = {
   selectAll: document.getElementById('select-all'),
   move: document.getElementById('btn-move'),
   block: document.getElementById('btn-block'),
+  spam: document.getElementById('btn-spam'),
   trash: document.getElementById('btn-trash'),
   restore: document.getElementById('btn-restore'),
   permissionDialog: document.getElementById('permission-dialog'),
@@ -218,6 +219,7 @@ const el = {
   mailSelectionSummary: document.getElementById('mail-selection-summary'),
   mailMove: document.getElementById('btn-mail-move'),
   mailBlock: document.getElementById('btn-mail-block'),
+  mailSpam: document.getElementById('btn-mail-spam'),
   mailTrash: document.getElementById('btn-mail-trash'),
   mailRestore: document.getElementById('btn-mail-restore'),
   mails: document.getElementById('mails'),
@@ -233,6 +235,7 @@ const el = {
   messageScope: document.getElementById('message-scope'),
   messageMove: document.getElementById('btn-message-move'),
   messageBlock: document.getElementById('btn-message-block'),
+  messageSpam: document.getElementById('btn-message-spam'),
   messageTrash: document.getElementById('btn-message-trash'),
   messageRestore: document.getElementById('btn-message-restore'),
   messageView: document.getElementById('message-view'),
@@ -338,12 +341,15 @@ async function refreshCapabilities() {
 const GATED = {
   write: () => [
     el.move,
+    el.spam,
     el.trash,
     el.restore,
     el.mailMove,
+    el.mailSpam,
     el.mailTrash,
     el.mailRestore,
     el.messageMove,
+    el.messageSpam,
     el.messageTrash,
     el.messageRestore,
   ],
@@ -1075,9 +1081,17 @@ function paintProgress() {
 
 /**
  * Seconds left at the rate this run has actually achieved, or null while that
- * is still guesswork. Measured rather than predicted: the quota ceiling puts a
- * floor near 50 messages a second, but latency, retries and how much was
- * already cached all move it.
+ * is still guesswork.
+ *
+ * **Measured rather than predicted.** The quota ceiling caps the rate at
+ * `messages.get`'s 20 units against 6,000 a minute — 300 messages a minute, of
+ * which the pacer takes 90%, so **4.5 a second** — but latency and retries hold
+ * a real run somewhat under that, and only the run itself knows by how much. A
+ * figure derived from the ceiling would therefore always read optimistically.
+ *
+ * That 4.5 is also the floor on the *time*: an estimate materially shorter than
+ * `(total - done) / 4.5` means the pass is spending above what it books, which
+ * is the fault decision 47 traces every "quota exceeded" back to.
  */
 function secondsRemaining({ done, total, startedAt, startDone }) {
   const elapsed = (Date.now() - startedAt) / 1000;
@@ -1453,6 +1467,7 @@ function paintSelection() {
   // one button in this product, and adding a second is a bigger change than
   // adding a button.
   el.block.hidden = inTrash;
+  el.spam.hidden = hideSpam();
   el.trash.hidden = inTrash;
 
   // A picker left open goes off screen with its trigger, and would come back
@@ -1893,6 +1908,7 @@ function paintMailSelection() {
   el.mailRestore.hidden = !inTrash;
   el.mailMove.hidden = inTrash;
   el.mailBlock.hidden = inTrash;
+  el.mailSpam.hidden = hideSpam();
   el.mailTrash.hidden = inTrash;
 
   // A picker left open goes off screen with its trigger.
@@ -2213,7 +2229,16 @@ function paintMessageActions() {
   el.messageRestore.hidden = !inTrash;
   el.messageMove.hidden = inTrash;
   el.messageBlock.hidden = inTrash;
+  el.messageSpam.hidden = hideSpam();
   el.messageTrash.hidden = inTrash;
+}
+
+/**
+ * Spam is offered wherever Move is, except in Spam itself — the mail is already
+ * there, and a move to where it sits would be a button that does nothing.
+ */
+function hideSpam() {
+  return openLabel?.id === 'TRASH' || openLabel?.id === 'SPAM';
 }
 
 function messageLine(text, className) {
@@ -3272,13 +3297,18 @@ function dispatchBulk(job, { action, target }) {
  * of them. Without it the emphasised middle of a rule dialog would read "3
  * emails", which is precisely what a rule delete does *not* touch.
  *
- * `rule` turns on the pair of rule boxes, and only Delete passes it: a rule that
+ * `rule` turns on the rule boxes, and only Delete and Spam pass it: a rule that
  * restored future mail would mean nothing, and the dialog is also what confirms
  * deleting rules themselves, where offering to make one would be absurd. The
  * boxes are reset on every open regardless, so a dialog that does not ask for
  * them cannot inherit a tick from one that did.
  *
+ * `ruleTarget` says where those rules send mail. Trash unless told otherwise,
+ * since Delete was the first to use the boxes here.
+ *
  * @param {{senders: string[], subject: string | null} | null} [rule]
+ * @param {{id: string, to: string, hint: string, senderChecked?: boolean}} [ruleTarget]
+ *   `senderChecked` starts the sender box ticked
  * @returns {Promise<{ok: boolean, specs: object[]}>} `specs` is what the boxes
  *   were asking for at the moment the button was pressed — read here rather than
  *   by the caller afterwards, so nothing can come between the click and the read.
@@ -3292,6 +3322,7 @@ function askConfirm({
   button,
   destructive = false,
   rule = null,
+  ruleTarget = trashRuleTarget(),
 }) {
   // showModal throws on an already-open dialog, which a second click would be.
   if (el.confirmDialog.open) return Promise.resolve({ ok: false, specs: [] });
@@ -3300,6 +3331,7 @@ function askConfirm({
   // is asking for. Null on a dialog that offers no rules, which is what keeps
   // the hint off there.
   confirmRule = rule;
+  confirmRuleTarget = ruleTarget;
 
   el.confirmVerb.textContent = verb;
   el.confirmCount.textContent = countText ?? emails(count);
@@ -3309,9 +3341,11 @@ function askConfirm({
   el.confirmOk.classList.toggle('dialog-destructive', destructive);
 
   resetRuleBoxes(TRASH_RULE_BOXES);
-  if (rule) {
-    paintRuleBoxes(TRASH_RULE_BOXES, rule, { to: COPY.rules.trash, hint: COPY.ruleBoxes.trashHint });
-  }
+  // Set after the reset, on every open, so the default is a decision this dialog
+  // makes rather than something left over from the last one. A hidden box is
+  // never read, so ticking it where there is no sender asks for nothing.
+  TRASH_RULE_BOXES.sender().checked = Boolean(ruleTarget.senderChecked);
+  if (rule) paintRuleBoxes(TRASH_RULE_BOXES, rule, ruleTarget);
 
   // Escape leaves the previous choice in place, so a second open would read as
   // a confirmation of the first.
@@ -3324,7 +3358,7 @@ function askConfirm({
         const ok = el.confirmDialog.returnValue === 'go';
         resolve({
           ok,
-          specs: ok && rule ? ruleSpecs(TRASH_RULE_BOXES, rule, 'TRASH') : [],
+          specs: ok && rule ? ruleSpecs(TRASH_RULE_BOXES, rule, ruleTarget.id) : [],
         });
       },
       { once: true }
@@ -3343,6 +3377,29 @@ function askConfirm({
  * @type {{senders: string[], subject: string | null} | null}
  */
 let confirmRule = null;
+
+/**
+ * Where the open confirm dialog's rules would send mail — the destination id,
+ * and how the boxes and their hint name it. Held beside `confirmRule` so a
+ * ticked box repaints its hint in the right words.
+ *
+ * Functions rather than constants so `askConfirm`'s default parameter can use
+ * one without depending on declaration order.
+ */
+function trashRuleTarget() {
+  return { id: 'TRASH', to: COPY.rules.trash, hint: COPY.ruleBoxes.trashHint };
+}
+
+/**
+ * The sender box starts ticked here, and only here. Somebody sending mail to
+ * Spam is nearly always saying the same about whatever that sender sends next,
+ * where a delete is as often about clearing space as about the sender.
+ */
+function spamRuleTarget() {
+  return { id: 'SPAM', to: COPY.rules.spam, hint: COPY.ruleBoxes.spamHint, senderChecked: true };
+}
+
+let confirmRuleTarget = null;
 
 /**
  * Whether an action can be started at all.
@@ -3477,6 +3534,59 @@ async function startTrash(picked) {
   // is what makes the button look like it worked, and a refused filter must not
   // read as the delete having failed.
   if (specs.length) void applyRules(specs, COPY.rules.trash);
+}
+
+/**
+ * Into Spam: a definitive move with a fixed destination.
+ *
+ * It is the same job Move dispatches — `SPAM` added, every other row shed — so
+ * the queue, the projection and the settlement need nothing new. It gets its
+ * own button because Spam is not in Move's list (a category-like state to most
+ * people, not a folder they pick), and a confirm rather than the move dialog
+ * because there is nothing to choose.
+ *
+ * The rule boxes are the delete dialog's set pointed at Spam, and follow the
+ * same where-is-this-true table: sender and domain wherever there is an
+ * address, subject only for a single message.
+ *
+ * @param {{ids: string[], line: string, rule?: object} | null} picked
+ */
+async function startSpam(picked) {
+  if (!picked) return;
+
+  // The removal set is built from the folder list, exactly as a move's is.
+  if (!currentGroups) {
+    flash(COPY.actions.foldersNotReady, 'error');
+    return;
+  }
+
+  const { ids, line, rule } = picked;
+
+  const { ok, specs } = await askConfirm({
+    verb: COPY.spam.verb,
+    count: ids.length,
+    where: COPY.spam.where,
+    text: COPY.spam.text(line),
+    button: COPY.spam.confirm,
+    rule: rule ?? null,
+    ruleTarget: spamRuleTarget(),
+  });
+  if (!ok || !openLabel) return;
+
+  dispatchBulk(
+    {
+      action: 'move',
+      ids,
+      add: ['SPAM'],
+      remove: shedding('SPAM'),
+      target: COPY.rules.spam,
+      source: openLabel.name,
+    },
+    { action: 'move', target: COPY.rules.spam }
+  );
+
+  // After the dispatch, for the same reason a move's rules are.
+  if (specs.length) void applyRules(specs, COPY.rules.spam);
 }
 
 /**
@@ -6406,6 +6516,9 @@ el.restore.addEventListener('click', async () => {
 el.move.addEventListener('click', async () => {
   if (await requireCapability('write')) startMove(resolveSelection());
 });
+el.spam.addEventListener('click', async () => {
+  if (await requireCapability('write')) void startSpam(resolveSelection());
+});
 // No `resolveSelection` and no `canAct`: a block moves no mail, so there is
 // nothing to resolve to ids and no reason a running job should hold it up —
 // filters are a different Gmail surface with its own quota.
@@ -6491,6 +6604,9 @@ el.mailRestore.addEventListener('click', async () => {
 });
 el.mailMove.addEventListener('click', async () => {
   if (await requireCapability('write')) startMove(resolveMailSelection());
+});
+el.mailSpam.addEventListener('click', async () => {
+  if (await requireCapability('write')) void startSpam(resolveMailSelection());
 });
 el.mailBlock.addEventListener('click', async () => {
   if (await requireCapability('rules')) void startBlock(blockOpenSender());
@@ -6589,7 +6705,7 @@ for (const box of [el.ruleSender, el.ruleDomain, el.ruleSubject]) {
 for (const box of [el.trashRuleSender, el.trashRuleDomain, el.trashRuleSubject]) {
   box.addEventListener('change', () => {
     syncDomainLock(TRASH_RULE_BOXES);
-    paintRuleHint(TRASH_RULE_BOXES, confirmRule, { to: COPY.rules.trash, hint: COPY.ruleBoxes.trashHint });
+    paintRuleHint(TRASH_RULE_BOXES, confirmRule, confirmRuleTarget ?? trashRuleTarget());
   });
 }
 
@@ -6605,6 +6721,9 @@ el.messageRestore.addEventListener('click', async () => {
 });
 el.messageMove.addEventListener('click', async () => {
   if (await requireCapability('write')) startMove(resolveOpenMessage());
+});
+el.messageSpam.addEventListener('click', async () => {
+  if (await requireCapability('write')) void startSpam(resolveOpenMessage());
 });
 el.messageBlock.addEventListener('click', async () => {
   if (await requireCapability('rules')) void startBlock(blockOpenSender());

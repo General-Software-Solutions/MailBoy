@@ -50,7 +50,7 @@
      a heading is not a control. */
   --heading: #2656c9; /* 6.4:1 */
 
-  /* Four intents, one per thing an action button can do. Every one is legible
+  /* Five intents, one per thing an action button can do. Every one is legible
      as text on --surface *and* as a fill behind --on-fill, because the same
      hue has to work at both emphases — see the .btn--* intent block. */
   --accent: #2f6df6; /* 4.5:1 — move, and the primary everywhere else */
@@ -61,6 +61,8 @@
   --warn-soft: #fdf1e0;
   --success: #1f7a43; /* 5.4:1 — restore */
   --success-soft: #e6f3ea;
+  --spam: #7b4bc4; /* 5.3:1 — spam: a filing decision, not a delete */
+  --spam-soft: #f1ebfb;
 
   /* Text on a filled button. White works on every light-mode fill and on none
      of the dark-mode ones, which is why it is a token and not a literal. */
@@ -113,6 +115,8 @@
     --warn-soft: #2e2417;
     --success: #5cba7d; /* 7.4:1 */
     --success-soft: #172c1f;
+    --spam: #b99af2; /* 7.0:1 */
+    --spam-soft: #251f33;
     /* Every dark-mode intent is a light tint, so white on it is 2.5:1 or worse.
        Filled buttons take the page ground as their text instead — 7:1 and up.
        This was wrong before the intents existed: .btn--primary was hardcoded
@@ -299,6 +303,14 @@ body {
   --intent-soft: var(--success-soft);
 }
 
+/* A move with an opinion: the mail goes to Spam and Gmail learns from it. Its
+   own hue, because it sits between Block and Delete and borrowing either one's
+   would make two neighbours read as the same action. */
+.btn--spam {
+  --intent: var(--spam);
+  --intent-soft: var(--spam-soft);
+}
+
 /* Sizes to its content. It used to be full-width by default, which meant three
    separate `width: auto` overrides for the places that are not a dialog or the
    Welcome screen — and one more for every new place a filled button appears.
@@ -335,6 +347,7 @@ body {
 .btn--ghost.btn--danger,
 .btn--ghost.btn--block,
 .btn--ghost.btn--restore,
+.btn--ghost.btn--spam,
 .btn--ghost.btn--move {
   color: var(--intent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--intent) 55%, var(--edge));
@@ -1186,6 +1199,7 @@ body {
 .btn--ghost.btn--danger:hover:not(:disabled),
 .btn--ghost.btn--block:hover:not(:disabled),
 .btn--ghost.btn--restore:hover:not(:disabled),
+.btn--ghost.btn--spam:hover:not(:disabled),
 .btn--ghost.btn--move:hover:not(:disabled) {
   background: var(--intent-soft);
   color: var(--intent);
