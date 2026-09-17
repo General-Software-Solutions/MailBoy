@@ -53,13 +53,20 @@ jobs:
           }
 
       - name: Build the zip
+        id: build
         env:
           MAILBOY_CLIENT_ID: ${{ secrets.MAILBOY_CLIENT_ID }}
-        run: ./tools/package.ps1 -OutDir dist
+        run: |
+          ./tools/package.ps1 -OutDir dist
+          $version = (Get-Content -Raw manifest.template.json | ConvertFrom-Json).version
+          "zip=dist/mailboy-$version.zip" >> $env:GITHUB_OUTPUT
 
+      # archive: false uploads the zip as it is. Without it GitHub wraps the
+      # artifact in a zip of its own, and the store wants the inner one. The
+      # artifact is then named after the file, and `name` is ignored.
       - uses: actions/upload-artifact@v7
         with:
-          name: mailboy-${{ github.ref_name }}
-          path: dist/*.zip
+          path: ${{ steps.build.outputs.zip }}
+          archive: false
           if-no-files-found: error
           retention-days: 30

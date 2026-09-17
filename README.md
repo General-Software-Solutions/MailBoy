@@ -302,8 +302,8 @@ To release a new version:
    The workflow fails if the tag and the manifest version disagree. It can also
    be started by hand from the **Actions** tab, without a tag.
 4. Open the finished run under **Actions** and download the zip from its
-   **Artifacts** section (kept 30 days). GitHub delivers it wrapped in a second
-   zip — extract that once, and upload the `mailboy-<version>.zip` inside.
+   **Artifacts** section (kept 30 days). It is `mailboy-<version>.zip` itself,
+   ready to upload — do not extract it.
 5. In the [Developer Dashboard](https://chrome.google.com/webstore/devconsole),
    open MailBoy → **Package** → **Upload new package**, update the listing if
    the release needs it, and **Submit for review**. Existing users receive the
