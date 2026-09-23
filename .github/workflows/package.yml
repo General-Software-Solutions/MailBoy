@@ -101,6 +101,13 @@ jobs:
           ./tools/package.ps1 -OutDir dist -Dev
           $version = (Get-Content -Raw manifest.template.json | ConvertFrom-Json).version
           "zip=dist/mailboy-$version.zip" >> $env:GITHUB_OUTPUT
+          # The crx is named for whether it was signed, and the upload step wants
+          # that name as well as the path, so it is read off disk rather than
+          # rebuilt from the version.
+          $crx = Get-ChildItem dist -Filter *.crx | Select-Object -First 1
+          if (-not $crx) { Write-Error 'The build produced no .crx.'; exit 1 }
+          "crx=dist/$($crx.Name)" >> $env:GITHUB_OUTPUT
+          "crxname=$($crx.Name)" >> $env:GITHUB_OUTPUT
 
       - name: Put the signing key back
         if: always()
@@ -128,6 +135,8 @@ jobs:
             "| ``mailboy-$version.crx`` | $(& $tick $signed) | upload when verified CRX uploads are on |"
             "| ``mailboy-${version}_unsigned.crx`` | $(& $tick $unsigned) | **not uploadable** - signed with a throwaway key |"
             "| ``mailboy-$version-dev-unpacked-only.zip`` | $(& $tick $dev) | **never upload** - load unpacked to test this build |"
+            ''
+            'The crx downloads inside a zip of its own, so extract it before uploading. That wrapper is deliberate: Chrome grabs a bare `.crx` link and tries to *install* it, then refuses with `CRX_REQUIRED_PROOF_MISSING`, because only the store can add the proof it asks of an off-store package. No crx built here can be installed by hand - load the dev zip unpacked to try a build out.'
           )
           if (-not $signed) {
             $summary += '', 'No `MAILBOY_CRX_KEY` secret, so the crx is signed with a throwaway key. Upload the zip, or sign locally.'
@@ -140,9 +149,10 @@ jobs:
           $summary -join "`n" >> $env:GITHUB_STEP_SUMMARY
 
       # archive: false uploads the file as it is. Without it GitHub wraps the
-      # artifact in a zip of its own, and the store wants the inner one. The
-      # artifact is then named after the file, and `name` is ignored — which is
-      # also why the zip and the crx are two steps rather than one glob.
+      # artifact in a zip of its own, and the store wants the inner one — a zip
+      # inside a zip is one unwrapping nobody expects. The artifact is then
+      # named after the file, and `name` is ignored. The crx below is the one
+      # upload that wants the wrapper, which is why they are separate steps.
       - uses: actions/upload-artifact@v7
         with:
           path: ${{ steps.build.outputs.zip }}
@@ -150,12 +160,19 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # dist/*.crx, because the name says whether it was signed: mailboy-<v>.crx
-      # when the secret was there, mailboy-<v>_unsigned.crx when it was not.
+      # The one upload that keeps GitHub's own zip wrapper. Chrome hijacks any
+      # .crx it is navigated to and hands it to the extension installer, which
+      # then refuses it with CRX_REQUIRED_PROOF_MISSING — only the Web Store can
+      # add the publisher proof Chrome demands of an off-store crx, so this file
+      # is for *uploading*, never for installing. Wrapped, the artifact link is
+      # an ordinary download; extract the crx before uploading it. The artifact
+      # is named after the file, as the other two are, because that name says
+      # whether it was signed: mailboy-<v>.crx when the secret was there,
+      # mailboy-<v>_unsigned.crx when it was not.
       - uses: actions/upload-artifact@v7
         with:
-          path: dist/*.crx
-          archive: false
+          name: ${{ steps.build.outputs.crxname }}
+          path: ${{ steps.build.outputs.crx }}
           if-no-files-found: error
           retention-days: 30
 

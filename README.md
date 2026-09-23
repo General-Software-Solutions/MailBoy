@@ -307,7 +307,9 @@ To release a new version:
    built and which file to upload, and says so again as a notice when an
    optional secret is missing. Download from **Artifacts** (kept 30 days):
    upload the `.crx` if verified CRX uploads are on for the item, the `.zip`
-   otherwise; neither needs extracting. The third artifact,
+   otherwise. The `.zip` is uploaded as it is and needs no extracting; the
+   `.crx` arrives inside a zip of its own and has to come out of it first —
+   see *Why the crx downloads zipped* below. The third artifact,
    `-dev-unpacked-only`, is for testing the build and must not be uploaded —
    see below.
 5. In the [Developer Dashboard](https://chrome.google.com/webstore/devconsole),
@@ -417,9 +419,33 @@ variable, then that export. All three hold a *path*; the repository secret
 further down is the one place that holds the key itself.
 
 **Without a key the build still produces a `.crx`**, signed with a throwaway key
-and named `mailboy-<version>_unsigned.crx`. It installs in Chrome for testing
-and the store will refuse it once verification is on — the name is the warning,
-and the build says so as well.
+and named `mailboy-<version>_unsigned.crx`. The store will refuse it once
+verification is on — the name is the warning, and the build says so as well. It
+is no use for testing either; see the next section for why no crx built here can
+be installed by hand.
+
+#### Why the crx downloads zipped
+
+**A `.crx` is for uploading, never for installing**, and Chrome will not let you
+discover that gently. Click a link to a bare `.crx` and Chrome hands it to the
+extension installer instead of saving it, which then refuses it:
+`Package is invalid: CRX_REQUIRED_PROOF_MISSING`.
+
+That error is not about the signature `tools/crx.mjs` writes, which is correct.
+Since Chrome 75 an off-store package must also carry a **publisher proof** — a
+second signature that only the Chrome Web Store adds, when it re-signs a package
+on the way out. Nothing local can produce one, so a self-signed crx cannot be
+installed by drag-and-drop either, whether it was signed with the real key or a
+throwaway one. The only ways round it are enterprise policy and the store
+itself, and neither is a way to try a build out.
+
+So the workflow lets GitHub wrap that one artifact in a zip of its own: the link
+is then an ordinary download, and the crx comes out of it before it goes to the
+Developer Dashboard. The other two artifacts are uploaded as they are, since
+neither is a file Chrome has opinions about.
+
+**To try a build out, load the `-dev-unpacked-only` zip unpacked** — that is
+what it is for, and the only build that can sign in.
 
 **Signing in CI is the weaker arrangement**, and the workflow supports it
 anyway. Add a repository secret named `MAILBOY_CRX_KEY` holding the whole
