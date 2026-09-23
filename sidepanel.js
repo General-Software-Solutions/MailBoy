@@ -889,9 +889,23 @@ function paintRecords(records) {
     // A fresh count arrives before its size has been recomputed. Where the
     // count is unchanged the old size still describes the same messages, so
     // keep showing it rather than flashing a spinner over a number we have.
+    //
+    // **`bytes`, `pending` and `estimated` are one answer and have to travel
+    // together** — `figuresFor` emits the three in a single object because
+    // `estimated` is what the bands say this row's *unread* mail is worth, and
+    // `pending` is how much of it there is. Carrying the first and last of them
+    // forward and dropping `pending` leaves a record claiming an estimate over
+    // an unknown amount of unread mail, which is not a state the renderer has
+    // any reading for: it draws the row `~` and then words the tooltip from a
+    // `pending` that is not there.
     const record =
       incoming && incoming.bytes === undefined && previous?.bytes !== undefined
-        ? { ...incoming, bytes: previous.bytes, estimated: previous.estimated }
+        ? {
+            ...incoming,
+            bytes: previous.bytes,
+            pending: previous.pending,
+            estimated: previous.estimated,
+          }
         : incoming;
 
     // Once a row has been fully worked out, it never goes back to a spinner: a
