@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MailBoy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Clear out and organize your Gmail in bulk: bin what you never wanted, file what you keep, block the rest.",
   "minimum_chrome_version": "114",
   "permissions": ["identity", "storage", "unlimitedStorage", "sidePanel", "alarms"],
