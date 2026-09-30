@@ -193,7 +193,7 @@
       </a>
 
       <h1>MailBoy — Privacy Policy</h1>
-      <p class="updated">Last updated: 8 September 2026</p>
+      <p class="updated">Last updated: 30 September 2026</p>
 
       <p class="lede">
         MailBoy is a Chrome extension that shows you what is filling up your
@@ -445,13 +445,137 @@
         yourself.
       </p>
 
-      <h2>Security</h2>
+      <h2>How your data is protected</h2>
       <p>
-        MailBoy holds no credentials of yours. Sign-in goes through Google's own
-        hosted consent screen, so your password is never seen by the extension.
-        The resulting access token lives in memory only, expires after about an
-        hour, and is discarded when you log out or close the browser. Because
-        there is no server, there is no remote copy of your data to be breached.
+        Google treats Gmail data as sensitive, and so does MailBoy. These are the
+        safeguards that apply to everything MailBoy reads from your Google
+        account.
+      </p>
+
+      <h3>No server, so no remote copy</h3>
+      <p>
+        MailBoy has no backend, database or cloud storage. Your data goes
+        straight from Google to your browser and stays there. There is no copy
+        held by the developer or any third party that could be breached, leaked
+        or accessed by staff. No human reads your data, other than you.
+      </p>
+
+      <h3>Encrypted in transit</h3>
+      <p>
+        Every request MailBoy makes goes directly to Google over HTTPS, which is
+        encrypted with TLS. The extension is only allowed to contact Google's
+        sign-in and Gmail API addresses (<code>accounts.google.com</code>,
+        <code>oauth2.googleapis.com</code>,
+        <code>openidconnect.googleapis.com</code> and
+        <code>gmail.googleapis.com</code>). Chrome blocks it from reaching any
+        other address, and it never uses unencrypted HTTP.
+      </p>
+
+      <h3>Protected at rest on your device</h3>
+      <ul>
+        <li>
+          <strong>Minimal data.</strong> The only mail data saved to disk is each
+          message's ID, size, arrival date and sender address. Subjects,
+          previews, message bodies, recipients and attachments are never saved.
+        </li>
+        <li>
+          <strong>Isolated storage.</strong> Saved data is kept in Chrome's
+          private storage for the extension, inside your own browser profile.
+          Chrome does not let websites or other extensions read it.
+        </li>
+        <li>
+          <strong>Your device's own protection.</strong> Your computer's user
+          account protects this data, the same way it protects the rest of your
+          browser profile. MailBoy does not add a separate layer of encryption,
+          because the key would have to be stored right next to the data. We
+          recommend turning on your device's disk encryption (such as BitLocker
+          on Windows or FileVault on macOS).
+        </li>
+        <li>
+          <strong>Kept apart by account.</strong> Each Google account's data is
+          filed under that account's ID, so one mailbox's data is never shown
+          to, or mixed with, another's.
+        </li>
+        <li>
+          <strong>Limited retention.</strong> Saved data is erased 7 days after
+          you log out, or immediately if you choose to erase it (see
+          <em>How long it is kept</em> above).
+        </li>
+      </ul>
+
+      <h3>Sign-in and access tokens</h3>
+      <ul>
+        <li>
+          You sign in on Google's own page, using OAuth 2.0. MailBoy never sees
+          your password.
+        </li>
+        <li>
+          Each sign-in carries a random one-time value that MailBoy checks when
+          Google replies. This stops a forged sign-in response from being
+          accepted.
+        </li>
+        <li>
+          The access token Google issues lasts about an hour. It is held in
+          memory only (<code>chrome.storage.session</code>), is never written to
+          disk, and is gone when the browser closes. MailBoy never receives a
+          long-lived refresh token, and the extension package contains no client
+          secret.
+        </li>
+        <li>
+          When you log out, MailBoy asks Google to revoke the token. It also
+          records that you logged out, so it will not sign you back in silently.
+        </li>
+      </ul>
+
+      <h3>Only the access it needs</h3>
+      <ul>
+        <li>
+          MailBoy asks only for the permissions listed above. You can decline
+          each Gmail permission on its own.
+        </li>
+        <li>
+          It never asks for <code>https://mail.google.com/</code>, the permission
+          that allows permanent deletion. Anything MailBoy removes goes to Trash,
+          where you can recover it for 30 days.
+        </li>
+        <li>
+          Every action that moves or removes mail, or creates or deletes a rule,
+          shows a confirmation first.
+        </li>
+      </ul>
+
+      <h3>Protection against harmful emails</h3>
+      <ul>
+        <li>
+          Messages are shown as plain text, never as web pages. Any code inside
+          an email is never run.
+        </li>
+        <li>
+          Images, styles and other remote content inside an email are never
+          loaded. This also stops senders from tracking when you open an email.
+        </li>
+        <li>
+          All of MailBoy's code ships inside the extension package. Chrome's
+          security rules for extensions (Manifest V3) do not let it load or run
+          code from anywhere else.
+        </li>
+      </ul>
+
+      <h3>Diagnostics stay on your device</h3>
+      <p>
+        MailBoy writes short diagnostic messages to your browser's developer
+        console to help find problems. They contain only message IDs and
+        counts, never email content, and they are never sent anywhere. They
+        leave your computer only if you choose to share them.
+      </p>
+
+      <h3>Reporting a security problem</h3>
+      <p>
+        If you think you have found a security problem, email
+        <a href="mailto:generalsoftwaresolutionspvt@gmail.com">generalsoftwaresolutionspvt@gmail.com</a>
+        with "MailBoy security" in the subject line. You will get a reply
+        within 7 days. See also our
+        <a href="https://github.com/General-Software-Solutions/MailBoy/blob/main/SECURITY.md" rel="noopener noreferrer">security policy</a>.
       </p>
 
       <h2>Children</h2>
